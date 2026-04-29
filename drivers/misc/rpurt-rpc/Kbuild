@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Kbuild file for the rpurt-rpc out-of-tree kernel module.
+#
+# $(src) is the directory containing this Kbuild file. The shared UAPI
+# header lives at <repo>/include/uapi/rpurt-rpc/rpurt_rpc.h, three levels
+# above this file.
+
+ccflags-y += -I$(src)/../../../include/uapi
+ccflags-y += -I$(src)/../../../include
+
+obj-m += rpurt_rpc.o
