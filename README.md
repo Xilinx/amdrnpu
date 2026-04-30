@@ -10,16 +10,20 @@ the included meta-layer.
 
 ```
 rpu-rt-rpc/
-├── drivers/misc/rpurt-rpc/    # kernel module (out-of-tree)
-│   ├── rpurt_rpc.c
+├── drivers/misc/rpurt-rpc/    # kernel module (out-of-tree, rpmsg-bound)
+│   ├── rpurt_rpc.c            # transparent byte pipe over rpmsg
 │   ├── Kbuild
 │   └── Makefile
 ├── include/uapi/rpurt-rpc/    # shared kernel/user ABI header
 │   └── rpurt_rpc.h
 ├── lib/                       # user-space runtime library (CMake)
 │   ├── CMakeLists.txt
-│   ├── include/rpurt_rpc/rpurt_rpc.h
-│   ├── src/rpurt_rpc.c
+│   ├── include/rpurt_rpc/rpurt_rpc.h    # public lib API
+│   ├── src/rpurt_rpc.c                  # lib implementation
+│   ├── src/aie_msg.h          # vendored firmware mailbox wire format,
+│   │                          # PRIVATE to lib (not installed); the
+│   │                          # driver is currently a transparent byte
+│   │                          # pipe so all framing happens here
 │   ├── examples/rpurt_rpc_example.c
 │   └── cmake/
 └── meta-rpurt-rpc/            # Yocto/OE layer
@@ -112,26 +116,49 @@ See [`meta-rpurt-rpc/README.md`](meta-rpurt-rpc/README.md) for more.
 
 ## Runtime usage
 
+The driver is a transparent byte pipe: `RPURT_RPC_IOC_SEND` calls
+`rpmsg_send()` on the bound endpoint; `RPURT_RPC_IOC_RECV` returns the
+next frame the rpmsg core delivered for that endpoint. Wire framing
+(message headers, opcodes, etc.) is owned by user-space.
+
+For the AIE management mailbox, the firmware wire format is vendored
+privately inside the lib in
+[`lib/src/aie_msg.h`](lib/src/aie_msg.h) (not installed, not part of
+the lib's public ABI); clients only see the high-level helper:
+
 ```c
 #include <rpurt_rpc/rpurt_rpc.h>
 
-rpurt_rpc_handle *h = rpurt_rpc_open();             /* /dev/rpurt_rpc */
-struct rpurt_rpc_info info;
-rpurt_rpc_get_info(h, &info);
+rpurt_rpc_handle *h = rpurt_rpc_open_path("/dev/rpurt_rpc.0");
+if (!h) { /* errno set */ }
 
-rpurt_rpc_send(h, /*opcode=*/0x1, "ping", 5);
-
-struct rpurt_rpc_msg msg;
-rpurt_rpc_recv(h, &msg);
+if (rpurt_rpc_aie_echo(h, 0x12345678u, 0xDEADBEEFu) == 0)
+    /* firmware echoed both values back unchanged */;
 
 rpurt_rpc_close(h);
 ```
 
-The kernel driver in this skeleton implements a loopback transport (any
-message sent with `RPURT_RPC_IOC_SEND` is queued back for
-`RPURT_RPC_IOC_RECV`) so the library can be exercised end-to-end before
-a real RPU mailbox/OpenAMP transport is wired in. Replace the
-placeholder transport in `drivers/misc/rpurt-rpc/rpurt_rpc.c` when ready.
+Lower-level callers can still construct their own framing and use the
+generic `rpurt_rpc_send()` / `rpurt_rpc_recv()` envelope - the kernel
+forwards `msg.data[0..len]` verbatim to `rpmsg_send()` on the bound
+endpoint.
+
+### Verifying against the firmware ECHO
+
+The `rpurt_rpc_example` binary (built by default with the lib) issues a
+single AIE ECHO round-trip and reports pass/fail:
+
+```sh
+# Default values 0x12345678 / 0xDEADBEEF
+rpurt_rpc_example /dev/rpurt_rpc.0
+
+# Custom values
+rpurt_rpc_example /dev/rpurt_rpc.0 0xCAFEBABE 0x0BADC0DE
+```
+
+The TX bytes are byte-identical to those produced by the firmware
+team's `apu_aie_test echo` tool, so the same firmware that responds to
+`apu_aie_test` will respond to this binary unchanged.
 
 ## License
 

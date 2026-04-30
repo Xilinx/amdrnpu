@@ -28,13 +28,6 @@ endif()
 set(RPURT_RPC_UAPI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../include/uapi"
     CACHE PATH "Path to the shared UAPI headers")
 
-# Note: the vendored firmware mailbox wire format (lib/src/aie_msg.h)
-# is intentionally NOT exposed as a public include directory and is
-# NOT installed - it's an implementation detail of how this lib
-# speaks to the firmware, not part of the lib's public ABI.  If the
-# driver ever takes over framing (xdna-driver style), the header
-# moves to drivers/misc/rpurt-rpc/ along with that change.
-
 set(RPURT_RPC_PUBLIC_HEADERS
     include/rpurt_rpc/rpurt_rpc.h
 )

@@ -151,12 +151,6 @@ const char *rpurt_rpc_version(void)
 static int aie_send_msg(rpurt_rpc_handle *h, uint32_t opcode,
                         const void *payload, size_t payload_len)
 {
-    /*
-     * One-shot stack buffer sized to the kernel's max payload. The
-     * pragma-pack(4) layout in aie_msg.h guarantees no padding inside
-     * or after the header, so a flat buffer with header at offset 0
-     * and payload immediately after matches the wire format.
-     */
     uint8_t  buf[sizeof(struct rpurt_rpc_aie_msg_header) +
                  RPURT_RPC_MAX_PAYLOAD];
     struct rpurt_rpc_aie_msg_header *hdr = (struct rpurt_rpc_aie_msg_header *)buf;
