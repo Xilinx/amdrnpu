@@ -28,11 +28,6 @@
 
 #define RPURT_RPC_FIFO_DEPTH	16
 
-/*
- * Per-channel device state.  One of these is allocated for each rpmsg
- * endpoint our driver binds to.  Reference counted: the rpmsg binding
- * owns one ref while bound; each open fd holds an additional ref.
- */
 struct rpurt_rpc_dev {
 	struct kref		  refcount;
 	struct miscdevice	  mdev;
@@ -44,11 +39,7 @@ struct rpurt_rpc_dev {
 	char			  dev_name[32];
 };
 
-/*
- * Monotonic instance counter for naming /dev/rpurt_rpc.N.  We only ever
- * increment so disconnect/reconnect of the same remoteproc still gets a
- * fresh minor name (avoids stale-fd confusion in userspace).
- */
+/* Monotonic instance counter for naming /dev/rpurt_rpc.N */
 static atomic_t rpurt_rpc_instance_counter = ATOMIC_INIT(0);
 
 static void rpurt_rpc_dev_release(struct kref *ref)
@@ -309,13 +300,6 @@ static void rpurt_rpc_rpmsg_remove(struct rpmsg_device *rpdev)
 	dev_info(&rpdev->dev, "rpurt-rpc: removing /dev/%s\n", dev->dev_name);
 	misc_deregister(&dev->mdev);
 
-	/*
-	 * Fence the send path: after synchronize_rcu() returns, no caller
-	 * is inside rcu_read_lock() with a stale rpdev, so we can let the
-	 * rpmsg core tear the channel down without UAF risk.  Then wake
-	 * any blocked IOC_RECV waiters so they observe -ENODEV via the
-	 * !rcu_access_pointer(dev->rpdev) check on their wakeup edge.
-	 */
 	rcu_assign_pointer(dev->rpdev, NULL);
 	synchronize_rcu();
 	wake_up_interruptible_all(&dev->rxwq);

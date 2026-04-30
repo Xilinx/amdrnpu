@@ -159,12 +159,12 @@ static int aie_send_msg(rpurt_rpc_handle *h, uint32_t opcode,
     if (payload_len > sizeof(buf) - sizeof(*hdr))
         return -E2BIG;
 
-    rpurt_rpc_aie_msg_init_header(hdr, opcode, /*msg_id=*/0,
-                                  (uint32_t)payload_len);
+    rpurt_rpc_aie_msg_init_header(hdr, opcode, 0, (uint32_t)payload_len);
     if (payload_len)
         memcpy(buf + sizeof(*hdr), payload, payload_len);
 
     total = sizeof(*hdr) + payload_len;
+
     return rpurt_rpc_send(h, opcode, buf, total);
 }
 

@@ -100,11 +100,6 @@ RPURT_RPC_API const char *rpurt_rpc_version(void);
  * RPURT_RPC_IOC_RECV, and validates that the firmware echoed @val1 and
  * @val2 verbatim with status=SUCCESS.
  *
- * Returns 0 if the firmware ECHO matches, or a negative errno:
- *   -ENODEV   channel is down (firmware not connected),
- *   -EBADMSG  response shorter than the AIE header+resp,
- *   -EIO      firmware reported a non-zero status,
- *   -EBADE    val1 / val2 mismatch.
  */
 RPURT_RPC_API int rpurt_rpc_aie_echo(rpurt_rpc_handle *h,
                                      uint32_t val1, uint32_t val2);
