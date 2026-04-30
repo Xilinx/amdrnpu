@@ -13,7 +13,14 @@
 #include <linux/types.h>
 
 #define RPURT_RPC_DEVICE_NAME	"rpurt_rpc"
-#define RPURT_RPC_DEVICE_PATH	"/dev/" RPURT_RPC_DEVICE_NAME
+/*
+ * Canonical path to the first probed RPU rpmsg channel.  The kernel
+ * driver names devices /dev/rpurt_rpc.0, /dev/rpurt_rpc.1, ... in the
+ * order their rpmsg-aie-mgmt channels are announced.  Single-RPU
+ * callers can use this default; multi-RPU callers should pass an
+ * explicit "/dev/rpurt_rpc.N" path to rpurt_rpc_open_path().
+ */
+#define RPURT_RPC_DEVICE_PATH	"/dev/" RPURT_RPC_DEVICE_NAME ".0"
 
 /* Bump on any incompatible change to the structures below. */
 #define RPURT_RPC_ABI_VERSION	1

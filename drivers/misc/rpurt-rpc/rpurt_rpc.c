@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * rpurt-rpc - simple misc character driver providing an ioctl-based
- * RPC channel between userspace and the RPU runtime.
+ * rpurt-rpc - misc character driver providing an ioctl-based RPC channel
+ * between userspace and an RPU runtime, bound to an rpmsg endpoint.
  *
  * This is a skeleton implementation: it registers a misc device at
  * /dev/rpurt_rpc, accepts the ioctls defined in the UAPI header, and
@@ -9,14 +9,17 @@
  * end-to-end before the real RPU transport is wired in.
  */
 
-#include <linux/cdev.h>
+#include <linux/atomic.h>
 #include <linux/fs.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/kfifo.h>
+#include <linux/kref.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/rcupdate.h>
+#include <linux/rpmsg.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <linux/wait.h>
@@ -25,24 +28,66 @@
 
 #define RPURT_RPC_FIFO_DEPTH	16
 
+/*
+ * Per-channel device state.  One of these is allocated for each rpmsg
+ * endpoint our driver binds to.  Reference counted: the rpmsg binding
+ * owns one ref while bound; each open fd holds an additional ref.
+ */
 struct rpurt_rpc_dev {
-	struct miscdevice	mdev;
-	struct mutex		lock;
-	wait_queue_head_t	rxwq;
+	struct kref		  refcount;
+	struct miscdevice	  mdev;
+	struct rpmsg_device __rcu *rpdev;
+	/* only one ioctl at a time can touch dev state; rx path uses kfifo lock */
+	struct mutex		  lock;
+	wait_queue_head_t	  rxwq;
 	DECLARE_KFIFO(rxfifo, struct rpurt_rpc_msg, RPURT_RPC_FIFO_DEPTH);
+	char			  dev_name[32];
 };
 
-static struct rpurt_rpc_dev *g_dev;
+/*
+ * Monotonic instance counter for naming /dev/rpurt_rpc.N.  We only ever
+ * increment so disconnect/reconnect of the same remoteproc still gets a
+ * fresh minor name (avoids stale-fd confusion in userspace).
+ */
+static atomic_t rpurt_rpc_instance_counter = ATOMIC_INIT(0);
+
+static void rpurt_rpc_dev_release(struct kref *ref)
+{
+	struct rpurt_rpc_dev *dev =
+		container_of(ref, struct rpurt_rpc_dev, refcount);
+
+	mutex_destroy(&dev->lock);
+	kfree(dev);
+}
+
+static inline void rpurt_rpc_dev_get(struct rpurt_rpc_dev *dev)
+{
+	kref_get(&dev->refcount);
+}
+
+static inline void rpurt_rpc_dev_put(struct rpurt_rpc_dev *dev)
+{
+	kref_put(&dev->refcount, rpurt_rpc_dev_release);
+}
 
 static int rpurt_rpc_open(struct inode *inode, struct file *filp)
 {
-	filp->private_data = g_dev;
+	struct miscdevice *mdev = filp->private_data;
+	struct rpurt_rpc_dev *dev =
+		container_of(mdev, struct rpurt_rpc_dev, mdev);
+
+	rpurt_rpc_dev_get(dev);
+	filp->private_data = dev;
 	return 0;
 }
 
 static int rpurt_rpc_release(struct inode *inode, struct file *filp)
 {
+	struct rpurt_rpc_dev *dev = filp->private_data;
+
 	filp->private_data = NULL;
+	if (dev)
+		rpurt_rpc_dev_put(dev);
 	return 0;
 }
 
@@ -63,6 +108,7 @@ static long rpurt_rpc_ioctl_send(struct rpurt_rpc_dev *dev,
 				 unsigned long arg)
 {
 	struct rpurt_rpc_msg *msg;
+	struct rpmsg_device *rpdev;
 	long ret = 0;
 
 	msg = kmalloc(sizeof(*msg), GFP_KERNEL);
@@ -74,24 +120,21 @@ static long rpurt_rpc_ioctl_send(struct rpurt_rpc_dev *dev,
 		goto out;
 	}
 
-	if (msg->flags || msg->len > RPURT_RPC_MAX_PAYLOAD) {
+	if (msg->flags || msg->len == 0 ||
+	    msg->len > RPURT_RPC_MAX_PAYLOAD) {
 		ret = -EINVAL;
 		goto out;
 	}
 
-	/*
-	 * Placeholder transport: loop the message back into the rx fifo so
-	 * the userspace runtime can validate the round-trip. Replace this
-	 * with the real RPU mailbox/ipi/openamp transport when wired up.
-	 */
-	mutex_lock(&dev->lock);
-	if (kfifo_is_full(&dev->rxfifo)) {
-		ret = -EAGAIN;
-	} else {
-		kfifo_in(&dev->rxfifo, msg, 1);
-		wake_up_interruptible(&dev->rxwq);
+	rcu_read_lock();
+	rpdev = rcu_dereference(dev->rpdev);
+	if (!rpdev) {
+		rcu_read_unlock();
+		ret = -ENODEV;
+		goto out;
 	}
-	mutex_unlock(&dev->lock);
+	ret = rpmsg_send(rpdev->ept, msg->data, msg->len);
+	rcu_read_unlock();
 
 out:
 	kfree(msg);
@@ -116,13 +159,19 @@ static long rpurt_rpc_ioctl_recv(struct rpurt_rpc_dev *dev,
 		}
 		mutex_unlock(&dev->lock);
 
+		if (!rcu_access_pointer(dev->rpdev)) {
+			ret = -ENODEV;
+			goto out;
+		}
+
 		if (filp->f_flags & O_NONBLOCK) {
 			ret = -EAGAIN;
 			goto out;
 		}
 
 		if (wait_event_interruptible(dev->rxwq,
-					     !kfifo_is_empty(&dev->rxfifo))) {
+					     !kfifo_is_empty(&dev->rxfifo) ||
+					     !rcu_access_pointer(dev->rpdev))) {
 			ret = -ERESTARTSYS;
 			goto out;
 		}
@@ -167,55 +216,144 @@ static const struct file_operations rpurt_rpc_fops = {
 	.release	= rpurt_rpc_release,
 	.unlocked_ioctl	= rpurt_rpc_ioctl,
 	.compat_ioctl	= rpurt_rpc_ioctl,
-	/*
-	 * Intentionally no .llseek: the device is ioctl-only and does not
-	 * support seek. Older kernels (< 6.12) used .llseek = no_llseek for
-	 * this, but no_llseek was removed in v6.12; leaving the field unset
-	 * gives the safe default on every supported kernel.
-	 */
 };
 
-static int __init rpurt_rpc_init(void)
+static int rpurt_rpc_rpmsg_cb(struct rpmsg_device *rpdev, void *data,
+			      int len, void *priv, u32 src)
+{
+	struct rpurt_rpc_dev *dev = dev_get_drvdata(&rpdev->dev);
+	struct rpurt_rpc_msg *msg;
+
+	if (!dev)
+		return -ENODEV;
+
+	if (len <= 0 || len > RPURT_RPC_MAX_PAYLOAD) {
+		dev_warn(&rpdev->dev,
+			 "rpurt-rpc: dropping rx frame: len=%d (max=%u)\n",
+			 len, RPURT_RPC_MAX_PAYLOAD);
+		return -EINVAL;
+	}
+
+	msg = kzalloc(sizeof(*msg), GFP_ATOMIC);
+	if (!msg)
+		return -ENOMEM;
+
+	msg->len = (__u32)len;
+	memcpy(msg->data, data, len);
+
+	mutex_lock(&dev->lock);
+	if (kfifo_is_full(&dev->rxfifo)) {
+		mutex_unlock(&dev->lock);
+		dev_warn_ratelimited(&rpdev->dev,
+				     "rpurt-rpc: rx fifo full, dropping frame\n");
+		kfree(msg);
+		return -ENOSPC;
+	}
+	kfifo_in(&dev->rxfifo, msg, 1);
+	mutex_unlock(&dev->lock);
+
+	wake_up_interruptible(&dev->rxwq);
+	kfree(msg);
+	return 0;
+}
+
+static int rpurt_rpc_rpmsg_probe(struct rpmsg_device *rpdev)
 {
 	struct rpurt_rpc_dev *dev;
-	int ret;
+	int idx, ret;
 
 	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
 	if (!dev)
 		return -ENOMEM;
 
+	kref_init(&dev->refcount);
 	mutex_init(&dev->lock);
 	init_waitqueue_head(&dev->rxwq);
 	INIT_KFIFO(dev->rxfifo);
+	rcu_assign_pointer(dev->rpdev, rpdev);
+
+	idx = atomic_fetch_inc(&rpurt_rpc_instance_counter);
+	snprintf(dev->dev_name, sizeof(dev->dev_name), "%s.%d",
+		 RPURT_RPC_DEVICE_NAME, idx);
 
 	dev->mdev.minor = MISC_DYNAMIC_MINOR;
-	dev->mdev.name  = RPURT_RPC_DEVICE_NAME;
+	dev->mdev.name  = dev->dev_name;
 	dev->mdev.fops  = &rpurt_rpc_fops;
 	dev->mdev.mode  = 0660;
 
 	ret = misc_register(&dev->mdev);
 	if (ret) {
+		dev_err(&rpdev->dev,
+			"rpurt-rpc: misc_register(%s) failed: %d\n",
+			dev->dev_name, ret);
+		mutex_destroy(&dev->lock);
 		kfree(dev);
 		return ret;
 	}
 
-	g_dev = dev;
-	pr_info("rpurt-rpc: registered /dev/%s (ABI v%u, max payload %u)\n",
-		RPURT_RPC_DEVICE_NAME, RPURT_RPC_ABI_VERSION,
-		RPURT_RPC_MAX_PAYLOAD);
+	dev_set_drvdata(&rpdev->dev, dev);
+	dev_info(&rpdev->dev,
+		 "rpurt-rpc: bound channel %s -> /dev/%s (ABI v%u, max payload %u)\n",
+		 rpdev->id.name, dev->dev_name, RPURT_RPC_ABI_VERSION,
+		 RPURT_RPC_MAX_PAYLOAD);
 	return 0;
 }
 
-static void __exit rpurt_rpc_exit(void)
+static void rpurt_rpc_rpmsg_remove(struct rpmsg_device *rpdev)
 {
-	struct rpurt_rpc_dev *dev = g_dev;
+	struct rpurt_rpc_dev *dev = dev_get_drvdata(&rpdev->dev);
 
 	if (!dev)
 		return;
 
+	dev_info(&rpdev->dev, "rpurt-rpc: removing /dev/%s\n", dev->dev_name);
 	misc_deregister(&dev->mdev);
-	kfree(dev);
-	g_dev = NULL;
+
+	/*
+	 * Fence the send path: after synchronize_rcu() returns, no caller
+	 * is inside rcu_read_lock() with a stale rpdev, so we can let the
+	 * rpmsg core tear the channel down without UAF risk.  Then wake
+	 * any blocked IOC_RECV waiters so they observe -ENODEV via the
+	 * !rcu_access_pointer(dev->rpdev) check on their wakeup edge.
+	 */
+	rcu_assign_pointer(dev->rpdev, NULL);
+	synchronize_rcu();
+	wake_up_interruptible_all(&dev->rxwq);
+
+	dev_set_drvdata(&rpdev->dev, NULL);
+	rpurt_rpc_dev_put(dev);
+}
+
+static const struct rpmsg_device_id rpurt_rpc_id_table[] = {
+	{ .name = "rpmsg-aie-mgmt" },
+	{ },
+};
+MODULE_DEVICE_TABLE(rpmsg, rpurt_rpc_id_table);
+
+static struct rpmsg_driver rpurt_rpc_rpmsg_driver = {
+	.drv = {
+		.name	= "rpurt_rpc",
+	},
+	.id_table	= rpurt_rpc_id_table,
+	.probe		= rpurt_rpc_rpmsg_probe,
+	.remove		= rpurt_rpc_rpmsg_remove,
+	.callback	= rpurt_rpc_rpmsg_cb,
+};
+
+static int __init rpurt_rpc_init(void)
+{
+	int ret = register_rpmsg_driver(&rpurt_rpc_rpmsg_driver);
+
+	if (ret)
+		pr_err("rpurt-rpc: register_rpmsg_driver failed: %d\n", ret);
+	else
+		pr_info("rpurt-rpc: registered (waiting for rpmsg channels)\n");
+	return ret;
+}
+
+static void __exit rpurt_rpc_exit(void)
+{
+	unregister_rpmsg_driver(&rpurt_rpc_rpmsg_driver);
 	pr_info("rpurt-rpc: unregistered\n");
 }
 
@@ -226,4 +364,3 @@ MODULE_AUTHOR("AMD");
 MODULE_DESCRIPTION("RPU runtime RPC misc driver");
 MODULE_LICENSE("GPL v2");
 MODULE_VERSION("0.1.0");
-MODULE_ALIAS("char-major-10-rpurt_rpc");
