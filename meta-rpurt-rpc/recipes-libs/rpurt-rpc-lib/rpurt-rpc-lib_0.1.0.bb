@@ -1,7 +1,7 @@
 SUMMARY = "RPU runtime RPC user-space library"
 DESCRIPTION = "Thin user-space wrapper around the rpurt-rpc kernel \
 driver's ioctl ABI. Lives under lib/ in the rpu-rt-rpc repository and \
-provides a small C API plus an example program."
+provides a small C API plus the rpurt_rpc_test CLI."
 HOMEPAGE = "https://github.com/Xilinx/rpu-rt-rpc"
 SECTION = "libs"
 
@@ -27,9 +27,11 @@ EXTRA_OECMAKE += " \
     -DRPURT_RPC_BUILD_EXAMPLES=ON \
 "
 
-# Package the example tool separately to keep the runtime library lean.
+# Package the test CLIs separately to keep the runtime library lean.
 PACKAGES =+ "${PN}-examples"
-FILES:${PN}-examples = "${bindir}/rpurt_rpc_example"
+FILES:${PN}-examples = " \
+    ${bindir}/rpurt_rpc_test \
+"
 
 # Headers and pkg-config metadata go to -dev as usual.
 FILES:${PN}-dev += "${includedir}/rpurt-rpc/*"

@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <time.h>
 #include <unistd.h>
 
 #ifndef RPURT_RPC_VERSION_STR
@@ -225,5 +226,321 @@ int rpurt_rpc_aie_echo(rpurt_rpc_handle *h, uint32_t val1, uint32_t val2)
     if (resp->val1 != val1 || resp->val2 != val2)
         return -EBADE;
 
+    return 0;
+}
+
+/*
+ * Generic request/response helper for opcodes whose entire
+ * post-send work is "validate body length, validate status, hand the
+ * body back to the caller".
+ */
+static int aie_op_msg_helper(rpurt_rpc_handle *h, uint32_t opcode,
+                    const void *req, size_t req_len,
+                    void *resp, size_t resp_len)
+{
+    struct rpurt_rpc_msg rx;
+    const void *body;
+    size_t      body_len;
+    uint32_t    status;
+    int         ret;
+
+    if (!h)
+        return -EINVAL;
+
+    ret = aie_send_msg(h, opcode, req, req_len);
+    if (ret < 0)
+        return ret;
+
+    ret = aie_recv_msg(h, &rx, &body, &body_len);
+    if (ret < 0)
+        return ret;
+
+    if (body_len < resp_len || body_len < sizeof(status))
+        return -EBADMSG;
+
+    memcpy(&status, body, sizeof(status));
+    if (status != RPURT_RPC_AIE_STATUS_SUCCESS)
+        return -EIO;
+
+    if (resp && resp_len)
+        memcpy(resp, body, resp_len);
+    return 0;
+}
+
+int rpurt_rpc_aie_identify(rpurt_rpc_handle *h,
+                           struct rpurt_rpc_aie_fw_version *out_version)
+{
+    struct rpurt_rpc_aie_identify_req  req  = { .resvd = 0 };
+    struct rpurt_rpc_aie_identify_resp resp;
+    int ret;
+
+    if (!out_version)
+        return -EINVAL;
+
+    ret = aie_op_msg_helper(h, RPURT_RPC_AIE_OP_IDENTIFY,
+                   &req, sizeof(req), &resp, sizeof(resp));
+    if (ret < 0)
+        return ret;
+
+    out_version->major = resp.fw_major;
+    out_version->minor = resp.fw_minor;
+    out_version->patch = resp.fw_patch;
+    out_version->build = resp.fw_build;
+    return 0;
+}
+
+int rpurt_rpc_aie_tile_info(rpurt_rpc_handle *h,
+                            struct rpurt_rpc_aie_tile_geometry *out_geom)
+{
+    struct rpurt_rpc_aie_tile_info_req  req = { .resvd = 0 };
+    struct rpurt_rpc_aie_tile_info_resp resp;
+    int ret;
+
+    if (!out_geom)
+        return -EINVAL;
+
+    ret = aie_op_msg_helper(h, RPURT_RPC_AIE_OP_AIE_TILE_INFO,
+                   &req, sizeof(req), &resp, sizeof(resp));
+    if (ret < 0)
+        return ret;
+
+    out_geom->size              = resp.info.size;
+    out_geom->major             = resp.info.major;
+    out_geom->minor             = resp.info.minor;
+    out_geom->cols              = resp.info.cols;
+    out_geom->rows              = resp.info.rows;
+    out_geom->core_rows         = resp.info.core_rows;
+    out_geom->mem_rows          = resp.info.mem_rows;
+    out_geom->shim_rows         = resp.info.shim_rows;
+    out_geom->core_row_start    = resp.info.core_row_start;
+    out_geom->mem_row_start     = resp.info.mem_row_start;
+    out_geom->shim_row_start    = resp.info.shim_row_start;
+    out_geom->core_dma_channels = resp.info.core_dma_channels;
+    out_geom->mem_dma_channels  = resp.info.mem_dma_channels;
+    out_geom->shim_dma_channels = resp.info.shim_dma_channels;
+    out_geom->core_locks        = resp.info.core_locks;
+    out_geom->mem_locks         = resp.info.mem_locks;
+    out_geom->shim_locks        = resp.info.shim_locks;
+    out_geom->core_events       = resp.info.core_events;
+    out_geom->mem_events        = resp.info.mem_events;
+    out_geom->shim_events       = resp.info.shim_events;
+    return 0;
+}
+
+int rpurt_rpc_aie_partition_create(rpurt_rpc_handle *h,
+                                   uint32_t col_start, uint32_t col_count,
+                                   uint32_t *out_partition_id)
+{
+    struct rpurt_rpc_aie_create_partition_req  req = {
+        .partition_col_start = col_start,
+        .partition_col_count = col_count,
+    };
+    struct rpurt_rpc_aie_create_partition_resp resp;
+    int ret;
+
+    if (!out_partition_id)
+        return -EINVAL;
+
+    ret = aie_op_msg_helper(h, RPURT_RPC_AIE_OP_CREATE_PARTITION,
+                   &req, sizeof(req), &resp, sizeof(resp));
+    if (ret < 0)
+        return ret;
+
+    *out_partition_id = resp.partition_id;
+    return 0;
+}
+
+int rpurt_rpc_aie_partition_destroy(rpurt_rpc_handle *h, uint32_t partition_id)
+{
+    struct rpurt_rpc_aie_destroy_partition_req  req = {
+        .partition_id = partition_id,
+    };
+    struct rpurt_rpc_aie_destroy_partition_resp resp;
+
+    return aie_op_msg_helper(h, RPURT_RPC_AIE_OP_DESTROY_PARTITION,
+                    &req, sizeof(req), &resp, sizeof(resp));
+}
+
+int rpurt_rpc_aie_hwctx_create(rpurt_rpc_handle *h,
+                               uint32_t partition_id, uint32_t num_tiles,
+                               uint32_t priority,
+                               uint32_t *out_ctx_id,
+                               uint32_t *out_doorbell_offset,
+                               uint32_t *out_msix_idx)
+{
+    struct rpurt_rpc_aie_create_hw_context_req  req = {
+        .partition_id      = partition_id,
+        .request_num_tiles = num_tiles,
+        .hsa_addr_high     = 0,
+        .hsa_addr_low      = 0,
+        .pasid             = { .raw = 0 },
+        .priority_band     = priority,
+    };
+    struct rpurt_rpc_aie_create_hw_context_resp resp;
+    int ret;
+
+    if (!out_ctx_id)
+        return -EINVAL;
+
+    ret = aie_op_msg_helper(h, RPURT_RPC_AIE_OP_CREATE_HW_CONTEXT,
+                   &req, sizeof(req), &resp, sizeof(resp));
+    if (ret < 0)
+        return ret;
+
+    *out_ctx_id = resp.hw_context_id;
+    if (out_doorbell_offset)
+        *out_doorbell_offset = resp.doorbell_offset;
+    if (out_msix_idx)
+        *out_msix_idx = resp.job_complete_msix_idx;
+    return 0;
+}
+
+int rpurt_rpc_aie_hwctx_destroy(rpurt_rpc_handle *h,
+                                uint32_t ctx_id, int graceful)
+{
+    struct rpurt_rpc_aie_destroy_hw_context_req  req = {
+        .hw_context_id = ctx_id,
+        .graceful_flag = graceful ? 1 : 0,
+        .resvd1        = 0,
+    };
+    struct rpurt_rpc_aie_destroy_hw_context_resp resp;
+
+    return aie_op_msg_helper(h, RPURT_RPC_AIE_OP_DESTROY_HW_CONTEXT,
+                    &req, sizeof(req), &resp, sizeof(resp));
+}
+
+int rpurt_rpc_aie_job_submit(rpurt_rpc_handle *h,
+                             uint32_t ctx_id, uint32_t job_type,
+                             uint32_t exec_time_ms, uint32_t *out_job_id)
+{
+    struct rpurt_rpc_aie_submit_job_req  req = {
+        .hw_context_id = ctx_id,
+        .job_type      = job_type,
+        .exec_time_ms  = exec_time_ms,
+        .resvd         = 0,
+    };
+    struct rpurt_rpc_aie_submit_job_resp resp;
+    int ret;
+
+    if (!out_job_id)
+        return -EINVAL;
+
+    ret = aie_op_msg_helper(h, RPURT_RPC_AIE_OP_SUBMIT_JOB,
+                   &req, sizeof(req), &resp, sizeof(resp));
+    if (ret < 0)
+        return ret;
+
+    *out_job_id = resp.job_id;
+    return 0;
+}
+
+int rpurt_rpc_aie_job_status(rpurt_rpc_handle *h, uint32_t job_id,
+                             enum rpurt_rpc_aie_job_state *out_state,
+                             int32_t *out_result)
+{
+    struct rpurt_rpc_aie_query_job_req  req = { .job_id = job_id };
+    struct rpurt_rpc_aie_query_job_resp resp;
+    int ret;
+
+    ret = aie_op_msg_helper(h, RPURT_RPC_AIE_OP_QUERY_JOB,
+                   &req, sizeof(req), &resp, sizeof(resp));
+    if (ret < 0)
+        return ret;
+
+    if (out_state)
+        *out_state = (enum rpurt_rpc_aie_job_state)resp.job_state;
+    if (out_result)
+        *out_result = resp.result;
+    return 0;
+}
+
+/*
+ * Returns true once @now has caught up to or passed @deadline.
+ * Both are CLOCK_MONOTONIC timespecs.
+ */
+static int monotonic_deadline_passed(const struct timespec *now,
+                                     const struct timespec *deadline)
+{
+    if (now->tv_sec != deadline->tv_sec)
+        return now->tv_sec > deadline->tv_sec;
+    return now->tv_nsec >= deadline->tv_nsec;
+}
+
+int rpurt_rpc_aie_job_wait(rpurt_rpc_handle *h, uint32_t job_id,
+                           unsigned int timeout_ms, int32_t *out_result)
+{
+    /*
+     * 50 ms cadence is plenty for the test/job opcodes the firmware
+     * exposes today (typical exec_time_ms is in the 100s of ms). We
+     * size up later if/when that turns into a real bottleneck.
+     */
+    static const long POLL_INTERVAL_NS = 50L * 1000L * 1000L;
+    struct timespec deadline, now;
+
+    if (!h)
+        return -EINVAL;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0)
+        return -errno;
+    deadline.tv_sec  += (time_t)(timeout_ms / 1000U);
+    deadline.tv_nsec += (long)((timeout_ms % 1000U) * 1000000UL);
+    if (deadline.tv_nsec >= 1000000000L) {
+        deadline.tv_sec  += 1;
+        deadline.tv_nsec -= 1000000000L;
+    }
+
+    for (;;) {
+        enum rpurt_rpc_aie_job_state state = RPURT_RPC_AIE_JOB_FREE;
+        int32_t result = 0;
+        int ret;
+
+        ret = rpurt_rpc_aie_job_status(h, job_id, &state, &result);
+        if (ret < 0)
+            return ret;
+
+        if (state == RPURT_RPC_AIE_JOB_COMPLETED) {
+            if (out_result)
+                *out_result = result;
+            return 0;
+        }
+        if (state == RPURT_RPC_AIE_JOB_FAILED) {
+            if (out_result)
+                *out_result = result;
+            return -EIO;
+        }
+
+        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+            return -errno;
+        if (monotonic_deadline_passed(&now, &deadline))
+            return -ETIMEDOUT;
+
+        {
+            struct timespec sleep_for = {
+                .tv_sec  = 0,
+                .tv_nsec = POLL_INTERVAL_NS,
+            };
+            (void)nanosleep(&sleep_for, NULL);
+        }
+    }
+}
+
+int rpurt_rpc_aie_job_list(rpurt_rpc_handle *h,
+                           struct rpurt_rpc_aie_job_summary *out_summary)
+{
+    struct rpurt_rpc_aie_list_jobs_req  req  = { .resvd0 = 0 };
+    struct rpurt_rpc_aie_list_jobs_resp resp;
+    int ret;
+
+    ret = aie_op_msg_helper(h, RPURT_RPC_AIE_OP_LIST_JOBS,
+                   &req, sizeof(req), &resp, sizeof(resp));
+    if (ret < 0)
+        return ret;
+
+    if (out_summary) {
+        out_summary->total     = resp.total_jobs;
+        out_summary->pending   = resp.pending_jobs;
+        out_summary->running   = resp.running_jobs;
+        out_summary->completed = resp.completed_jobs;
+    }
     return 0;
 }

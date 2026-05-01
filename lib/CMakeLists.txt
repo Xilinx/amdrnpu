@@ -9,9 +9,9 @@ project(rpurt_rpc
 
 include(GNUInstallDirs)
 
-option(RPURT_RPC_BUILD_SHARED  "Build the shared library"     ON)
-option(RPURT_RPC_BUILD_STATIC  "Build the static library"     ON)
-option(RPURT_RPC_BUILD_EXAMPLES "Build example programs"      ON)
+option(RPURT_RPC_BUILD_SHARED  "Build the shared library"        ON)
+option(RPURT_RPC_BUILD_STATIC  "Build the static library"        ON)
+option(RPURT_RPC_BUILD_EXAMPLES "Build example/test CLI programs" ON)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -79,15 +79,22 @@ if(RPURT_RPC_BUILD_STATIC)
 endif()
 
 # ----------------------------------------------------------------------------
-# Examples
+# Example / test CLIs
 # ----------------------------------------------------------------------------
+# Add new example programs by appending to RPURT_RPC_EXAMPLE_PROGRAMS;
+# each entry must have a matching examples/<name>.c source file.
 if(RPURT_RPC_BUILD_EXAMPLES)
-    add_executable(rpurt_rpc_example examples/rpurt_rpc_example.c)
-    if(TARGET rpurt_rpc)
-        target_link_libraries(rpurt_rpc_example PRIVATE rpurt_rpc::rpurt_rpc)
-    else()
-        target_link_libraries(rpurt_rpc_example PRIVATE rpurt_rpc::rpurt_rpc_static)
-    endif()
+    set(RPURT_RPC_EXAMPLE_PROGRAMS
+        rpurt_rpc_test
+    )
+    foreach(_prog IN LISTS RPURT_RPC_EXAMPLE_PROGRAMS)
+        add_executable(${_prog} examples/${_prog}.c)
+        if(TARGET rpurt_rpc)
+            target_link_libraries(${_prog} PRIVATE rpurt_rpc::rpurt_rpc)
+        else()
+            target_link_libraries(${_prog} PRIVATE rpurt_rpc::rpurt_rpc_static)
+        endif()
+    endforeach()
 endif()
 
 # ----------------------------------------------------------------------------
@@ -111,7 +118,7 @@ install(DIRECTORY ${RPURT_RPC_UAPI_DIR}/rpurt-rpc
 )
 
 if(RPURT_RPC_BUILD_EXAMPLES)
-    install(TARGETS rpurt_rpc_example
+    install(TARGETS ${RPURT_RPC_EXAMPLE_PROGRAMS}
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     )
 endif()

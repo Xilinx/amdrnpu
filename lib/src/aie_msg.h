@@ -62,8 +62,17 @@ struct rpurt_rpc_aie_msg_header {
 
 /* Opcodes (subset; extend in lockstep with rpu-fw). */
 enum rpurt_rpc_aie_opcode {
-	RPURT_RPC_AIE_OP_ECHO			= 0x10001,
-	RPURT_RPC_AIE_OP_IDENTIFY		= 0x10002,
+	RPURT_RPC_AIE_OP_ECHO				= 0x10001,
+	RPURT_RPC_AIE_OP_IDENTIFY			= 0x10002,
+
+	RPURT_RPC_AIE_OP_CREATE_PARTITION	= 0x30001,
+	RPURT_RPC_AIE_OP_DESTROY_PARTITION	= 0x30002,
+	RPURT_RPC_AIE_OP_CREATE_HW_CONTEXT	= 0x30003,
+	RPURT_RPC_AIE_OP_DESTROY_HW_CONTEXT	= 0x30004,
+	RPURT_RPC_AIE_OP_AIE_TILE_INFO		= 0x30006,
+	RPURT_RPC_AIE_OP_SUBMIT_JOB			= 0x30010,
+	RPURT_RPC_AIE_OP_QUERY_JOB			= 0x30011,
+	RPURT_RPC_AIE_OP_LIST_JOBS			= 0x30012,
 };
 
 /* Status codes. */
@@ -71,6 +80,28 @@ enum rpurt_rpc_aie_status {
 	RPURT_RPC_AIE_STATUS_SUCCESS	= 0x0,
 	RPURT_RPC_AIE_STATUS_ERROR	= 0x1,
 	RPURT_RPC_AIE_STATUS_NOTSUPP	= 0x2,
+};
+
+/*
+ * Wire job state values (mirrored by enum rpurt_rpc_aie_job_state in the
+ * public header; values must stay in sync).
+ */
+enum rpurt_rpc_aie_wire_job_state {
+	RPURT_RPC_AIE_WIRE_JOB_FREE	= 0,
+	RPURT_RPC_AIE_WIRE_JOB_PENDING	= 1,
+	RPURT_RPC_AIE_WIRE_JOB_RUNNING	= 2,
+	RPURT_RPC_AIE_WIRE_JOB_COMPLETED = 3,
+	RPURT_RPC_AIE_WIRE_JOB_FAILED	= 4,
+};
+
+/* PASID format (for IOMMU address translation). */
+union rpurt_rpc_aie_pasid {
+	uint32_t raw;
+	struct {
+		uint32_t pasid		: 20;
+		uint32_t resvd0		: 11;
+		uint32_t pasid_vld	: 1;
+	} f;
 };
 
 /* RPURT_RPC_AIE_OP_ECHO. */
@@ -83,6 +114,135 @@ struct rpurt_rpc_aie_echo_resp {
 	uint32_t status;
 	uint32_t val1;
 	uint32_t val2;
+};
+
+/* RPURT_RPC_AIE_OP_IDENTIFY. */
+struct rpurt_rpc_aie_identify_req {
+	uint32_t resvd;
+};
+
+struct rpurt_rpc_aie_identify_resp {
+	uint32_t status;
+	uint32_t fw_major;
+	uint32_t fw_minor;
+	uint32_t fw_patch;
+	uint32_t fw_build;
+};
+
+/* RPURT_RPC_AIE_OP_AIE_TILE_INFO. */
+struct rpu_aie4_tile_info {
+	uint32_t size;
+	uint16_t major;
+	uint16_t minor;
+	uint16_t cols;
+	uint16_t rows;
+	uint16_t core_rows;
+	uint16_t mem_rows;
+	uint16_t shim_rows;
+	uint16_t core_row_start;
+	uint16_t mem_row_start;
+	uint16_t shim_row_start;
+	uint16_t core_dma_channels;
+	uint16_t mem_dma_channels;
+	uint16_t shim_dma_channels;
+	uint16_t core_locks;
+	uint16_t mem_locks;
+	uint16_t shim_locks;
+	uint16_t core_events;
+	uint16_t mem_events;
+	uint16_t shim_events;
+	uint16_t resvd;
+};
+
+struct rpurt_rpc_aie_tile_info_req {
+	uint32_t resvd;
+};
+
+struct rpurt_rpc_aie_tile_info_resp {
+	uint32_t status;
+	struct rpu_aie4_tile_info info;
+};
+
+/* RPURT_RPC_AIE_OP_CREATE_PARTITION / DESTROY_PARTITION. */
+struct rpurt_rpc_aie_create_partition_req {
+	uint32_t partition_col_start;
+	uint32_t partition_col_count;
+};
+
+struct rpurt_rpc_aie_create_partition_resp {
+	uint32_t status;
+	uint32_t partition_id;
+};
+
+struct rpurt_rpc_aie_destroy_partition_req {
+	uint32_t partition_id;
+};
+
+struct rpurt_rpc_aie_destroy_partition_resp {
+	uint32_t status;
+};
+
+/* RPURT_RPC_AIE_OP_CREATE_HW_CONTEXT / DESTROY_HW_CONTEXT. */
+struct rpurt_rpc_aie_create_hw_context_req {
+	uint32_t partition_id;
+	uint32_t request_num_tiles;
+	uint32_t hsa_addr_high;
+	uint32_t hsa_addr_low;
+	union rpurt_rpc_aie_pasid pasid;
+	uint32_t priority_band;
+};
+
+struct rpurt_rpc_aie_create_hw_context_resp {
+	uint32_t status;
+	uint32_t hw_context_id;
+	uint32_t doorbell_offset;
+	uint32_t job_complete_msix_idx;
+};
+
+struct rpurt_rpc_aie_destroy_hw_context_req {
+	uint32_t hw_context_id;
+	uint32_t graceful_flag	: 1;
+	uint32_t resvd1		: 31;
+};
+
+struct rpurt_rpc_aie_destroy_hw_context_resp {
+	uint32_t status;
+};
+
+/* RPURT_RPC_AIE_OP_SUBMIT_JOB / QUERY_JOB (test extension). */
+struct rpurt_rpc_aie_submit_job_req {
+	uint32_t hw_context_id;
+	uint32_t job_type;
+	uint32_t exec_time_ms;
+	uint32_t resvd;
+};
+
+struct rpurt_rpc_aie_submit_job_resp {
+	uint32_t status;
+	uint32_t job_id;
+};
+
+struct rpurt_rpc_aie_query_job_req {
+	uint32_t job_id;
+};
+
+struct rpurt_rpc_aie_query_job_resp {
+	uint32_t status;
+	uint32_t job_state;
+	int32_t  result;
+};
+
+/* RPURT_RPC_AIE_OP_LIST_JOBS: aggregate job counters (test extension). */
+struct rpurt_rpc_aie_list_jobs_req {
+	uint32_t resvd0;
+};
+
+struct rpurt_rpc_aie_list_jobs_resp {
+	uint32_t status;
+	uint32_t total_jobs;
+	uint32_t pending_jobs;
+	uint32_t running_jobs;
+	uint32_t completed_jobs;
 };
 
 #pragma pack(pop)

@@ -21,10 +21,8 @@ rpu-rt-rpc/
 │   ├── include/rpurt_rpc/rpurt_rpc.h    # public lib API
 │   ├── src/rpurt_rpc.c                  # lib implementation
 │   ├── src/aie_msg.h          # vendored firmware mailbox wire format,
-│   │                          # PRIVATE to lib (not installed); the
-│   │                          # driver is currently a transparent byte
-│   │                          # pipe so all framing happens here
-│   ├── examples/rpurt_rpc_example.c
+│   │                          # PRIVATE to lib
+│   ├── examples/rpurt_rpc_test.c       # CLI mirroring apu_aie_test UX
 │   └── cmake/
 └── meta-rpurt-rpc/            # Yocto/OE layer
     ├── conf/layer.conf
@@ -78,7 +76,7 @@ CMake options:
 |---|---|---|
 | `RPURT_RPC_BUILD_SHARED` | `ON` | build `librpurt_rpc.so` |
 | `RPURT_RPC_BUILD_STATIC` | `ON` | build `librpurt_rpc.a` |
-| `RPURT_RPC_BUILD_EXAMPLES` | `ON` | build `rpurt_rpc_example` |
+| `RPURT_RPC_BUILD_EXAMPLES` | `ON` | build the `rpurt_rpc_test` CLI |
 | `RPURT_RPC_UAPI_DIR` | `<repo>/include/uapi` | path to the shared UAPI headers |
 
 Downstream projects can consume the library via either CMake
@@ -145,20 +143,25 @@ endpoint.
 
 ### Verifying against the firmware ECHO
 
-The `rpurt_rpc_example` binary (built by default with the lib) issues a
-single AIE ECHO round-trip and reports pass/fail:
+The `rpurt_rpc_test` CLI (built by default with the lib) mirrors the
+subcommand UX of the firmware team's `apu_aie_test` reference tool.
+The simplest round-trip is `echo`, which sends an AIE ECHO and
+verifies the firmware echoed both 32-bit values back unchanged:
 
 ```sh
-# Default values 0x12345678 / 0xDEADBEEF
-rpurt_rpc_example /dev/rpurt_rpc.0
+# Default device /dev/rpurt_rpc.0
+rpurt_rpc_test echo 0xCAFEBABE 0x0BADC0DE
 
-# Custom values
-rpurt_rpc_example /dev/rpurt_rpc.0 0xCAFEBABE 0x0BADC0DE
+# Or against a specific device node
+rpurt_rpc_test --device /dev/rpurt_rpc.1 echo 0x12345678 0xDEADBEEF
 ```
 
-The TX bytes are byte-identical to those produced by the firmware
-team's `apu_aie_test echo` tool, so the same firmware that responds to
-`apu_aie_test` will respond to this binary unchanged.
+The TX bytes are byte-identical to those produced by `apu_aie_test
+echo`, so the same firmware that responds to `apu_aie_test` will
+respond to this CLI unchanged. Other subcommands (`identify`,
+`tile_info`, `partition`, `hwctx`, `job`, `lifecycle`) cover the rest
+of the AIE management opcode surface; see `rpurt_rpc_test --help` for
+the full list.
 
 ## License
 
