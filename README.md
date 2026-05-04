@@ -24,6 +24,16 @@ rpu-rt-rpc/
 │   │                          # PRIVATE to lib
 │   ├── examples/rpurt_rpc_test.c       # CLI mirroring apu_aie_test UX
 │   └── cmake/
+├── docs/                      # design documentation (Mermaid diagrams)
+│   ├── architecture.md
+│   ├── devicetree-binding.md
+│   ├── buffer-management.md
+│   ├── commands.md
+│   └── buffer-management.md
+└── scripts/
+|   └── yocto-cross-build.sh   # cross-compile helper
+├── Documentation/devicetree/bindings/misc/
+│   └── amd,tess-eye-rpc.yaml  # machine-checkable DT schema
 └── meta-rpurt-rpc/            # Yocto/OE layer
     ├── conf/layer.conf
     ├── recipes-kernel/rpurt-rpc-mod/

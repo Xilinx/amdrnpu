@@ -54,3 +54,9 @@ install_manifest.txt
 .vscode/
 .idea/
 *.swp
+
+# ctags / cscope (see root Makefile targets: tags, cscope, indexes)
+/tags
+TAGS
+cscope.files
+cscope.fast*.tbl
