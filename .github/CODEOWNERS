@@ -1,0 +1,2 @@
+# Notify this team on workflow-related changes/failures
+.github/workflows/ @PhysicalAI/tessai-agent-team @hlaccabu
