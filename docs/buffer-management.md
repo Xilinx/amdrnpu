@@ -1,0 +1,253 @@
+# Buffer Management
+
+This document describes how userspace allocates, maps, and frees buffers
+through the `tessai-agent` driver.
+
+The driver uses **DRM GEM** as its buffer abstraction so it can use the
+standard handle and mmap path. Each buffer is backed by a contiguous
+**non-cacheable** allocation (`dma_alloc_coherent()` against a bank device
+that is **not** marked `dma-coherent`) from a specific *memory bank*
+(RPU 32-bit or dev 64-bit).
+
+**Userspace helpers:** [`lib-userspace-flow.md`](lib-userspace-flow.md) covers
+**`tessai_agent_buf_alloc()`**, **`tessai_agent_gem_close()`**, mmap, and how
+they line up with the ioctl flow below.
+
+The buffer is **reference-counted**, the standard way GEM objects are managed.
+The backing memory is freed only when the last reference is dropped — **not**
+when any individual handle or command goes away. References are acquired and
+released from several independent sources (handles, in-flight commands), and a
+**GEM close** only decrements the count; whether memory is freed depends on
+whether any *other* reference is still held.
+
+---
+
+## 1. Lifecycle overview
+
+The buffer’s high-level state is **`Live`** vs **`Freed`**, with `mmap()` /
+`munmap()` toggling mapping state inside **`Live`**. Leaving **`Live`** happens
+when the GEM object’s refcount reaches zero.
+
+```mermaid
+stateDiagram-v2
+    direction LR
+
+    [*] --> Live : TESSAI_BUF_ALLOC, refcount = 1
+
+    state Live {
+        direction LR
+        [*] --> Unmapped
+        Unmapped --> Mapped : mmap on gem offset
+        Mapped --> Unmapped : munmap
+    }
+
+    Live --> Freed : last reference released (refcount 1 to 0)
+    Freed --> [*]
+```
+
+While **`Live`**, refcount can rise and fall as holders acquire and release.
+**No single close frees the buffer on its own** — only the holder that drops
+the *last* reference triggers **`tessai_gem_free()`**.
+
+| Holder | Acquired by | Released by |
+|---|---|---|
+| DRM handle | `TESSAI_BUF_ALLOC` (one ref per handle) | **`tessai_agent_gem_close()`** / `DRM_IOCTL_GEM_CLOSE`, or implicit teardown on last `close()` of the DRM fd |
+| In-flight command pin | `TESSAI_CMD_SUBMIT` with a buffer arg (`size != 0`) | Terminal `TESSAI_RSP_*`, submit-failure cleanup, driver drain / `tessai_cmd_release`; see §5 |
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as Userspace
+    participant CORE as DRM core
+    participant CMD as in-flight tessai_cmd
+    Note over CORE: refcount = 0
+
+    U->>CORE: TESSAI_BUF_ALLOC
+    Note over CORE: refcount = 1 (handle)
+
+    U->>CMD: TESSAI_CMD_SUBMIT(BO=h)
+    Note over CORE: refcount = 2 (handle + cmd pin)
+
+    U->>CORE: GEM_CLOSE / tessai_agent_gem_close(handle)
+    Note over CORE: refcount = 1 (cmd pin only)
+
+    CMD-->>CORE: command terminates → drm_gem_object_put()
+    Note over CORE: refcount = 0 → tessai_gem_free()
+```
+
+---
+
+## 2. Allocation: `TESSAI_BUF_ALLOC`
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as Userspace
+    participant K as tessai_agent_drm.c
+    participant CORE as DRM core
+    participant DMA as dma_alloc_coherent
+    participant BANK as bank->dev (per-bank struct device)
+
+    U->>K: ioctl(TESSAI_BUF_ALLOC, {memory_type, size})
+    K->>K: tessai_bank_memory_type()
+    K->>CORE: drm_gem_object_init(size)
+    K->>DMA: dma_alloc_coherent(bank->dev, size, &dma_addr)
+    DMA->>BANK: honors dma-mask + reserved-mem (kvaddr + dma_addr)
+    DMA-->>K: kvaddr, dma_addr
+    K->>CORE: drm_gem_create_mmap_offset(obj)
+    K->>CORE: drm_gem_handle_create(file, obj, &handle)
+    CORE->>CORE: handle = idr_alloc()
+    K-->>U: drm_handle
+```
+
+**Inputs (`struct tessai_buf_alloc`):**
+
+| Field | Meaning |
+|-------|---------|
+| `flags` | must be 0 |
+| `memory_type` | `TESSAI_MEMORY_RPU` or `TESSAI_MEMORY_DEVICE` (default via `TESSAI_MEMORY_DEFAULT`) |
+| `reserved0` | must be 0 |
+| `size` | bytes; rounded up internally |
+| `drm_handle` | **output**: GEM handle for this `drm_file` |
+
+**Failure modes:** `-ENODEV`, `-EINVAL`, `-ENOMEM`.
+
+---
+
+## 3. mmap
+
+`mmap()` on the DRM fd uses the standard GEM mmap offset path.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as Userspace
+    participant DRM as DRM core
+    participant K as tessai_gem_obj_mmap
+    participant DMA as dma_mmap_coherent
+
+    U->>DRM: GEM mmap path (offset from DRM_IOCTL_MODE_MAP_DUMB or equivalent)
+    DRM->>K: tessai_gem_obj_mmap(obj, vma)
+    K->>DMA: dma_mmap_coherent(bank->dev, vma, kvaddr, dma_addr, size)
+    K-->>U: pages mapped
+```
+
+---
+
+## 4. In-flight command pins
+
+A buffer referenced by a command (any `tessai_arg` with `size != 0`) is held
+alive by the driver while that command runs.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as Userspace
+    participant SUB as TESSAI_CMD_SUBMIT
+    participant CMD as tessai_cmd
+    participant CORE as DRM GEM core
+    participant RPU as RPU firmware
+
+    U->>SUB: ioctl TESSAI_CMD_SUBMIT with buffer arg
+    SUB->>CORE: drm_gem_object_lookup on handle h
+    CORE-->>SUB: obj refcount incremented
+    SUB->>CMD: store obj in bo_refs array
+    SUB-->>U: drm_sync_obj_handle
+
+    Note over U,CORE: GEM close may run after submit returns, pin keeps object alive
+    U->>CORE: tessai_agent_gem_close or GEM_CLOSE on h
+    CORE->>CORE: drop handle ref object may remain pinned by cmd
+
+    RPU-->>CMD: terminal mgmt response on RPMsg
+    CMD->>CMD: tessai_cmd_set_terminated
+    CMD->>CORE: drm_gem_object_put for each bo_ref
+```
+
+**At termination** the driver puts each `bo_refs[]` entry once. That covers
+normal completions, error-class responses, file teardown, and module unload
+paths.
+
+**Userspace:** after a successful submit you may call **`tessai_agent_gem_close`**
+as soon as you no longer need the handle for your own lookups; the object stays
+allocated until the command finishes and drops its pin.
+
+---
+
+## 5. Free / cleanup
+
+A buffer is destroyed when refcount goes **1 → 0**. Typical paths:
+
+- **`tessai_agent_gem_close()`** / **`DRM_IOCTL_GEM_CLOSE`** on the last open handle.
+- **`close(drm_fd)`** walks the per-file handle table and closes GEMs.
+- Command completion **`drm_gem_object_put`** when the last in-flight use ends.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as Userspace
+    participant CORE as DRM core
+    participant K as tessai_gem_free
+    participant DMA as dma_free_coherent
+
+    rect rgba(180,220,255,0.25)
+    Note over U,CORE: Explicit GEM close
+    U->>CORE: tessai_agent_gem_close / DRM_IOCTL_GEM_CLOSE
+    CORE->>CORE: idr_remove + drm_gem_object_put
+    CORE->>K: gem_obj->funcs->free(obj)
+    end
+
+    rect rgba(255,220,180,0.25)
+    Note over U,CORE: Implicit on drm fd close
+    U->>CORE: close(drm_fd)
+    CORE->>CORE: drm_release walks handle IDR
+    CORE->>K: ... free each object
+    end
+
+    K->>DMA: dma_free_coherent(bank->dev, size, kvaddr, dma_addr)
+```
+
+While a command still pins a BO, **`GEM_CLOSE` only drops the userspace
+handle** — memory stays until the submit completes and releases **`bo_refs`**.
+
+---
+
+## 6. Userspace sketch
+
+```c
+#include <errno.h>
+#include <fcntl.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <xf86drm.h>
+#include <tessai_agent/tessai_agent_lib.h>
+
+int main(void)
+{
+	int fd = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
+	uint32_t handle;
+	int err;
+
+	err = tessai_agent_buf_alloc(fd, TESSAI_MEMORY_DEVICE, 1u << 20, &handle);
+	if (err)
+		return 1;
+
+	struct drm_mode_map_dumb m = { .handle = handle };
+	drmIoctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &m);
+	void *p = mmap(NULL, 1u << 20, PROT_READ | PROT_WRITE,
+		       MAP_SHARED, fd, m.offset);
+	memset(p, 0xa5, 1u << 20);
+	munmap(p, 1u << 20);
+	tessai_agent_gem_close(fd, handle);
+	close(fd);
+	return 0;
+}
+```
+
+---
+
+## 7. See also
+
+- [`architecture.md`](architecture.md) — per-bank platform devices and DMA windows.
+- [`commands.md`](commands.md) — `tessai_arg` buffer references and wire DMA addresses.
+- [`lib-userspace-flow.md`](lib-userspace-flow.md) — library API for alloc, close, submit, wait.
