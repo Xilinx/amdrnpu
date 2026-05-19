@@ -1,5 +1,0 @@
-@PACKAGE_INIT@
-
-include("${CMAKE_CURRENT_LIST_DIR}/rpurt_rpcTargets.cmake")
-
-check_required_components(rpurt_rpc)
