@@ -20,7 +20,7 @@ The machine-checkable YAML schema for the binding lives at
 - Userspace library: [`lib/`](../lib/) (`libtessai_agent` + `tessai_agent_test` CLI)
 - UAPI header: [`include/uapi/tessai-agent/tessai_agent.h`](../include/uapi/tessai-agent/tessai_agent.h)
 - Driver source: [`drivers/accel/tessai-agent/`](../drivers/accel/tessai-agent/)
-- Cross-build helper: [`scripts/yocto-cross-build.sh`](../scripts/yocto-cross-build.sh)
+- Build orchestrator: [`build/build.sh`](../build/build.sh) (native / `-cross-vitis` / `-cross-yocto`)
 - Top-level overview: [`../README.md`](../README.md)
 
 ## Diagram conventions

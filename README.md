@@ -40,11 +40,9 @@ tessai-agent/
 │   └── README.md
 ├── Documentation/devicetree/bindings/accel/
 │   └── amd,tessai-agent.yaml         # machine-checkable DT schema
-├── scripts/                          # cross-build + deploy helpers
-│   ├── build-vitis.sh
-│   ├── build-oot-modules.sh
-│   ├── yocto-cross-build.sh
-│   └── strip-dirty-vermagic.py
+├── build/                            # build orchestrator (see "Building" below)
+│   ├── build.sh                      # native / -cross-vitis / -cross-yocto
+│   └── strip-dirty-vermagic.py       # post-process helper invoked by build.sh
 └── meta-tessai-agent/                # Yocto/OE layer
     ├── conf/layer.conf
     ├── recipes-kernel/tessai-agent-mod/
@@ -68,46 +66,48 @@ Two custom ioctls under magic `'T'`:
 Standard DRM ioctls (GEM, dumb buffer, syncobj, PRIME) are reachable on the
 same render-node file via the normal DRM core path.
 
-## Building the kernel module (standalone)
+## Building
 
-The module builds out-of-tree against any prepared kernel source/build tree.
-Point `KDIR` at it.
-
-```sh
-# Native build against the running kernel
-make -C drivers/accel/tessai-agent KDIR=/lib/modules/$(uname -r)/build
-
-# Cross-build for arm64
-make -C drivers/accel/tessai-agent \
-    KDIR=/path/to/linux \
-    ARCH=arm64 \
-    CROSS_COMPILE=aarch64-linux-gnu-
-
-# Install to a staging root
-make -C drivers/accel/tessai-agent KDIR=... INSTALL_MOD_PATH=/tmp/rootfs modules_install
-
-# Clean
-make -C drivers/accel/tessai-agent KDIR=... clean
-```
-
-Produces `drivers/accel/tessai-agent/tessai_agent.ko`. Loading it on a
-target that has a matching `compatible = "amd,tessai-agent"` device-tree
-node creates a DRM render node (typically `/dev/dri/renderD128` if no
-other DRM driver is present, or whichever node `tessai_agent_test device`
-reports).
-
-`KERNEL_SRC` is accepted as a synonym for `KDIR` so the same Makefile works
-under Yocto's `module.bbclass` without modification.
-
-## Building the user-space library (standalone)
+For local development use the top-level orchestrator at
+[`build/build.sh`](build/build.sh). One invocation builds the kernel
+module, the userspace library, and the `tessai_agent_test` CLI into a
+clean out-of-source tree, leaving `drivers/accel/tessai-agent/` and
+`lib/` pristine.
 
 ```sh
-cmake -S lib -B build/lib -DCMAKE_INSTALL_PREFIX=/usr/local
-cmake --build build/lib -j
-sudo cmake --install build/lib
+# Native (default): build all three against the running kernel.
+# Requires linux-headers-$(uname -r) and libdrm-dev on the host.
+build/build.sh
+
+# aarch64 cross-build using a full Yocto build tree at PATH.
+# Toolchain, kernel, and target sysroot are auto-discovered under
+# PATH/tmp/work-shared/ and PATH/tmp/work/.
+build/build.sh -cross-yocto /path/to/yocto/build
+
+# aarch64 cross-build using the Vitis-shipped toolchain and a manually
+# prepared Xilinx kernel tree (no Yocto). PATH is an aarch64 sysroot
+# that has usr/lib/pkgconfig/libdrm.pc.
+build/build.sh -cross-vitis -sysroot /path/to/aarch64/sysroot
+
+# Wipe build/Release/ and build/Release-aarch64/.
+build/build.sh -clean
 ```
 
-CMake options:
+Outputs (per invocation):
+
+| Path | Artifact |
+|---|---|
+| `build/<TYPE>/driver/tessai_agent.ko` | kernel module |
+| `build/<TYPE>/lib/libtessai_agent.so*` | shared lib (+ `.a` static) |
+| `build/<TYPE>/bin/tessai_agent_test` | CLI |
+
+where `<TYPE>` is `Release` for native and `Release-aarch64` for either
+cross mode. Loading the `.ko` on a target with a matching
+`compatible = "amd,tessai-agent"` device-tree node creates a DRM render
+node (typically `/dev/dri/renderD128` if no other DRM driver is
+present, or whichever node `tessai_agent_test device` reports).
+
+CMake options forwarded to the lib build:
 
 | Option | Default | Meaning |
 |---|---|---|
@@ -116,11 +116,35 @@ CMake options:
 | `TESSAI_AGENT_LIB_BUILD_EXAMPLES` | `ON` | build the `tessai_agent_test` CLI |
 | `TESSAI_AGENT_UAPI_DIR`           | `<repo>/include/uapi` | path to the shared UAPI headers |
 
-Depends on `libdrm` for syncobj / sync_file ioctls and `struct drm_gem_close`.
-
-Downstream projects can consume the library via either CMake
-(`find_package(tessai_agent)`) or pkg-config
+The library depends on `libdrm` for syncobj / sync_file ioctls and
+`struct drm_gem_close`. Downstream projects can consume it via either
+CMake (`find_package(tessai_agent)`) or pkg-config
 (`pkg-config --cflags --libs tessai_agent`).
+
+Run `build/build.sh -help` for the full flag surface (toolchain path,
+KDIR override, Yocto machine override, `-localversion` injection,
+`-no-strip-dirty`, etc.).
+
+### Fallback: raw kbuild / Yocto-internal
+
+The kernel-module Makefile in `drivers/accel/tessai-agent/` is still
+usable directly. `meta-tessai-agent/recipes-kernel/tessai-agent-mod_0.1.0.bb`
+relies on it via Yocto's `module.bbclass`; the same invocation also works
+as a manual fallback:
+
+```sh
+make -C drivers/accel/tessai-agent KDIR=/lib/modules/$(uname -r)/build
+make -C drivers/accel/tessai-agent KDIR=... ARCH=arm64 \
+     CROSS_COMPILE=aarch64-linux-gnu-
+make -C drivers/accel/tessai-agent KDIR=... INSTALL_MOD_PATH=/tmp/rootfs \
+     modules_install
+make -C drivers/accel/tessai-agent KDIR=... clean
+```
+
+`KERNEL_SRC` is accepted as a synonym for `KDIR` so the same Makefile
+works under Yocto's `module.bbclass` without modification. Be aware that
+this in-source flow writes `.o` / `.ko` / `.mod*` files into the source
+directory; `build/build.sh` avoids that.
 
 ## Building under Yocto
 

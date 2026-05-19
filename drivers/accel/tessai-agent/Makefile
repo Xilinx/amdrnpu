@@ -4,7 +4,18 @@
 # Targets Linux 6.12 and newer (uses drm_syncobj, dma_fence, drm_gem
 # import helpers, and rpmsg APIs as they exist in 6.12+).
 #
-# Usage:
+# RECOMMENDED for local development: use the top-level orchestrator
+#   ../../../build/build.sh                   # native: kmod + lib + CLI
+#   ../../../build/build.sh -cross-vitis ...  # aarch64 cross build
+# which puts every artifact under tessai-agent/build/<TYPE>/ and never
+# writes into this source directory.
+#
+# This Makefile is still used by:
+#   - meta-tessai-agent/recipes-kernel/tessai-agent-mod_0.1.0.bb
+#     (Yocto's module.bbclass invokes it via `make M=... modules`), and
+#   - anyone who wants the raw kbuild invocation directly.
+#
+# Usage (raw kbuild fallback):
 #   make KDIR=/path/to/linux                              # native build
 #   make KDIR=... ARCH=arm64 CROSS_COMPILE=aarch64-...-   # cross build
 #   make clean
