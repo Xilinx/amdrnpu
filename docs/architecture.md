@@ -5,9 +5,12 @@ This document describes the end-to-end architecture of the
 between userspace and the RPU, and how data and control flow through
 the major subsystems.
 
-> The simpler `rpurt-rpc` driver under `drivers/misc/rpurt-rpc/` is a
-> minimal placeholder that pre-dates `tessai-agent`. Everything below
-> describes the real driver under `drivers/misc/tessai-agent/`.
+> Everything below describes the driver under
+> [`drivers/accel/tessai-agent/`](../drivers/accel/tessai-agent/). A
+> historically-related byte-pipe driver named `rpurt-rpc` lived in this
+> repository before the tessai-agent rename and has since been removed;
+> if you find a `/dev/rpurt_rpc.0` node on a running board it is a
+> leftover from an older module image and is unrelated to tessai-agent.
 
 ---
 
@@ -21,7 +24,7 @@ handles the actual hardware (AIE/NPU, sensors, etc.).
 ```mermaid
 flowchart LR
     subgraph User["User space (APU)"]
-        APP["Application<br/>(rpurt_rpc lib + custom code)"]
+        APP["Application<br/>(libtessai_agent + custom code)"]
     end
 
     subgraph Kernel["Kernel space (APU)"]
@@ -252,7 +255,7 @@ flowchart LR
 
 Why per-bank platform devices? GEM allocations call
 `dma_alloc_coherent(bank->dev, ...)` (see
-`drivers/misc/tessai-agent/tessai_agent_drm.c`).
+`drivers/accel/tessai-agent/tessai_agent_drm.c`).
 Each bank has its own `struct device` so:
 
 1. The dma-mask is honoured per allocation. The RPU bank refuses
@@ -333,7 +336,7 @@ struct tessai_dev {
 The platform probe assembles all of the above:
 
 See **`tessai_platform_probe()`** in
-[`drivers/misc/tessai-agent/tessai_agent_drv.c`](../drivers/misc/tessai-agent/tessai_agent_drv.c)
+[`drivers/accel/tessai-agent/tessai_agent_drv.c`](../drivers/accel/tessai-agent/tessai_agent_drv.c)
 for the actual sequence:
 
 1. Parse `amd,remoteproc`.

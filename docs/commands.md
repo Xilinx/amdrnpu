@@ -94,7 +94,7 @@ buffer-based side protocol if it needs to stream milestones while the command
 slot stays occupied.
 
 `TESSAI_RSP_ERROR` in legacy code is **`#define`d** to **`TESSAI_RSP_REMOTEIO`**
-in [`tessai_agent_cmd.h`](../drivers/misc/tessai-agent/tessai_agent_cmd.h).
+in [`tessai_agent_cmd.h`](../drivers/accel/tessai-agent/tessai_agent_cmd.h).
 
 ---
 
@@ -162,8 +162,8 @@ helpers in `drm_syncobj.c`.
 
 Prefer **`tessai_agent_cmd_submit()`** + **`tessai_agent_syncobj_wait_complete()`**
 (or **`tessai_agent_syncobj_wait_busy_poll()`** for a polling loop) from
-[`lib/tessai-agent/include/tessai_agent/tessai_agent_lib.h`](../lib/tessai-agent/include/tessai_agent/tessai_agent_lib.h).
-Release GEMs with **`tessai_agent_gem_close()`** when appropriate (see
+[`lib/include/tessai_agent/tessai_agent_lib.h`](../lib/include/tessai_agent/tessai_agent_lib.h).
+Release GEMs with **`tessai_agent_buf_close()`** when appropriate (see
 [`buffer-management.md`](buffer-management.md)).
 
 Raw ioctl callers must allocate a contiguous blob:

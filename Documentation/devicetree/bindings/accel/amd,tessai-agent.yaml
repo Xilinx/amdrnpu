@@ -19,8 +19,7 @@ description: |
   platform driver is bound only to amd,tessai-agent; Xilinx remoteproc and
   firmware lifecycles remain under the vendor RPU binding.
 
-  Kernel driver role (drivers/misc/tessai-agent today; intended for DRM
-  subsystem upstream):
+  Kernel driver role (drivers/accel/tessai-agent, DRM accelerator subsystem):
 
     - GEM-backed DMA-coherent buffers in two heaps: one window sized for firmware
       and RPU-visible traffic (typically 32-bit DMA), and one for device-side /

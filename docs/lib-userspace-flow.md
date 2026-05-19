@@ -1,9 +1,9 @@
 # Userspace library API flow (`libtessai_agent`)
 
 This page matches the **installed** helpers in
-[`lib/tessai-agent/include/tessai_agent/tessai_agent_lib.h`](../lib/tessai-agent/include/tessai_agent/tessai_agent_lib.h)
+[`lib/include/tessai_agent/tessai_agent_lib.h`](../lib/include/tessai_agent/tessai_agent_lib.h)
 and
-[`lib/tessai-agent/src/tessai_agent_lib.c`](../lib/tessai-agent/src/tessai_agent_lib.c).
+[`lib/src/tessai_agent_lib.c`](../lib/src/tessai_agent_lib.c).
 The **ABI** (structs, ioctl numbers) lives in
 [`include/uapi/tessai-agent/tessai_agent.h`](../include/uapi/tessai-agent/tessai_agent.h).
 
@@ -131,10 +131,10 @@ flowchart LR
     A[TESSAI_BUF_ALLOC] --> B[GEM handle + optional mmap]
     B --> C[TESSAI_CMD_SUBMIT with tessai_arg refs]
     C --> D[wait_complete or wait_busy_poll]
-    D --> E[tessai_agent_gem_close / munmap after cmd terminates]
+    D --> E[tessai_agent_buf_close / munmap after cmd terminates]
 ```
 
-For a minimal runnable example see
-[`lib/tessai-agent/examples/tessai_agent_minimal.c`](../lib/tessai-agent/examples/tessai_agent_minimal.c);
-for Zephyr-aligned firmware echo behaviour see
-[`tessai_agent_fw_echo.c`](../lib/tessai-agent/examples/tessai_agent_fw_echo.c).
+For runnable examples covering every UAPI op (buf_alloc, cmd_submit,
+lifecycle, fw_echo writeback, and the full Phase 2 fault-class
+fence-error suite) see
+[`lib/examples/tessai_agent_test.c`](../lib/examples/tessai_agent_test.c).

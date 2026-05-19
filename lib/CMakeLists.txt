@@ -1,157 +1,110 @@
 # SPDX-License-Identifier: MIT
 cmake_minimum_required(VERSION 3.16)
 
-project(rpurt_rpc
+project(tessai_agent_lib
     VERSION 0.1.0
-    DESCRIPTION "RPU runtime RPC user-space library"
     LANGUAGES C
 )
 
 include(GNUInstallDirs)
 
-option(RPURT_RPC_BUILD_SHARED  "Build the shared library"        ON)
-option(RPURT_RPC_BUILD_STATIC  "Build the static library"        ON)
-option(RPURT_RPC_BUILD_EXAMPLES "Build example/test CLI programs" ON)
+option(TESSAI_AGENT_LIB_BUILD_SHARED   "Build shared library" ON)
+option(TESSAI_AGENT_LIB_BUILD_STATIC   "Build static library" ON)
+option(TESSAI_AGENT_LIB_BUILD_EXAMPLES "Build examples" ON)
+option(TESSAI_AGENT_LINK_EXAMPLES_STATIC
+	"Link examples against libtessai_agent.a (no libtessai_agent.so at runtime)" OFF)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
-set(CMAKE_C_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
-# The shared UAPI header (also consumed by the kernel module) lives at
-# <repo>/include/uapi/rpurt-rpc/rpurt_rpc.h. Expose it via the public
-# include directory of this library.
-set(RPURT_RPC_UAPI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../include/uapi"
-    CACHE PATH "Path to the shared UAPI headers")
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LIBDRM REQUIRED libdrm)
 
-set(RPURT_RPC_PUBLIC_HEADERS
-    include/rpurt_rpc/rpurt_rpc.h
+set(TESSAI_AGENT_UAPI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../include/uapi"
+    CACHE PATH "tessai-agent UAPI")
+set(TESSAI_AGENT_LIB_SOURCES
+    src/tessai_agent_lib.c
 )
 
-set(RPURT_RPC_SOURCES
-    src/rpurt_rpc.c
+set(TESSAI_AGENT_LIB_HEADERS
+    include/tessai_agent/tessai_agent_lib.h
 )
 
-# ----------------------------------------------------------------------------
-# Library targets
-# ----------------------------------------------------------------------------
-function(_rpurt_rpc_configure_target tgt)
+function(_tessai_agent_lib_configure_target tgt)
     target_include_directories(${tgt}
         PUBLIC
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-            $<BUILD_INTERFACE:${RPURT_RPC_UAPI_DIR}>
+            $<BUILD_INTERFACE:${TESSAI_AGENT_UAPI_DIR}>
             $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+        PRIVATE
+            ${LIBDRM_INCLUDE_DIRS}
     )
-    target_compile_options(${tgt} PRIVATE -Wall -Wextra -Wpedantic)
-    set_target_properties(${tgt} PROPERTIES
-        C_VISIBILITY_PRESET hidden
-        VISIBILITY_INLINES_HIDDEN ON
-    )
+    target_link_libraries(${tgt} PRIVATE ${LIBDRM_LIBRARIES})
+    target_compile_options(${tgt} PRIVATE ${LIBDRM_CFLAGS_OTHER} -Wall -Wextra)
 endfunction()
 
 set(_installed_targets)
 
-if(RPURT_RPC_BUILD_SHARED)
-    add_library(rpurt_rpc SHARED ${RPURT_RPC_SOURCES})
-    add_library(rpurt_rpc::rpurt_rpc ALIAS rpurt_rpc)
-    set_target_properties(rpurt_rpc PROPERTIES
+if(TESSAI_AGENT_LIB_BUILD_SHARED)
+    add_library(tessai_agent SHARED ${TESSAI_AGENT_LIB_SOURCES})
+    add_library(tessai_agent::tessai_agent ALIAS tessai_agent)
+    _tessai_agent_lib_configure_target(tessai_agent)
+    set_target_properties(tessai_agent PROPERTIES
         VERSION   ${PROJECT_VERSION}
         SOVERSION ${PROJECT_VERSION_MAJOR}
-        OUTPUT_NAME rpurt_rpc
+        OUTPUT_NAME tessai_agent
     )
-    target_compile_definitions(rpurt_rpc PRIVATE RPURT_RPC_BUILDING_DLL)
-    _rpurt_rpc_configure_target(rpurt_rpc)
-    list(APPEND _installed_targets rpurt_rpc)
+    list(APPEND _installed_targets tessai_agent)
 endif()
 
-if(RPURT_RPC_BUILD_STATIC)
-    add_library(rpurt_rpc_static STATIC ${RPURT_RPC_SOURCES})
-    add_library(rpurt_rpc::rpurt_rpc_static ALIAS rpurt_rpc_static)
-    set_target_properties(rpurt_rpc_static PROPERTIES
-        OUTPUT_NAME rpurt_rpc
-    )
-    _rpurt_rpc_configure_target(rpurt_rpc_static)
-    list(APPEND _installed_targets rpurt_rpc_static)
+if(TESSAI_AGENT_LIB_BUILD_STATIC)
+    add_library(tessai_agent_static STATIC ${TESSAI_AGENT_LIB_SOURCES})
+    add_library(tessai_agent::tessai_agent_static ALIAS tessai_agent_static)
+    _tessai_agent_lib_configure_target(tessai_agent_static)
+    set_target_properties(tessai_agent_static PROPERTIES OUTPUT_NAME tessai_agent)
+    list(APPEND _installed_targets tessai_agent_static)
 endif()
 
-# ----------------------------------------------------------------------------
-# Example / test CLIs
-# ----------------------------------------------------------------------------
-# Add new example programs by appending to RPURT_RPC_EXAMPLE_PROGRAMS;
-# each entry must have a matching examples/<name>.c source file.
-if(RPURT_RPC_BUILD_EXAMPLES)
-    set(RPURT_RPC_EXAMPLE_PROGRAMS
-        rpurt_rpc_test
-    )
-    foreach(_prog IN LISTS RPURT_RPC_EXAMPLE_PROGRAMS)
-        add_executable(${_prog} examples/${_prog}.c)
-        if(TARGET rpurt_rpc)
-            target_link_libraries(${_prog} PRIVATE rpurt_rpc::rpurt_rpc)
-        else()
-            target_link_libraries(${_prog} PRIVATE rpurt_rpc::rpurt_rpc_static)
-        endif()
-    endforeach()
+if(TESSAI_AGENT_LIB_BUILD_EXAMPLES AND _installed_targets)
+	set(_tess_examples tessai_agent_test)
+	if(TESSAI_AGENT_LINK_EXAMPLES_STATIC)
+		if(NOT TARGET tessai_agent_static)
+			message(FATAL_ERROR
+				"TESSAI_AGENT_LINK_EXAMPLES_STATIC requires TESSAI_AGENT_LIB_BUILD_STATIC=ON")
+		endif()
+		set(_example_tess_lib tessai_agent::tessai_agent_static)
+	elseif(TARGET tessai_agent)
+		set(_example_tess_lib tessai_agent::tessai_agent)
+	else()
+		set(_example_tess_lib tessai_agent::tessai_agent_static)
+	endif()
+	foreach(_exe IN LISTS _tess_examples)
+		add_executable(${_exe} examples/${_exe}.c)
+		target_link_libraries(${_exe} PRIVATE ${_example_tess_lib})
+		target_include_directories(${_exe} PRIVATE ${LIBDRM_INCLUDE_DIRS})
+		target_link_libraries(${_exe} PRIVATE ${LIBDRM_LIBRARIES})
+		target_compile_options(${_exe} PRIVATE ${LIBDRM_CFLAGS_OTHER})
+		if(NOT TESSAI_AGENT_LINK_EXAMPLES_STATIC AND TARGET tessai_agent)
+			target_link_options(${_exe} PRIVATE "-Wl,-rpath,\$ORIGIN/../tessai-lib")
+		endif()
+	endforeach()
 endif()
 
-# ----------------------------------------------------------------------------
-# Install
-# ----------------------------------------------------------------------------
 install(TARGETS ${_installed_targets}
-    EXPORT  rpurt_rpcTargets
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 
-install(DIRECTORY include/rpurt_rpc
+install(DIRECTORY include/tessai_agent
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
     FILES_MATCHING PATTERN "*.h"
 )
 
-install(DIRECTORY ${RPURT_RPC_UAPI_DIR}/rpurt-rpc
+install(DIRECTORY ${TESSAI_AGENT_UAPI_DIR}/tessai-agent
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
     FILES_MATCHING PATTERN "*.h"
-)
-
-if(RPURT_RPC_BUILD_EXAMPLES)
-    install(TARGETS ${RPURT_RPC_EXAMPLE_PROGRAMS}
-        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-    )
-endif()
-
-# pkg-config file
-configure_file(
-    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/rpurt_rpc.pc.in
-    ${CMAKE_CURRENT_BINARY_DIR}/rpurt_rpc.pc
-    @ONLY
-)
-install(FILES ${CMAKE_CURRENT_BINARY_DIR}/rpurt_rpc.pc
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig
-)
-
-# CMake package config
-include(CMakePackageConfigHelpers)
-configure_package_config_file(
-    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/rpurt_rpcConfig.cmake.in
-    ${CMAKE_CURRENT_BINARY_DIR}/rpurt_rpcConfig.cmake
-    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/rpurt_rpc
-)
-write_basic_package_version_file(
-    ${CMAKE_CURRENT_BINARY_DIR}/rpurt_rpcConfigVersion.cmake
-    VERSION ${PROJECT_VERSION}
-    COMPATIBILITY SameMajorVersion
-)
-install(FILES
-    ${CMAKE_CURRENT_BINARY_DIR}/rpurt_rpcConfig.cmake
-    ${CMAKE_CURRENT_BINARY_DIR}/rpurt_rpcConfigVersion.cmake
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/rpurt_rpc
-)
-install(EXPORT rpurt_rpcTargets
-    FILE rpurt_rpcTargets.cmake
-    NAMESPACE rpurt_rpc::
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/rpurt_rpc
 )

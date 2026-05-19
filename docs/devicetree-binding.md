@@ -2,7 +2,7 @@
 
 This document describes how the `tessai-agent` driver is wired into a
 SoC's device tree. The machine-checkable schema lives at
-[`Documentation/devicetree/bindings/misc/amd,tessai-agent.yaml`](../Documentation/devicetree/bindings/misc/amd,tessai-agent.yaml)
+[`Documentation/devicetree/bindings/accel/amd,tessai-agent.yaml`](../Documentation/devicetree/bindings/accel/amd,tessai-agent.yaml)
 and is the source of truth; this page is a friendlier
 prose-and-diagram reference.
 
@@ -312,10 +312,10 @@ schema directly:
 
 ```bash
 # Check the schema itself parses cleanly
-dt-validate -m Documentation/devicetree/bindings/misc/amd,tessai-agent.yaml
+dt-validate -m Documentation/devicetree/bindings/accel/amd,tessai-agent.yaml
 
 # Validate a compiled DTB
-dt-validate -s Documentation/devicetree/bindings/misc/amd,tessai-agent.yaml \
+dt-validate -s Documentation/devicetree/bindings/accel/amd,tessai-agent.yaml \
     /path/to/your.dtb
 ```
 

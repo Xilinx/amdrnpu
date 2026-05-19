@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# tessai-agent out-of-tree DRM/RPMsg driver.
+
+ccflags-y += -I$(src)/../../../include/uapi
+
+obj-m += tessai_agent.o
+
+tessai_agent-y := \
+	tessai_agent_drv.o   \
+	tessai_agent_bank.o  \
+	tessai_agent_drm.o   \
+	tessai_agent_cmd.o   \
+	tessai_agent_rpmsg.o

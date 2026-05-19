@@ -9,17 +9,17 @@ own.
 | [lib-userspace-flow.md](lib-userspace-flow.md) | **`libtessai_agent`** API (`tessai_agent_*`): buffer alloc/close, command submit, syncobj wait helpers, diagrams. |
 | [architecture.md](architecture.md) | System view, in-kernel block diagram, file-by-file responsibilities, the dual platform/rpmsg driver registration, and the per-bank memory layout. |
 | [devicetree-binding.md](devicetree-binding.md) | Prose reference for the `amd,tessai-agent` DT binding: parent/child schema, reserved-memory companion nodes, single- and multi-RPU examples, validation, and common pitfalls. |
-| [buffer-management.md](buffer-management.md) | `TESSAI_BUF_ALLOC`, GEM mmap, handle lifetime, in-flight command pins, and release via `tessai_agent_gem_close` / `DRM_IOCTL_GEM_CLOSE`. |
+| [buffer-management.md](buffer-management.md) | `TESSAI_BUF_ALLOC`, GEM mmap, handle lifetime, in-flight command pins, and release via `tessai_agent_buf_close` / `DRM_IOCTL_GEM_CLOSE`. |
 | [commands.md](commands.md) | Command submission (`TESSAI_CMD_SUBMIT`), wire format, and drm_syncobj / dma_fence interaction. |
 
 The machine-checkable YAML schema for the binding lives at
-[`Documentation/devicetree/bindings/misc/amd,tessai-agent.yaml`](../Documentation/devicetree/bindings/misc/amd,tessai-agent.yaml).
+[`Documentation/devicetree/bindings/accel/amd,tessai-agent.yaml`](../Documentation/devicetree/bindings/accel/amd,tessai-agent.yaml).
 
 ## Quick links
 
-- tessai userspace wrappers: [`lib/tessai-agent/`](../lib/tessai-agent/) (`tessai_agent_lib`)
-- tess UAPI header: [`include/uapi/tessai-agent/tessai_agent.h`](../include/uapi/tessai-agent/tessai_agent.h)
-- Driver source: [`drivers/misc/tessai-agent/`](../drivers/misc/tessai-agent/)
+- Userspace library: [`lib/`](../lib/) (`libtessai_agent` + `tessai_agent_test` CLI)
+- UAPI header: [`include/uapi/tessai-agent/tessai_agent.h`](../include/uapi/tessai-agent/tessai_agent.h)
+- Driver source: [`drivers/accel/tessai-agent/`](../drivers/accel/tessai-agent/)
 - Cross-build helper: [`scripts/yocto-cross-build.sh`](../scripts/yocto-cross-build.sh)
 - Top-level overview: [`../README.md`](../README.md)
 
