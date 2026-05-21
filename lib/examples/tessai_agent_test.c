@@ -109,11 +109,9 @@ static const char *memory_type_str(uint32_t t)
  *   "scalar:<u64>"          -> tessai_arg{ .size = 0,    .value = u64 }
  *   "buf:<handle>:<offset>" -> tessai_arg{ .size = ~0u,  .bo = {handle, offset} }
  *
- * The "size" of buffer args is set by the caller to the slice length the
- * firmware should treat the buffer as. For raw cmd_submit testing we use
- * the offset value as a stand-in: it does not matter to the kernel because
- * the kernel only needs the handle to resolve dma_addr; the firmware-side
- * interpretation depends on the op. Most users will want fw_echo instead.
+ * The "size" of buffer args is the byte length of the GEM slice (must be
+ * <= BO size minus offset).  For a six-arg in/out layout see OP_CODE_CMD0 in
+ * include/uapi/tessai-agent/tessai_agent.h.  Most quick tests use fw_echo instead.
  */
 static int parse_arg_token(const char *tok, struct tessai_arg *out)
 {
@@ -135,9 +133,8 @@ static int parse_arg_token(const char *tok, struct tessai_arg *out)
 		}
 		handle = parse_u32(p);
 		offset = parse_u32(colon + 1);
-		/* Non-zero size flags this as a buffer arg to the kernel.
-		 * The kernel only inspects the handle/offset; size is opaque
-		 * to it. Use 1 to mean "minimum valid buffer slice".
+		/* Non-zero size: GEM slice length (validated vs BO size).  CLI uses
+		 * size 1 for minimal smoke tests; real ops need the firmware length.
 		 */
 		out->size = 1;
 		out->bo.drm_buffer_handle = (int32_t)handle;
