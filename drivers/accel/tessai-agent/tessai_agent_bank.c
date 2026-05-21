@@ -21,10 +21,10 @@
  * heap, optional iommus, and dma-mask are owned per-bank), then registers
  * itself into the parent's tessai_dev->banks[] table.
  *
- * The banks are NOT marked dma-coherent: dma_alloc_coherent() therefore
- * returns non-cacheable normal memory, which is what RPU firmware / device
- * DMA expects (no CPU cache maintenance needed; userspace mmap sees the same
- * view).
+ * Banks are not marked dma-coherent in DT.  Native GEM buffers use
+ * dma_alloc_noncoherent() (contiguous, cacheable CPU mappings); userspace
+ * must call TESSAI_BUF_SYNC before the device reads CPU-written data and
+ * after the device writes data the CPU will read.
  */
 
 #include <linux/of.h>

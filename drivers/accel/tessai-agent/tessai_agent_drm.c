@@ -8,14 +8,15 @@
  *     ioctls in addition to our custom ones, and
  *   - dma-buf import/export plumbing.
  *
- * Custom ioctls use magic 'T' for TESSAI_BUF_ALLOC and TESSAI_CMD_SUBMIT only.
- * PRIME import/export and drm_syncobj use the core DRM ioctl path ('d').
+ * Custom ioctls use magic 'T' for TESSAI_BUF_ALLOC, TESSAI_BUF_SYNC, and
+ * TESSAI_CMD_SUBMIT.  PRIME import/export and drm_syncobj use the core DRM
+ * ioctl path ('d').
  *
  * GEM allocations are NOT done with the drm_gem_dma helpers because
  * each buffer needs to be attached to a *bank* device (RPU 32-bit or
- * dev 64-bit) rather than the DRM device itself.  We implement the GEM
- * ops directly on top of dma_alloc_coherent() and use
- * drm_gem_create_mmap_offset() to expose the result via mmap().
+ * dev 64-bit) rather than the DRM device itself.  Native buffers use
+ * dma_alloc_noncoherent() (contiguous cacheable CPU mappings) and
+ * TESSAI_BUF_SYNC for explicit cache maintenance before/after device DMA.
  */
 
 #include <linux/dma-buf.h>
@@ -77,39 +78,40 @@ static void tessai_gem_free(struct drm_gem_object *obj)
 						 bo->sgt, DMA_BIDIRECTIONAL);
 		drm_prime_gem_destroy(obj, bo->sgt);
 	} else if (bo->kvaddr) {
-		dma_free_coherent(bo->bank->dev, bo->size,
-				  bo->kvaddr, bo->dma_addr);
+		dma_free_noncoherent(bo->bank->dev, bo->size,
+				     bo->kvaddr, bo->dma_addr, bo->dma_dir);
 	}
 
 	drm_gem_object_release(obj);
 	kfree(bo);
 }
 
-static int tessai_gem_mmap_native(struct tessai_gem *bo, struct vm_area_struct *vma)
+static int tessai_gem_mmap_native(struct drm_gem_object *obj,
+				  struct vm_area_struct *vma)
 {
-	unsigned long vsize = vma->vm_end - vma->vm_start;
+	struct tessai_gem *bo = to_tessai_gem(obj);
+	unsigned long pgoff = vma->vm_pgoff - drm_vma_node_start(&obj->vma_node);
+	unsigned long vpages = vma_pages(vma);
+	unsigned long bopages = bo->size >> PAGE_SHIFT;
 
-	if (vsize > bo->size)
+	if (pgoff >= bopages || vpages > bopages - pgoff)
 		return -EINVAL;
 
 	vm_flags_clear(vma, VM_PFNMAP);
 	vm_flags_set(vma, VM_DONTEXPAND | VM_DONTDUMP);
-	vma->vm_pgoff = 0;
+	vma->vm_pgoff = pgoff;
 
-	return dma_mmap_coherent(bo->bank->dev, vma,
-				 bo->kvaddr, bo->dma_addr, vsize);
+	return dma_mmap_pages(bo->bank->dev, vma, bo->size, bo->page);
 }
 
 static int tessai_gem_obj_mmap(struct drm_gem_object *obj,
 			     struct vm_area_struct *vma)
 {
-	struct tessai_gem *bo = to_tessai_gem(obj);
-
 	if (obj->import_attach) {
 		vma->vm_pgoff -= drm_vma_node_start(&obj->vma_node);
 		return dma_buf_mmap(obj->dma_buf, vma, 0);
 	}
-	return tessai_gem_mmap_native(bo, vma);
+	return tessai_gem_mmap_native(obj, vma);
 }
 
 /*
@@ -242,12 +244,15 @@ static int tessai_buf_alloc(struct drm_device *ddev, struct tessai_buf_alloc *ar
 	if (IS_ERR(bo))
 		return PTR_ERR(bo);
 
-	bo->kvaddr = dma_alloc_coherent(bank->dev, bo->size,
-					&bo->dma_addr, GFP_KERNEL);
+	bo->dma_dir = DMA_BIDIRECTIONAL;
+	bo->kvaddr = dma_alloc_noncoherent(bank->dev, bo->size,
+					   &bo->dma_addr, bo->dma_dir,
+					   GFP_KERNEL);
 	if (!bo->kvaddr) {
 		ret = -ENOMEM;
 		goto err_release;
 	}
+	bo->page = virt_to_page(bo->kvaddr);
 
 	ret = drm_gem_create_mmap_offset(&bo->base);
 	if (ret)
@@ -262,11 +267,89 @@ static int tessai_buf_alloc(struct drm_device *ddev, struct tessai_buf_alloc *ar
 	return 0;
 
 err_free_dma:
-	dma_free_coherent(bank->dev, bo->size, bo->kvaddr, bo->dma_addr);
+	dma_free_noncoherent(bank->dev, bo->size, bo->kvaddr, bo->dma_addr,
+			     bo->dma_dir);
 	bo->kvaddr = NULL;
+	bo->page = NULL;
 err_release:
 	drm_gem_object_put(&bo->base);
 	return ret;
+}
+
+static int tessai_buf_sync(struct drm_device *ddev, struct tessai_buf_sync *args,
+			 struct drm_file *file)
+{
+	struct tessai_dev *tdev = to_tessai_dev(ddev);
+	struct drm_gem_object *obj;
+	struct tessai_gem *bo;
+	u64 offset = args->offset;
+	u64 length = args->length;
+	u64 end;
+
+	if (args->flags) {
+		dev_err(tdev->dev, "TESSAI_BUF_SYNC: flags %#x not supported\n",
+			args->flags);
+		return -EINVAL;
+	}
+	if (args->direction > TESSAI_BUF_SYNC_FROM_DEVICE) {
+		dev_err(tdev->dev, "TESSAI_BUF_SYNC: invalid direction %u\n",
+			args->direction);
+		return -EINVAL;
+	}
+
+	obj = drm_gem_object_lookup(file, args->drm_handle);
+	if (!obj) {
+		dev_err(tdev->dev, "TESSAI_BUF_SYNC: unknown handle %u\n",
+			args->drm_handle);
+		return -ENOENT;
+	}
+
+	bo = to_tessai_gem(obj);
+	if (obj->import_attach) {
+		dev_err(tdev->dev,
+			"TESSAI_BUF_SYNC: handle %u is imported (use exporter sync)\n",
+			args->drm_handle);
+		drm_gem_object_put(obj);
+		return -EOPNOTSUPP;
+	}
+
+	if (offset > bo->size) {
+		dev_err(tdev->dev,
+			"TESSAI_BUF_SYNC: offset %llu exceeds BO size %zu (handle %u)\n",
+			offset, bo->size, args->drm_handle);
+		drm_gem_object_put(obj);
+		return -EINVAL;
+	}
+
+	if (!length)
+		length = bo->size - offset;
+	end = offset + length;
+	if (end > bo->size || end < offset) {
+		dev_err(tdev->dev,
+			"TESSAI_BUF_SYNC: range [%llu, %llu) invalid for BO size %zu (handle %u)\n",
+			offset, end, bo->size, args->drm_handle);
+		drm_gem_object_put(obj);
+		return -EINVAL;
+	}
+
+	switch (args->direction) {
+	case TESSAI_BUF_SYNC_TO_DEVICE:
+		dma_sync_single_range_for_device(bo->bank->dev, bo->dma_addr,
+						 offset, length, bo->dma_dir);
+		break;
+	case TESSAI_BUF_SYNC_FROM_DEVICE:
+		dma_sync_single_range_for_cpu(bo->bank->dev, bo->dma_addr,
+					      offset, length, bo->dma_dir);
+		break;
+	default:
+		dev_err(tdev->dev, "TESSAI_BUF_SYNC: invalid direction %u\n",
+			args->direction);
+		drm_gem_object_put(obj);
+		return -EINVAL;
+	}
+
+	drm_gem_object_put(obj);
+	return 0;
 }
 
 /* --------------------------------------------------------------- */
@@ -302,6 +385,13 @@ static long tessai_drm_ioctl(struct file *filp, unsigned int cmd,
 		if (!ret && copy_to_user(uarg, &args, sizeof(args)))
 			ret = -EFAULT;
 		return ret;
+	}
+	case TESSAI_BUF_SYNC: {
+		struct tessai_buf_sync args;
+
+		if (copy_from_user(&args, uarg, sizeof(args)))
+			return -EFAULT;
+		return tessai_buf_sync(ddev, &args, file);
 	}
 	case TESSAI_CMD_SUBMIT:
 		return tessai_ioctl_cmd_submit(ddev, uarg, file);
