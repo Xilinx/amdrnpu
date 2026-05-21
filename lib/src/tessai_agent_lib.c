@@ -12,10 +12,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <time.h>
 #include <unistd.h>
 
 #include <drm/drm.h>
+#include <drm/drm_mode.h>
 #include <libdrm/drm.h>
 #include <linux/sync_file.h>
 
@@ -112,6 +114,80 @@ int tessai_agent_buf_close(int drm_fd, uint32_t handle)
 	struct drm_gem_close arg = { .handle = handle };
 
 	if (ioctl(drm_fd, DRM_IOCTL_GEM_CLOSE, &arg))
+		return -errno;
+	return 0;
+}
+
+static unsigned long tessai_page_size(void)
+{
+	long psz = sysconf(_SC_PAGESIZE);
+
+	if (psz <= 0)
+		return 4096UL;
+	return (unsigned long)psz;
+}
+
+static bool tessai_page_aligned(uint64_t val, unsigned long psz)
+{
+	return (val & (psz - 1)) == 0;
+}
+
+int tessai_agent_buf_mmap(int drm_fd, uint32_t handle, uint64_t buf_size,
+			  uint64_t offset, uint64_t length, void **out_map)
+{
+	struct drm_mode_map_dumb md = { .handle = handle };
+	unsigned long psz = tessai_page_size();
+	void *map;
+
+	if (!out_map)
+		return -EINVAL;
+
+	if (!tessai_page_aligned(offset, psz))
+		return -EINVAL;
+	if (length && !tessai_page_aligned(length, psz))
+		return -EINVAL;
+
+	if (!length) {
+		if (!buf_size || offset > buf_size)
+			return -EINVAL;
+		length = buf_size - offset;
+	} else if (buf_size && offset + length > buf_size) {
+		return -EINVAL;
+	}
+
+	if (!length)
+		return -EINVAL;
+
+	if (ioctl(drm_fd, DRM_IOCTL_MODE_MAP_DUMB, &md))
+		return -errno;
+
+	map = mmap(NULL, (size_t)length, PROT_READ | PROT_WRITE, MAP_SHARED,
+		   drm_fd, (off_t)(md.offset + offset));
+	if (map == MAP_FAILED)
+		return -errno;
+
+	*out_map = map;
+	return 0;
+}
+
+void tessai_agent_buf_munmap(void *addr, uint64_t length)
+{
+	if (!addr || !length)
+		return;
+	(void)munmap(addr, (size_t)length);
+}
+
+int tessai_agent_buf_sync(int drm_fd, uint32_t handle, uint32_t direction,
+			  uint64_t offset, uint64_t length)
+{
+	struct tessai_buf_sync arg = {
+		.drm_handle	= handle,
+		.direction	= direction,
+		.offset		= offset,
+		.length		= length,
+	};
+
+	if (ioctl(drm_fd, TESSAI_BUF_SYNC, &arg))
 		return -errno;
 	return 0;
 }
