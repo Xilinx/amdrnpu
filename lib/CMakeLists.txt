@@ -25,7 +25,7 @@ endif()
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBDRM REQUIRED libdrm)
 
-set(TESSAI_AGENT_UAPI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../include/uapi"
+set(TESSAI_AGENT_UAPI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../include/uapi"
     CACHE PATH "tessai-agent UAPI")
 set(TESSAI_AGENT_LIB_SOURCES
     src/tessai_agent_lib.c
