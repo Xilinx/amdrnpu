@@ -142,21 +142,21 @@ tessai_pdev_for_rproc(struct device_node *rproc_np)
 /* --------------------------------------------------------------- */
 
 static int tessai_rpmsg_cb(struct rpmsg_device *rpdev, void *data, int len,
-			 void *priv, u32 src)
+			   void *priv, u32 src)
 {
 	struct tessai_dev *tdev = dev_get_drvdata(&rpdev->dev);
 
 	if (!tdev) {
 		/* Channel was unbound while a callback was racing in. */
 		dev_warn_ratelimited(&rpdev->dev,
-			"rpmsg msg dropped: channel not bound\n");
+				     "rpmsg msg dropped: channel not bound\n");
 		return 0;
 	}
 
-	if ((size_t)len < 24U) {
+	if ((size_t)len < sizeof(struct tessai_wire_rsp)) {
 		dev_warn(tdev->dev,
-			 "rpmsg msg too small (%d bytes, need packed rsp hdr 24), dropping\n",
-			 len);
+			 "rpmsg msg too small (%d bytes, need packed rsp hdr %zu), dropping\n",
+			 len, sizeof(struct tessai_wire_rsp));
 		return 0;
 	}
 
@@ -237,7 +237,7 @@ static void tessai_rpmsg_remove(struct rpmsg_device *rpdev)
 	dev_set_drvdata(&rpdev->dev, NULL);
 	mutex_unlock(&tdev->rpmsg_lock);
 
-	tessai_cmd_abort_inflight_rpmsg_detach(tdev, -ENOTCONN);
+	tessai_cmd_drain_inflight_rpmsg_detach(tdev, -ENOTCONN);
 
 	dev_info(tdev->dev, "rpmsg channel %s detached\n",
 		 dev_name(&rpdev->dev));
@@ -271,8 +271,8 @@ void tessai_rpmsg_unregister(void)
 /* Send                                                            */
 /* --------------------------------------------------------------- */
 
-int tessai_rpmsg_send_cmd(struct tessai_dev *tdev, u16 op_ctrl, u16 op_app,
-			u32 command_op, u32 flags, const __le64 *args,
+int tessai_rpmsg_send_cmd(struct tessai_dev *tdev, u32 seq,
+			  u32 command_op, u32 flags, const __le64 *args,
 			u32 num_args)
 {
 	struct rpmsg_device *rpdev;
@@ -297,8 +297,7 @@ int tessai_rpmsg_send_cmd(struct tessai_dev *tdev, u16 op_ctrl, u16 op_app,
 		return -ENOMEM;
 	}
 
-	msg->op_ctrl     = cpu_to_le16(op_ctrl);
-	msg->op_app      = cpu_to_le16(op_app);
+	msg->seq         = cpu_to_le32(seq);
 	msg->command_op  = cpu_to_le32(command_op);
 	msg->flags       = cpu_to_le32(flags);
 	msg->num_args    = cpu_to_le32(num_args);

@@ -2,21 +2,18 @@
 /*
  * tessai-agent - command lifecycle and a single-stage dma_fence on drm_syncobj.
  *
- * After TESSAI_CMD_SUBMIT, userspace waits on the returned drm_syncobj.  One
- * tessai_fence backs that syncobj until a terminal RPMsg response; the driver
- * then dma_fence_signals it (failure paths set dma_fence error from errno).
+ * Submit allocates a command id in cmd_xa and returns a drm_syncobj handle.
+ * Userspace waits/queries only that syncobj.  A terminal RPMsg response (or
+ * ioctl/fd teardown) xa_erases the slot, signals the fence (with errno on fault),
+ * and drops the command object.
  */
 
 #include <linux/device.h>
-#include <linux/build_bug.h>
 #include <linux/dma-fence.h>
 #include <linux/printk.h>
-#include <linux/idr.h>
+#include <linux/xarray.h>
 #include <linux/kernel.h>
 #include <linux/kref.h>
-#include <linux/of.h>
-#include <linux/of_platform.h>
-#include <linux/platform_device.h>
 #include <linux/atomic.h>
 #include <linux/slab.h>
 #include <linux/sched.h>
@@ -127,119 +124,47 @@ static void tessai_cmd_release(struct kref *ref)
 	kfree(cmd);
 }
 
-static void tessai_cmd_get(struct tessai_cmd *cmd) { kref_get(&cmd->ref); }
 static void tessai_cmd_put(struct tessai_cmd *cmd) { kref_put(&cmd->ref, tessai_cmd_release); }
 
-static struct tessai_cmd *tessai_cmd_lookup(struct tessai_dev *tdev, s32 handle)
+/* Remove @seq from cmd_xa; NULL if unknown or already completed. */
+static struct tessai_cmd *tessai_cmd_xa_take(struct tessai_dev *tdev, u32 seq)
 {
 	struct tessai_cmd *cmd;
 
 	mutex_lock(&tdev->cmd_lock);
-	cmd = idr_find(&tdev->cmd_idr, handle);
-	if (cmd)
-		tessai_cmd_get(cmd);
+	cmd = xa_erase(&tdev->cmd_xa, seq);
+	if (cmd) {
+		cmd->in_cmd_xa = false;
+		cmd->seq = TESSAI_CMD_SEQ_NONE;
+	}
 	mutex_unlock(&tdev->cmd_lock);
 	return cmd;
 }
 
 /*
- * With two "amd,tessai-agent" DT nodes aimed at the same remoteproc, RPMsg may
- * bind to one platform instance while userspace ioctls another; idr slots then
- * live on a peer tessai_dev.  Try (1) the RPMsg tessai_dev idr; (2) every other tess
- * node whose amd,remoteproc phandle resolves to linked_rproc (pointer identity).
- *
- * Overlay/merge trees sometimes duplicate the logical RPU behind different struct
- * device_node pointers so (2) never matches; (3) walk all probed amd,tessai-agent
- * platform devices except skip and lookup the command id there.  That can mis-route
- * only if multiple RPU instances concurrently reuse the same small command ids.
+ * Allocate a wire command id with xa_alloc_cyclic (xa_limit_32b, reuse when free).
  */
-struct tessai_cmd_find_ctx {
-	struct tessai_dev *skip_tdev;
+static int tessai_cmd_xa_alloc_id(struct tessai_dev *tdev, struct tessai_cmd *cmd)
+{
 	u32 id;
-	struct tessai_cmd *found;
-};
+	int err;
 
-static int tessai_cmd_find_on_tess_pdev(struct device *dev, void *arg)
-{
-	struct tessai_cmd_find_ctx *c = arg;
-	struct platform_device *pdev;
-	struct tessai_dev *owner;
-
-	if (!dev->of_node)
-		return 0;
-	if (!of_device_is_compatible(dev->of_node, "amd,tessai-agent"))
-		return 0;
-	pdev = to_platform_device(dev);
-	owner = platform_get_drvdata(pdev);
-	if (!owner || owner->dev != dev || owner == c->skip_tdev)
-		return 0;
-	c->found = tessai_cmd_lookup(owner, c->id);
-	return c->found ? 1 : 0;
-}
-
-static struct tessai_cmd *tessai_cmd_lookup_via_platform_fallback(struct tessai_dev *skip,
-								u32 handle)
-{
-	struct tessai_cmd_find_ctx c = {
-		.skip_tdev = skip,
-		.id = handle,
-		.found = NULL,
-	};
-
-	bus_for_each_dev(&platform_bus_type, NULL, &c,
-			 tessai_cmd_find_on_tess_pdev);
-	return c.found;
-}
-
-static struct tessai_cmd *tessai_cmd_lookup_any_peer(struct tessai_dev *tdev, u32 handle)
-{
-	struct tessai_cmd *cmd;
-	struct device_node *np;
-	struct device_node *rproc_anchor;
-
-	cmd = tessai_cmd_lookup(tdev, handle);
-	if (cmd)
-		return cmd;
-
-	rproc_anchor = READ_ONCE(tdev->linked_rproc);
-	if (rproc_anchor) {
-		for_each_compatible_node(np, NULL, "amd,tessai-agent") {
-			struct device_node *peer;
-			struct platform_device *pdev;
-			struct tessai_dev *other;
-
-			peer = of_parse_phandle(np, "amd,remoteproc", 0);
-			if (!peer)
-				continue;
-			if (peer != rproc_anchor) {
-				of_node_put(peer);
-				continue;
-			}
-			of_node_put(peer);
-
-			pdev = of_find_device_by_node(np);
-			if (!pdev)
-				continue;
-			other = platform_get_drvdata(pdev);
-			put_device(&pdev->dev);
-			if (!other || other == tdev)
-				continue;
-
-			cmd = tessai_cmd_lookup(other, handle);
-			if (cmd)
-				return cmd;
-		}
-	}
-
-	return tessai_cmd_lookup_via_platform_fallback(tdev, handle);
+	mutex_lock(&tdev->cmd_lock);
+	err = xa_alloc_cyclic(&tdev->cmd_xa, &id, cmd, xa_limit_32b,
+			      &tdev->cmd_xa_next, GFP_KERNEL);
+	mutex_unlock(&tdev->cmd_lock);
+	if (err)
+		return err;
+	cmd->seq = id;
+	cmd->in_cmd_xa = true;
+	return 0;
 }
 
 static struct tessai_cmd *tessai_cmd_alloc(struct tessai_dev *tdev,
-				       struct drm_file *file, u32 op)
+					   struct drm_file *file, u32 op)
 {
 	struct tessai_cmd *cmd;
 	struct dma_fence *fence;
-	int id;
 	int ret;
 
 	cmd = kzalloc(sizeof(*cmd), GFP_KERNEL);
@@ -267,15 +192,12 @@ static struct tessai_cmd *tessai_cmd_alloc(struct tessai_dev *tdev,
 		goto err_free;
 	}
 	cmd->pending_fence = fence;
+	cmd->seq = TESSAI_CMD_SEQ_NONE;
+	cmd->in_cmd_xa = false;
 
-	mutex_lock(&tdev->cmd_lock);
-	id = idr_alloc(&tdev->cmd_idr, cmd, 1, (int)65536, GFP_KERNEL);
-	mutex_unlock(&tdev->cmd_lock);
-	if (id < 0) {
-		ret = id;
+	ret = tessai_cmd_xa_alloc_id(tdev, cmd);
+	if (ret)
 		goto err_syncobj;
-	}
-	cmd->handle = id;
 	return cmd;
 
 err_syncobj:
@@ -285,49 +207,6 @@ err_syncobj:
 err_free:
 	kfree(cmd);
 	return ERR_PTR(ret);
-}
-
-static void tessai_rpmsg_try_abort_cmd(struct tessai_dev *tdev, struct tessai_cmd *cmd,
-				    u32 op)
-{
-	unsigned int hid = cmd->handle;
-
-	if (!hid)
-		return;
-	(void)tessai_rpmsg_send_cmd(tdev, TESSAI_OP_EXEC, (u16)hid, op,
-				  TESSAI_WIRE_FLAG_ABORT, NULL,
-				  0);
-}
-
-static bool tessai_cmd_idr_unlink(struct tessai_dev *tdev, struct tessai_cmd *cmd)
-{
-	bool had_slot = false;
-
-	mutex_lock(&tdev->cmd_lock);
-	if (cmd->handle > 0) {
-		idr_remove(&tdev->cmd_idr, cmd->handle);
-		cmd->handle = 0;
-		had_slot = true;
-	}
-	mutex_unlock(&tdev->cmd_lock);
-	return had_slot;
-}
-
-static void tessai_cmd_remove(struct tessai_dev *tdev, struct tessai_cmd *cmd)
-{
-	unsigned int hid = cmd->handle;
-
-	mutex_lock(&tdev->cmd_lock);
-	if (hid > 0)
-		idr_remove(&tdev->cmd_idr, hid);
-	cmd->handle = 0;
-	mutex_unlock(&tdev->cmd_lock);
-
-	dev_notice(tdev->dev,
-		   "tessai-agent: cmd_remove ioctl err/aborted path hid=%u tdev=%p pid=%d comm=%s\n",
-		   hid, tdev,
-		   task_pid_nr(current),
-		   current->comm);
 }
 
 /* Terminal completion: record status, signal and drop the lone pending fence. */
@@ -352,38 +231,43 @@ static void tessai_cmd_signal_completion(struct tessai_cmd *cmd, int term_status
 	dma_fence_put(old);
 }
 
-/*
- * Fixed 24-byte RPMsg prefix (Zephyr management response header / opaque payload trail).
- * `status1` may be padded; opaque payload trailing the header may follow.
- */
-struct tessai_rsp_wire_hdr {
-	__le16 op_ctrl;
-	__le16 op_app;
-	__le32 command_rsp_type;
-	__le32 status0;
-	__le32 status1;
-	__le32 payload_qwords;
-	__le32 reserved;
-} __packed;
+/* Erase from cmd_xa (if present), signal syncobj fence, drop cmd ref. */
+static void tessai_cmd_finish(struct tessai_dev *tdev, struct tessai_cmd *cmd,
+			      int term_status)
+{
+	u32 seq = cmd->seq;
 
-static void tessai_diag_cmd_lookup_miss(struct tessai_dev *tdev, u32 wanted_corr,
+	mutex_lock(&tdev->cmd_lock);
+	if (cmd->in_cmd_xa) {
+		xa_erase(&tdev->cmd_xa, seq);
+		cmd->in_cmd_xa = false;
+	}
+	cmd->seq = TESSAI_CMD_SEQ_NONE;
+	mutex_unlock(&tdev->cmd_lock);
+
+	tessai_cmd_signal_completion(cmd, term_status);
+	tessai_cmd_put(cmd);
+}
+
+static void tessai_diag_cmd_take_miss(struct tessai_dev *tdev, u32 wanted_seq,
 				      const void *payload, size_t len,
-				      u32 rtp, u32 firmware_status, u32 pq)
+				      u32 rtp)
 {
 	struct tessai_cmd *oc;
-	int oid, nprinted = 0;
+	unsigned long index;
+	unsigned int nprinted = 0;
 
 	dev_notice(tdev->dev,
-		   "tessai-agent: rsp miss wanted op_app(correlation)=%u type=%u firmware_status=%u pq=%u tdev=%p drm=%s platform=%s; listing idr on RPMsg tessai_dev:\n",
-		   wanted_corr, rtp, firmware_status, pq, tdev,
+		   "tessai-agent: rsp miss wanted seq=%u type=%u tdev=%p drm=%s platform=%s; listing cmd_xa on RPMsg tessai_dev:\n",
+		   wanted_seq, rtp, tdev,
 		   dev_name(tdev->drm.dev),
 		   dev_name(tdev->dev));
 
 	mutex_lock(&tdev->cmd_lock);
-	idr_for_each_entry(&tdev->cmd_idr, oc, oid) {
+	xa_for_each(&tdev->cmd_xa, index, oc) {
 		dev_notice(tdev->dev,
-			   "tessai-agent:   idr slot %d: op=%u state=%u\n",
-			   oid, oc->command_op,
+			   "tessai-agent:   seq %lu: op=%u state=%u\n",
+			   index, oc->command_op,
 			   (unsigned int)oc->state);
 		nprinted++;
 		if (nprinted >= 24)
@@ -393,7 +277,7 @@ static void tessai_diag_cmd_lookup_miss(struct tessai_dev *tdev, u32 wanted_corr
 
 	if (!nprinted)
 		dev_notice(tdev->dev,
-			   "tessai-agent: idr empty on RPMsg tessai_dev - wrong DRM/instance for this RPMsg bind, duplicate amd,tessai-agent nodes, or cmds were stripped (ioctl err path/postclose before response)\n");
+			   "tessai-agent: cmd_xa empty - seq already completed or stripped (ioctl err / fd close before this rsp)\n");
 
 	print_hex_dump(KERN_NOTICE, "tessai-agent: rsp payload: ",
 		       DUMP_PREFIX_OFFSET, 16, 1,
@@ -401,29 +285,20 @@ static void tessai_diag_cmd_lookup_miss(struct tessai_dev *tdev, u32 wanted_corr
 }
 
 void tessai_cmd_dispatch_response(struct tessai_dev *tdev, const void *payload,
-				size_t len)
+				  size_t len)
 {
-	struct tessai_rsp_wire_hdr wh;
+	struct tessai_wire_rsp wr;
 	struct tessai_cmd *cmd;
-	u32 rsp_correlation;
+	u32 rsp_seq;
 	u32 rsp_type;
-	u32 payload_qw;
-	u32 fw_status0;
-	const u8 *pay = (const u8 *)payload;
 	int term_status;
 
-	BUILD_BUG_ON(sizeof(struct tessai_rsp_wire_hdr) != 24);
-
-	if (len < sizeof(wh))
+	if (len < sizeof(wr))
 		return;
 
-	memcpy(&wh, pay, sizeof(wh));
-	rsp_correlation = le16_to_cpu(wh.op_app);
-	rsp_type = le32_to_cpu(wh.command_rsp_type);
-	payload_qw = le32_to_cpu(wh.payload_qwords);
-	fw_status0 = le32_to_cpu(wh.status0);
-
-	(void)payload_qw;
+	memcpy(&wr, payload, sizeof(wr));
+	rsp_seq = le32_to_cpu(wr.seq);
+	rsp_type = le32_to_cpu(wr.command_rsp_type);
 
 	switch (rsp_type) {
 	case TESSAI_RSP_COMPLETE:
@@ -440,50 +315,39 @@ void tessai_cmd_dispatch_response(struct tessai_dev *tdev, const void *payload,
 		break;
 	default:
 		dev_err_ratelimited(tdev->dev,
-				    "tessai-agent: rpm rsp unexpected command_rsp_type=%u op_app_corr=%u; completing with -EREMOTEIO\n",
-				    rsp_type, rsp_correlation);
+				    "tessai-agent: rpm rsp unexpected command_rsp_type=%u seq=%u; completing with -EREMOTEIO\n",
+				    rsp_type, rsp_seq);
 		term_status = -EREMOTEIO;
 		break;
 	}
 
-	cmd = tessai_cmd_lookup_any_peer(tdev, rsp_correlation);
+	cmd = tessai_cmd_xa_take(tdev, rsp_seq);
 	if (!cmd) {
-		tessai_diag_cmd_lookup_miss(tdev, rsp_correlation, payload, len,
-					  rsp_type, fw_status0,
-					  payload_qw);
+		tessai_diag_cmd_take_miss(tdev, rsp_seq, payload, len, rsp_type);
 		dev_notice_ratelimited(tdev->dev,
-				       "tessai-agent: rpm rsp dropped (unknown correlation %u)\n",
-				       rsp_correlation);
+				       "tessai-agent: rpm rsp dropped (unknown seq %u)\n",
+				       rsp_seq);
 		return;
 	}
 
-	if (cmd->tdev != tdev) {
-		dev_notice_ratelimited(cmd->tdev->dev,
-				       "tessai-agent: rpm rsp cmd %u delivered on tessai_dev different from RPMsg binding (duplicate/fragment DT?)\n",
-				       rsp_correlation);
-	}
-
-	tessai_cmd_signal_completion(cmd, term_status);
-	tessai_cmd_idr_unlink(cmd->tdev, cmd);
-	tessai_cmd_put(cmd);
-	tessai_cmd_put(cmd);
+	tessai_cmd_finish(tdev, cmd, term_status);
 }
 
 void tessai_cmd_release_owner(struct tessai_dev *tdev, struct drm_file *file)
 {
 	struct tessai_cmd *cmd;
-	int id;
+	unsigned long index;
 
 	for (;;) {
 		struct tessai_cmd *victim = NULL;
 
 		mutex_lock(&tdev->cmd_lock);
-		idr_for_each_entry(&tdev->cmd_idr, cmd, id) {
+		xa_for_each(&tdev->cmd_xa, index, cmd) {
 			if (cmd->owner != file)
 				continue;
 			dev_notice(tdev->dev,
-				   "tessai-agent: drm fd closed with in-flight cmd id=%d op=%#x drm_file=%p - abort FW, dropping GEM refs; idr kept until RPMsg terminates (pid=%d comm=%s)\n",
-				   id,
+				   "tessai-agent: drm fd closed with in-flight cmd seq=%lu op=%#x drm_file=%p - signal fence, drop GEM refs (pid=%d comm=%s)\n",
+				   index,
 				   cmd->command_op,
 				   file,
 				   task_pid_nr(current),
@@ -495,64 +359,63 @@ void tessai_cmd_release_owner(struct tessai_dev *tdev, struct drm_file *file)
 		mutex_unlock(&tdev->cmd_lock);
 		if (!victim)
 			break;
-		tessai_rpmsg_try_abort_cmd(tdev, victim, victim->command_op);
 		tessai_cmd_drop_bos(victim);
+		tessai_cmd_finish(tdev, victim, -ECONNRESET);
 	}
 }
 
 int tessai_cmd_init(struct tessai_dev *tdev)
 {
 	mutex_init(&tdev->cmd_lock);
-	idr_init(&tdev->cmd_idr);
+	xa_init_flags(&tdev->cmd_xa, XA_FLAGS_ALLOC);
+	tdev->cmd_xa_next = 0;
 	tdev->fence_context = dma_fence_context_alloc(1);
 	atomic_set(&tdev->fence_seqno, 0);
 	return 0;
 }
 
 /**
- * tessai_cmd_drain_idr - forcibly complete every command slot.
+ * tessai_cmd_drain_xa - forcibly complete every in-flight command.
  * @err: dma_fence completion errno (negative).
  */
-static void tessai_cmd_drain_idr(struct tessai_dev *tdev, int err)
+static void tessai_cmd_drain_xa(struct tessai_dev *tdev, int err)
 {
 	struct tessai_cmd *cmd = NULL;
-	int id;
+	unsigned long index;
 
-	mutex_lock(&tdev->cmd_lock);
 	for (;;) {
 		cmd = NULL;
-		idr_for_each_entry(&tdev->cmd_idr, cmd, id) {
-			idr_remove(&tdev->cmd_idr, id);
-			cmd->handle = 0;
-			break;
-		}
-		if (!cmd) {
-			mutex_unlock(&tdev->cmd_lock);
+		mutex_lock(&tdev->cmd_lock);
+		xa_for_each(&tdev->cmd_xa, index, cmd) {
+			xa_erase(&tdev->cmd_xa, index);
+			cmd->in_cmd_xa = false;
+			cmd->seq = TESSAI_CMD_SEQ_NONE;
 			break;
 		}
 		mutex_unlock(&tdev->cmd_lock);
+		if (!cmd)
+			break;
 
 		tessai_cmd_signal_completion(cmd, err);
 		tessai_cmd_put(cmd);
-		mutex_lock(&tdev->cmd_lock);
 	}
 }
 
-void tessai_cmd_abort_inflight_rpmsg_detach(struct tessai_dev *tdev, int err)
+void tessai_cmd_drain_inflight_rpmsg_detach(struct tessai_dev *tdev, int err)
 {
 	if (!err)
 		err = -ENOTCONN;
-	tessai_cmd_drain_idr(tdev, err);
+	tessai_cmd_drain_xa(tdev, err);
 }
 
 void tessai_cmd_fini(struct tessai_dev *tdev)
 {
-	tessai_cmd_drain_idr(tdev, -ENODEV);
-	idr_destroy(&tdev->cmd_idr);
+	tessai_cmd_drain_xa(tdev, -ENODEV);
+	xa_destroy(&tdev->cmd_xa);
 }
 
 static int tessai_resolve_args(struct drm_file *file, struct tessai_cmd *cmd,
-			     struct tessai_arg *args, u32 num_args,
+			       struct tessai_arg *args, u32 num_args,
 			     __le64 *out_words)
 {
 	u32 i;
@@ -584,7 +447,7 @@ static int tessai_resolve_args(struct drm_file *file, struct tessai_cmd *cmd,
 }
 
 long tessai_ioctl_cmd_submit(struct drm_device *ddev, void __user *uarg,
-			   struct drm_file *file)
+			     struct drm_file *file)
 {
 	struct tessai_dev *tdev = to_tessai_dev(ddev);
 	struct tessai_cmd_submit uhdr;
@@ -626,40 +489,36 @@ long tessai_ioctl_cmd_submit(struct drm_device *ddev, void __user *uarg,
 				       GFP_KERNEL);
 		if (!cmd->bo_refs) {
 			ret = -ENOMEM;
-			goto out_remove_cmd;
+			goto out_finish_cmd;
 		}
 		words = kvmalloc(uhdr.num_args * sizeof(*words), GFP_KERNEL);
 		if (!words) {
 			ret = -ENOMEM;
-			goto out_remove_cmd;
+			goto out_finish_cmd;
 		}
 		ret = tessai_resolve_args(file, cmd, args, uhdr.num_args, words);
 		if (ret)
-			goto out_remove_cmd;
+			goto out_finish_cmd;
 	}
 
-	ret = tessai_rpmsg_send_cmd(tdev, TESSAI_OP_EXEC, (u16)cmd->handle,
-				  uhdr.command_op, 0, words, uhdr.num_args);
+	ret = tessai_rpmsg_send_cmd(tdev, cmd->seq, uhdr.command_op, 0,
+				    words, uhdr.num_args);
 	if (ret)
-		goto out_remove_cmd;
+		goto out_finish_cmd;
 
 	ret = drm_syncobj_get_handle(file, cmd->syncobj, &syncobj_handle);
-	if (ret) {
-		tessai_rpmsg_try_abort_cmd(tdev, cmd, uhdr.command_op);
-		goto out_remove_cmd;
-	}
+	if (ret)
+		goto out_finish_cmd;
 
 	uhdr.drm_sync_obj_handle = syncobj_handle;
 	if (copy_to_user(uarg, &uhdr, TESSAI_SUBMIT_ABI_HDR_SZ)) {
-		tessai_rpmsg_try_abort_cmd(tdev, cmd, uhdr.command_op);
-		tessai_cmd_signal_completion(cmd, -EFAULT);
 		ret = -EFAULT;
-		goto out_remove_cmd;
+		goto out_finish_cmd;
 	}
 
 	dev_dbg(tdev->dev,
-		"TESSAI_CMD_SUBMIT ok: cmd_id=%u op=%#x tdev=%p drm=%s platform=%s minors P=%d R=%d pid=%d comm=%s\n",
-		cmd->handle, uhdr.command_op, tdev,
+		"TESSAI_CMD_SUBMIT ok: seq=%u op=%#x tdev=%p drm=%s platform=%s minors P=%d R=%d pid=%d comm=%s\n",
+		cmd->seq, uhdr.command_op, tdev,
 		dev_name(ddev->dev),
 		dev_name(tdev->dev),
 		ddev->primary ? ddev->primary->index : -1,
@@ -671,9 +530,8 @@ long tessai_ioctl_cmd_submit(struct drm_device *ddev, void __user *uarg,
 	kvfree(args);
 	return 0;
 
-out_remove_cmd:
-	tessai_cmd_remove(tdev, cmd);
-	tessai_cmd_put(cmd);
+out_finish_cmd:
+	tessai_cmd_finish(tdev, cmd, ret < 0 ? (int)ret : -EIO);
 	kvfree(words);
 out_free_args:
 	kvfree(args);
