@@ -131,7 +131,11 @@ static int tessai_bank_probe(struct platform_device *pdev)
 	slot->np = of_node_get(dev->of_node);
 	slot->region_id = bank_index;
 	slot->label = label;
-	slot->has_reserved_mem = (dev->dma_mem != NULL);
+	/*
+	 * no-map shared-dma-pool -> dev->dma_mem (rmem_dma_ops).
+	 * reusable shared-dma-pool -> dev->cma_area (rmem_cma_ops).
+	 */
+	slot->has_reserved_mem = dev->dma_mem || dev->cma_area;
 
 	platform_set_drvdata(pdev, slot);
 
