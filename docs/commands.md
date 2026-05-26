@@ -12,10 +12,14 @@ The model is minimal:
   `TERMINATED` (after `TESSAI_RSP_COMPLETE` / `TESSAI_RSP_*` failure from the RPU,
   failed submit cleanup, or process `close()` on the DRM fd). There is
   no separate `INIT` / `PENDING` exposed to userspace.
-- **Identity.** Userspace identifies the in-flight work through the
-  **`drm_sync_obj_handle`** returned in `struct tessai_cmd_submit` (same object used
-  for waits). The kernel still allocates an internal `command_id`
-  (wire id) that userspace does not need to store.
+- **Identity.** Userspace identifies in-flight work only through the
+  **`drm_sync_obj_handle`** returned in `struct tessai_cmd_submit`. **Command ids
+  are allocated and managed solely by the `tessai_agent` driver** via
+  `xa_alloc_cyclic()` on `cmd_xa` (ids **0..`UINT_MAX`** via `xa_limit_32b`, reused when the slot is
+  free). Userspace never chooses or stores the id. On RPMsg the id is sent as
+  `tessai_wire_cmd.seq` and echoed in `tessai_wire_rsp.seq` on completion.
+  Responses may arrive out of submit order; matching is always by that id, not by
+  submit order.
 - **No driver-specific wait ioctl.** Use `DRM_IOCTL_SYNCOBJ_WAIT`,
   `DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD` + `poll()`, and
   **`DRM_IOCTL_SYNCOBJ_QUERY`** to read signaled state and fence errno
@@ -52,7 +56,7 @@ sequenceDiagram
 
     U->>K: ioctl(TESSAI_CMD_SUBMIT, hdr + args[])
     Note over K: hdr.drm_sync_obj_handle = 0 on entry
-    K->>K: tessai_cmd_alloc, idr -> command_id
+    K->>K: tessai_cmd_alloc, xa_alloc_cyclic id (xa_limit_32b)
     K->>SO: drm_syncobj_create(unsignalled fence)
     K->>K: tessai_resolve_args, rpmsg send tessai_wire_cmd
     K->>SO: drm_syncobj_get_handle() -> drm_sync_obj_handle
@@ -70,6 +74,27 @@ sequenceDiagram
 ---
 
 ## 3. Wire format
+
+Wire layouts are defined in
+[`tessai_agent_cmd.h`](../drivers/accel/tessai-agent/tessai_agent_cmd.h)
+(driver-internal, not UAPI).
+
+### Host → RPU (`tessai_wire_cmd`)
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `seq` | `__le32` | Monotonic driver command id (0..UINT_MAX, wraps); firmware echoes on response |
+| `command_op` | `__le32` | Firmware opcode (same as ioctl `command_op`) |
+| `flags` | `__le32` | Reserved (submit uses `0`) |
+| `num_args` | `__le32` | Count of trailing `args[]` QWORDs |
+| `args[]` | `__le64[]` | Resolved scalar/buffer DMA addresses |
+
+### RPU → host (`tessai_wire_rsp`)
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `seq` | `__le32` | Echo of the driver-assigned command id from submit |
+| `command_rsp_type` | `__le32` | Terminal status (`enum tessai_rsp_type`) |
 
 ### `tessai_arg` → wire word
 
@@ -100,8 +125,7 @@ in [`tessai_agent_cmd.h`](../drivers/accel/tessai-agent/tessai_agent_cmd.h).
 
 ## 4. `TESSAI_CMD_SUBMIT`
 
-Variable-length ioctl payload: in-kernel/driver code uses an internal
-`struct tessai_submit_cmd` mirror; the **UAPI** type is `struct tessai_cmd_submit`
+Variable-length ioctl payload: the **UAPI** type is `struct tessai_cmd_submit`
 — fixed header through `offsetof(struct tessai_cmd_submit, args)` plus
 `num_args × sizeof(struct tessai_arg)`.
 
@@ -112,13 +136,63 @@ Variable-length ioctl payload: in-kernel/driver code uses an internal
 | `num_args` | in | Number of trailing `tessai_arg`; ≤ `TESSAI_MAX_ARGS` |
 | `args[]` | in | Scalar and buffer GEM slices |
 
+### Example: `OP_CODE_CMD0` with input/output BOs
+
+Firmware opcodes and scalar tags are defined by the RPU image; the pattern
+below matches a common six-argument layout (tag + size + buffer slice per
+direction).  `bo0_hd` / `bo1_hd` are DRM handles from `TESSAI_BUF_ALLOC` on
+the same `drm_fd`.
+
+```c
+#define OP_CODE_CMD0  0x00000001u
+#define INPUT_BO      1ull
+#define OUTPUT_BO     2ull
+#define SZ_16M        (16u * 1024u * 1024u)
+#define SZ_8M         (8u * 1024u * 1024u)
+
+struct tessai_arg args[6];
+
+args[0] = (struct tessai_arg){ .size = 0, .value = INPUT_BO };
+args[1] = (struct tessai_arg){ .size = 0, .value = SZ_16M };
+args[2] = (struct tessai_arg){
+	.size = SZ_16M,
+	.bo = { .drm_buffer_handle = (__s32)bo0_hd, .offset = 0 },
+};
+args[3] = (struct tessai_arg){ .size = 0, .value = OUTPUT_BO };
+args[4] = (struct tessai_arg){ .size = 0, .value = SZ_8M };
+args[5] = (struct tessai_arg){
+	.size = SZ_8M,
+	.bo = { .drm_buffer_handle = (__s32)bo1_hd, .offset = 0 },
+};
+
+struct tessai_cmd_submit hdr = {
+	.drm_sync_obj_handle = 0,
+	.command_op = OP_CODE_CMD0,
+	.num_args = 6,
+};
+/* ioctl: pass a buffer of offsetof(..., args) + 6*sizeof(struct tessai_arg);
+ * or tessai_agent_cmd_submit(fd, OP_CODE_CMD0, args, 6, &hdr, sizeof(hdr)). */
+```
+
+| Index | `size` | Payload | Role |
+|------:|--------|---------|------|
+| 0 | 0 | `INPUT_BO` | Firmware input-buffer tag (scalar) |
+| 1 | 0 | `SZ_16M` | Input size (scalar) |
+| 2 | `SZ_16M` | `bo0_hd` @ offset 0 | Input GEM slice → wire DMA address |
+| 3 | 0 | `OUTPUT_BO` | Firmware output-buffer tag (scalar) |
+| 4 | 0 | `SZ_8M` | Output size (scalar) |
+| 5 | `SZ_8M` | `bo1_hd` @ offset 0 | Output GEM slice → wire DMA address |
+
+The canonical copy of this example lives in
+[`include/uapi/tessai-agent/tessai_agent.h`](../include/uapi/tessai-agent/tessai_agent.h).
+
 Failure modes include `-EFAULT`, `-EINVAL`, `-E2BIG`, `-ENOMEM`,
 `-ENOENT` (bad BO handle), `-ENOTCONN` (no rpmsg channel).
 
 If submission fails **after** the RPU has been sent a `tessai_wire_cmd` but
 **before** userspace receives the syncobj handle (or if copying the
-result header fails), the driver may send a best-effort abort
-(`flags = 0x80000001` on the wire) so firmware can drop the work.
+result header fails), the driver erases the command from `cmd_xa`, signals
+the syncobj fence with the ioctl errno, and drops the command object.
 
 ---
 

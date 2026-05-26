@@ -5,12 +5,8 @@ This document describes the end-to-end architecture of the
 between userspace and the RPU, and how data and control flow through
 the major subsystems.
 
-> Everything below describes the driver under
-> [`drivers/accel/tessai-agent/`](../drivers/accel/tessai-agent/). A
-> historically-related byte-pipe driver named `rpurt-rpc` lived in this
-> repository before the tessai-agent rename and has since been removed;
-> if you find a `/dev/rpurt_rpc.0` node on a running board it is a
-> leftover from an older module image and is unrelated to tessai-agent.
+Everything below describes the driver under
+[`drivers/accel/tessai-agent/`](../drivers/accel/tessai-agent/).
 
 ---
 
@@ -45,17 +41,18 @@ flowchart LR
     TESS -- "rpmsg_send /<br/>callback" --> RPMSG
     RPMSG <-- "vring" --> FW
     REMOTEPROC -- "boots,<br/>provides vring" --> RPU
-    TESS -- "dma_alloc_coherent /<br/>dma_buf" --> DMA
+    TESS -- "dma_alloc_noncoherent /<br/>TESSAI_BUF_SYNC /<br/>dma_buf" --> DMA
     FW <-- "shared buffers<br/>(physical addresses)" --> DMA
     FW --> AIE
 ```
 
 **Key idea.** Buffer memory is shared between the APU and the RPU through
-**non-cacheable** reserved-memory regions described in device tree (banks are
-not marked `dma-coherent`, so `dma_alloc_coherent()` returns non-cacheable
-normal memory). The driver translates GEM handles into physical addresses and
-hands them to the RPU as part of submission arguments. Control messages (wire
-commands and responses/events) flow over rpmsg.
+reserved-memory regions described in device tree. Native GEM buffers use
+**cacheable** `dma_alloc_noncoherent()` mappings; userspace calls
+**`TESSAI_BUF_SYNC`** to flush or invalidate ranges before/after device DMA.
+The driver translates GEM handles into physical addresses and hands them to the
+RPU as part of submission arguments. Control messages (wire commands and
+responses/events) flow over rpmsg.
 
 ---
 
@@ -78,7 +75,7 @@ flowchart TB
     subgraph KAPI["Kernel APIs"]
         DRMCORE["DRM core<br/>(GEM, syncobj, prime)"]
         DMABUF["dma-buf"]
-        DMA["dma-mapping<br/>(dma_alloc_coherent)"]
+        DMA["dma-mapping<br/>(dma_alloc_noncoherent,<br/>dma_sync_single_range)"]
         RPMSGC["rpmsg core"]
         OF["of_*, of_reserved_mem"]
     end
@@ -102,7 +99,7 @@ flowchart TB
 | `tessai_agent_drv.c` | Module init/exit, registration of three handlers: parent `platform_driver` (matches `amd,tessai-agent`), bank `platform_driver` (matches the single shared `amd,tessai-agent-bank`), and `rpmsg_driver` (matches channel `tessai-agent`). The parent probe publishes drvdata then calls `devm_of_platform_populate()`. |
 | `tessai_agent_bank.c` | Implements the bank `platform_driver`. Each probe reads `reg` (the logical bank index — `0`=RPU, `1`=device), owns one bank's reserved-memory + dma-mask (32 for rpu, 64 for dev with 32-bit fallback) and registers itself into `tdev->banks[reg]`. |
 | `tessai_agent_drm.c` | Owns the DRM render node. Custom `unlocked_ioctl` routes magic-`'M'` ioctls to our handlers and falls through to `drm_ioctl()` for syncobj/prime/GEM ioctls. Implements GEM `alloc/import/export/mmap` against per-bank devices. |
-| `tessai_agent_cmd.c` | Command lifecycle, command IDR, single `dma_fence` per submission on `drm_syncobj`, `tessai_cmd_dispatch_response()` from rpmsg. |
+| `tessai_agent_cmd.c` | Command lifecycle; **driver-owned command ids** (`cmd_xa` / `xa_alloc_cyclic`, wire `seq`); single `dma_fence` per submission on `drm_syncobj`; `tessai_cmd_dispatch_response()` from rpmsg. |
 | `tessai_agent_rpmsg.c` | `rpmsg_driver` registration, `rpmsg_send()` for outgoing `tessai_wire_cmd`, callback that decodes `tessai_wire_rsp` and feeds it to `tessai_cmd_dispatch_response()`. |
 
 ---
@@ -253,9 +250,9 @@ flowchart LR
     BANK1 -. devm_of_platform_populate<br/>+ bank platform_driver .-> BD1
 ```
 
-Why per-bank platform devices? GEM allocations call
-`dma_alloc_coherent(bank->dev, ...)` (see
-`drivers/accel/tessai-agent/tessai_agent_drm.c`).
+Why per-bank platform devices? Native GEM allocations call
+`dma_alloc_noncoherent(bank->dev, ...)` and **`TESSAI_BUF_SYNC`** for cache
+maintenance (see `drivers/accel/tessai-agent/tessai_agent_drm.c`).
 Each bank has its own `struct device` so:
 
 1. The dma-mask is honoured per allocation. The RPU bank refuses
@@ -292,8 +289,9 @@ The driver presents itself as a DRM render node
   `TESSAI_BUF_ALLOC` and PRIME import are scoped to the open `drm_file`.
 - **mmap.** `mmap(drm_fd, size, ..., offset)` with the offset returned
   by `DRM_IOCTL_GEM_MMAP` (the standard DRM mmap dance). The driver's
-  GEM `mmap` op forwards to `dma_mmap_coherent()` (native) or the
-  exporter (imports).
+  GEM `mmap` op forwards to `dma_mmap_pages()` (native) or the exporter
+  (imports). Native buffers require explicit **`TESSAI_BUF_SYNC`** around
+  device DMA.
 - **dma-buf interop.** Standard `DRM_IOCTL_PRIME_HANDLE_TO_FD` and
   `DRM_IOCTL_PRIME_FD_TO_HANDLE` on the render node; imports attach to
   the dev bank.
@@ -327,7 +325,8 @@ struct tessai_dev {
 	struct mutex		rpmsg_lock;
 
 	struct mutex		cmd_lock;
-	struct idr		cmd_idr;
+	struct xarray		cmd_xa;
+	u32			cmd_xa_next;
 	atomic_t		fence_seqno;
 	u64			fence_context;
 };

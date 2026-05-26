@@ -23,12 +23,18 @@ See also [`buffer-management.md`](buffer-management.md) and
 
 ## 1. Buffer flow (allocation / mmap / release)
 
-Allocate with **`tessai_agent_buf_alloc()`** (`TESSAI_BUF_ALLOC`). Map with the
-usual DRM GEM mmap path (**`DRM_IOCTL_MODE_MAP_DUMB`** + **`mmap`**, or your
-preferred DRM mapping helper). When the CPU no longer needs the handle, call
-**`tessai_agent_gem_close()`** — a thin wrapper around **`DRM_IOCTL_GEM_CLOSE`**.
-If a submitted command still pins the GEM, the object stays alive until that
-command completes (see [buffer-management §4](buffer-management.md#4-in-flight-command-pins)).
+Allocate with **`tessai_agent_buf_alloc()`** (`TESSAI_BUF_ALLOC`). Map with
+**`tessai_agent_buf_mmap()`** (page-aligned offset/length; partial ranges OK) or
+the raw **`DRM_IOCTL_MODE_MAP_DUMB`** + **`mmap`** path on a **card** fd.
+Before device DMA reads CPU-written data (and after device DMA writes data the
+CPU will read), call **`tessai_agent_buf_sync()`** or the
+**`tessai_agent_buf_sync_to_device()`** / **`…_from_device()`** helpers
+(**`TESSAI_BUF_SYNC`**; see [buffer-management §3](buffer-management.md#3-cache-sync-tessai_buf_sync)).
+
+When the CPU no longer needs the handle, call **`tessai_agent_buf_close()`** —
+a thin wrapper around **`DRM_IOCTL_GEM_CLOSE`**. If a submitted command still
+pins the GEM, the object stays alive until that command completes (see
+[buffer-management §5](buffer-management.md#5-in-flight-command-pins)).
 
 ```mermaid
 sequenceDiagram
@@ -43,8 +49,10 @@ sequenceDiagram
     K-->>Lib: drm_handle filled
     Lib-->>App: 0
 
-    App->>DRM: GEM mmap (map_dumb offset + mmap)
-    App->>Lib: tessai_agent_gem_close(drm_fd, handle) when handle no longer needed
+    App->>Lib: tessai_agent_buf_mmap(drm_fd, handle, buf_size, off, len, &map)
+    Lib->>DRM: MODE_MAP_DUMB + mmap(fd, off + map_dumb_offset)
+    App->>Lib: tessai_agent_buf_sync_to_device(...) before submit (when needed)
+    App->>Lib: tessai_agent_buf_close(drm_fd, handle) when handle no longer needed
 ```
 
 | `memory_type` | Bank | Typical use |
@@ -101,7 +109,7 @@ sequenceDiagram
 
     App->>Lib: tessai_agent_cmd_submit(drm_fd, op, args, n, &hdr, sizeof(hdr))
     Lib->>K: ioctl(TESSAI_CMD_SUBMIT, flex tessai_cmd_submit)
-    K->>RPU: rpmsg tessai_wire_cmd (correlation = internal id)
+    K->>RPU: rpmsg tessai_wire_cmd (seq = driver command id from cmd_xa)
     K-->>Lib: hdr.drm_sync_obj_handle set
     Lib-->>App: 0
 
@@ -125,6 +133,23 @@ Typical **`tessai_arg`** usage:
 - Scalar parameter: **`size == 0`**, set **`value`**.
 - GEM slice passed to firmware: **`size > 0`**, **`bo.drm_buffer_handle`** +
   **`bo.offset`**; kernel replaces with **`dma_addr + offset`** on the wire.
+  **`size`** must cover the bytes the firmware will touch (validated against the
+  GEM object size).
+
+**Six-argument command** (input tag + size + BO, then output tag + size + BO) —
+see **`OP_CODE_CMD0`** in
+[`include/uapi/tessai-agent/tessai_agent.h`](../include/uapi/tessai-agent/tessai_agent.h)
+and [commands.md §4](commands.md#example-op_code_cmd0-with-inputoutput-bos):
+
+```c
+struct tessai_arg args[6] = { /* INPUT_BO, SZ_16M, bo0 slice, OUTPUT_BO, SZ_8M, bo1 */ };
+struct tessai_cmd_submit hdr;
+
+memset(&hdr, 0, sizeof(hdr));
+if (tessai_agent_cmd_submit(drm_fd, OP_CODE_CMD0, args, 6, &hdr, sizeof(hdr)))
+	...;
+tessai_agent_syncobj_wait_complete(drm_fd, hdr.drm_sync_obj_handle, timeout_ns, &st);
+```
 
 ```mermaid
 flowchart LR

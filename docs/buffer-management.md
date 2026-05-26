@@ -4,14 +4,15 @@ This document describes how userspace allocates, maps, and frees buffers
 through the `tessai-agent` driver.
 
 The driver uses **DRM GEM** as its buffer abstraction so it can use the
-standard handle and mmap path. Each buffer is backed by a contiguous
-**non-cacheable** allocation (`dma_alloc_coherent()` against a bank device
-that is **not** marked `dma-coherent`) from a specific *memory bank*
-(RPU 32-bit or dev 64-bit).
+standard handle and mmap path. Each native buffer is backed by a contiguous
+**cacheable** allocation (`dma_alloc_noncoherent()` on the per-bank struct
+device) from a specific *memory bank* (RPU 32-bit or dev 64-bit). Userspace
+must call **`TESSAI_BUF_SYNC`** (or **`tessai_agent_buf_sync()`**) to flush or
+invalidate CPU cache lines around device DMA — see §3.
 
 **Userspace helpers:** [`lib-userspace-flow.md`](lib-userspace-flow.md) covers
-**`tessai_agent_buf_alloc()`**, **`tessai_agent_gem_close()`**, mmap, and how
-they line up with the ioctl flow below.
+**`tessai_agent_buf_alloc()`**, **`tessai_agent_buf_close()`**, sync, mmap, and
+how they line up with the ioctl flow below.
 
 The buffer is **reference-counted**, the standard way GEM objects are managed.
 The backing memory is freed only when the last reference is dropped — **not**
@@ -51,7 +52,7 @@ the *last* reference triggers **`tessai_gem_free()`**.
 
 | Holder | Acquired by | Released by |
 |---|---|---|
-| DRM handle | `TESSAI_BUF_ALLOC` (one ref per handle) | **`tessai_agent_gem_close()`** / `DRM_IOCTL_GEM_CLOSE`, or implicit teardown on last `close()` of the DRM fd |
+| DRM handle | `TESSAI_BUF_ALLOC` (one ref per handle) | **`tessai_agent_buf_close()`** / `DRM_IOCTL_GEM_CLOSE`, or implicit teardown on last `close()` of the DRM fd |
 | In-flight command pin | `TESSAI_CMD_SUBMIT` with a buffer arg (`size != 0`) | Terminal `TESSAI_RSP_*`, submit-failure cleanup, driver drain / `tessai_cmd_release`; see §5 |
 
 ```mermaid
@@ -68,7 +69,7 @@ sequenceDiagram
     U->>CMD: TESSAI_CMD_SUBMIT(BO=h)
     Note over CORE: refcount = 2 (handle + cmd pin)
 
-    U->>CORE: GEM_CLOSE / tessai_agent_gem_close(handle)
+    U->>CORE: GEM_CLOSE / tessai_agent_buf_close(handle)
     Note over CORE: refcount = 1 (cmd pin only)
 
     CMD-->>CORE: command terminates → drm_gem_object_put()
@@ -85,13 +86,13 @@ sequenceDiagram
     participant U as Userspace
     participant K as tessai_agent_drm.c
     participant CORE as DRM core
-    participant DMA as dma_alloc_coherent
+    participant DMA as dma_alloc_noncoherent
     participant BANK as bank->dev (per-bank struct device)
 
     U->>K: ioctl(TESSAI_BUF_ALLOC, {memory_type, size})
     K->>K: tessai_bank_memory_type()
     K->>CORE: drm_gem_object_init(size)
-    K->>DMA: dma_alloc_coherent(bank->dev, size, &dma_addr)
+    K->>DMA: dma_alloc_noncoherent(bank->dev, size, &dma_addr, DMA_BIDIRECTIONAL)
     DMA->>BANK: honors dma-mask + reserved-mem (kvaddr + dma_addr)
     DMA-->>K: kvaddr, dma_addr
     K->>CORE: drm_gem_create_mmap_offset(obj)
@@ -114,9 +115,44 @@ sequenceDiagram
 
 ---
 
-## 3. mmap
+## 3. Cache sync: `TESSAI_BUF_SYNC`
 
-`mmap()` on the DRM fd uses the standard GEM mmap offset path.
+Native driver-allocated buffers are **cacheable**. Before the device reads CPU
+writes, flush with **`TESSAI_BUF_SYNC_TO_DEVICE`**. After the device writes data
+the CPU will read, invalidate with **`TESSAI_BUF_SYNC_FROM_DEVICE`**.
+
+```c
+struct tessai_buf_sync {
+    __u32 drm_handle;
+    __u32 direction;   /* TESSAI_BUF_SYNC_TO_DEVICE or TESSAI_BUF_SYNC_FROM_DEVICE */
+    __u32 flags;       /* must be 0 */
+    __u64 offset;      /* byte offset into the buffer */
+    __u64 length;      /* bytes; 0 = from offset through end-of-buffer */
+};
+```
+
+Library wrappers: **`tessai_agent_buf_sync()`**, **`tessai_agent_buf_sync_to_device()`**,
+**`tessai_agent_buf_sync_from_device()`**. PRIME-imported handles return
+**`-EOPNOTSUPP`** — use the exporter’s sync rules.
+
+Typical flow around a command that DMAs a userspace-filled input buffer:
+
+1. CPU writes via `mmap` or kernel mapping.
+2. **`TESSAI_BUF_SYNC_TO_DEVICE`** on the written range (often the whole buffer).
+3. **`TESSAI_CMD_SUBMIT`** referencing the handle.
+4. After completion, **`TESSAI_BUF_SYNC_FROM_DEVICE`** on output ranges before CPU read.
+
+---
+
+## 4. mmap
+
+`mmap()` on the DRM fd uses the standard GEM mmap offset path. **`tessai_agent_buf_mmap()`**
+wraps **`DRM_IOCTL_MODE_MAP_DUMB`** + **`mmap()`** (requires a **card** fd, not
+renderD*). **Partial mmap** is supported: pass a page-aligned **`offset`** and
+**`length`**; only that range is mapped (the driver maps `page + offset/PAGE_SIZE`).
+**`offset`** and **`length`** must be page-aligned; **`length == 0`** maps from
+**`offset`** through end-of-buffer and requires **`buf_size`** from allocation.
+Unmap with **`tessai_agent_buf_munmap(addr, length)`**.
 
 ```mermaid
 sequenceDiagram
@@ -124,17 +160,17 @@ sequenceDiagram
     participant U as Userspace
     participant DRM as DRM core
     participant K as tessai_gem_obj_mmap
-    participant DMA as dma_mmap_coherent
+    participant DMA as dma_mmap_pages
 
     U->>DRM: GEM mmap path (offset from DRM_IOCTL_MODE_MAP_DUMB or equivalent)
     DRM->>K: tessai_gem_obj_mmap(obj, vma)
-    K->>DMA: dma_mmap_coherent(bank->dev, vma, kvaddr, dma_addr, size)
+    K->>DMA: dma_mmap_pages(bank->dev, vma, size, page)
     K-->>U: pages mapped
 ```
 
 ---
 
-## 4. In-flight command pins
+## 5. In-flight command pins
 
 A buffer referenced by a command (any `tessai_arg` with `size != 0`) is held
 alive by the driver while that command runs.
@@ -155,7 +191,7 @@ sequenceDiagram
     SUB-->>U: drm_sync_obj_handle
 
     Note over U,CORE: GEM close may run after submit returns, pin keeps object alive
-    U->>CORE: tessai_agent_gem_close or GEM_CLOSE on h
+    U->>CORE: tessai_agent_buf_close or GEM_CLOSE on h
     CORE->>CORE: drop handle ref object may remain pinned by cmd
 
     RPU-->>CMD: terminal mgmt response on RPMsg
@@ -167,17 +203,17 @@ sequenceDiagram
 normal completions, error-class responses, file teardown, and module unload
 paths.
 
-**Userspace:** after a successful submit you may call **`tessai_agent_gem_close`**
+**Userspace:** after a successful submit you may call **`tessai_agent_buf_close`**
 as soon as you no longer need the handle for your own lookups; the object stays
 allocated until the command finishes and drops its pin.
 
 ---
 
-## 5. Free / cleanup
+## 6. Free / cleanup
 
 A buffer is destroyed when refcount goes **1 → 0**. Typical paths:
 
-- **`tessai_agent_gem_close()`** / **`DRM_IOCTL_GEM_CLOSE`** on the last open handle.
+- **`tessai_agent_buf_close()`** / **`DRM_IOCTL_GEM_CLOSE`** on the last open handle.
 - **`close(drm_fd)`** walks the per-file handle table and closes GEMs.
 - Command completion **`drm_gem_object_put`** when the last in-flight use ends.
 
@@ -187,11 +223,11 @@ sequenceDiagram
     participant U as Userspace
     participant CORE as DRM core
     participant K as tessai_gem_free
-    participant DMA as dma_free_coherent
+    participant DMA as dma_free_noncoherent
 
     rect rgba(180,220,255,0.25)
     Note over U,CORE: Explicit GEM close
-    U->>CORE: tessai_agent_gem_close / DRM_IOCTL_GEM_CLOSE
+    U->>CORE: tessai_agent_buf_close / DRM_IOCTL_GEM_CLOSE
     CORE->>CORE: idr_remove + drm_gem_object_put
     CORE->>K: gem_obj->funcs->free(obj)
     end
@@ -203,7 +239,7 @@ sequenceDiagram
     CORE->>K: ... free each object
     end
 
-    K->>DMA: dma_free_coherent(bank->dev, size, kvaddr, dma_addr)
+    K->>DMA: dma_free_noncoherent(bank->dev, size, kvaddr, dma_addr, dir)
 ```
 
 While a command still pins a BO, **`GEM_CLOSE` only drops the userspace
@@ -211,7 +247,7 @@ handle** — memory stays until the submit completes and releases **`bo_refs`**.
 
 ---
 
-## 6. Userspace sketch
+## 7. Userspace sketch
 
 ```c
 #include <errno.h>
@@ -232,13 +268,14 @@ int main(void)
 	if (err)
 		return 1;
 
-	struct drm_mode_map_dumb m = { .handle = handle };
-	drmIoctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &m);
-	void *p = mmap(NULL, 1u << 20, PROT_READ | PROT_WRITE,
-		       MAP_SHARED, fd, m.offset);
-	memset(p, 0xa5, 1u << 20);
-	munmap(p, 1u << 20);
-	tessai_agent_gem_close(fd, handle);
+	void *p;
+	uint64_t sz = 1u << 20;
+
+	tessai_agent_buf_mmap(fd, handle, sz, 0, 0, &p);
+	memset(p, 0xa5, sz);
+	tessai_agent_buf_sync_to_device(fd, handle, 0, 0);
+	tessai_agent_buf_munmap(p, sz);
+	tessai_agent_buf_close(fd, handle);
 	close(fd);
 	return 0;
 }
@@ -246,7 +283,7 @@ int main(void)
 
 ---
 
-## 7. See also
+## 8. See also
 
 - [`architecture.md`](architecture.md) — per-bank platform devices and DMA windows.
 - [`commands.md`](commands.md) — `tessai_arg` buffer references and wire DMA addresses.
