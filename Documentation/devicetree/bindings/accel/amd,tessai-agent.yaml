@@ -96,9 +96,17 @@ properties:
       memory-region:
         $ref: /schemas/types.yaml#/definitions/phandle
         description: |
-          Reserved-memory carveout (typically shared-dma-pool / no-map) that
-          pins GEM backing into a 32-bit-reachable DRAM window the firmware
-          can dereference.
+          Phandle to a reserved-memory node used as this bank's DMA heap.
+          For the RPU-facing bank, use a 32-bit-reachable pool declared as:
+
+            compatible = "shared-dma-pool";
+            reusable;
+
+          Do not use "no-map" on this pool: the kernel binds reusable
+          shared-dma-pool regions as a CMA area (dev->cma_area) and
+          tessai-agent allocates GEM backing via dma_alloc_noncoherent()
+          from that pool. The RPU firmware must be able to access the
+          physical addresses in this span (MPU / carveout agreement).
 
       iommus:
         $ref: /schemas/types.yaml#/definitions/phandle-array
@@ -138,8 +146,15 @@ properties:
       memory-region:
         $ref: /schemas/types.yaml#/definitions/phandle
         description: |
-          Reserved-memory carveout for the device-visible heap (often a
-          high-memory shared-dma-pool that the accelerator/IOMMU can reach).
+          Phandle to a reserved-memory node for the device/accelerator heap.
+          Typical high-DDR integration uses:
+
+            compatible = "shared-dma-pool";
+            reusable;
+            linux,cma-default;
+
+          "no-map" is not required for this bank; reusable CMA pools are
+          sufficient when the platform exposes a 64-bit-reachable region.
 
       iommus:
         $ref: /schemas/types.yaml#/definitions/phandle-array
@@ -164,24 +179,25 @@ additionalProperties: false
 examples:
   - |
     /*
-     * Sibling placement next to the RPU remoteproc on the platform bus.
-     * Dedicated carveouts: no-map typical for firmware-facing heaps.
+     * Versal / VEK385-style: RPU bank uses a reusable CMA pool below 4 GiB;
+     * device bank uses the high-DDR linux,cma-default reusable pool.
      */
     reserved-memory {
         #address-cells = <2>;
         #size-cells = <2>;
         ranges;
 
-        shared_rpu_pool: shared-rpu-pool@70000000 {
+        tess_rpu_gem_carveout: buffer@20000000 {
             compatible = "shared-dma-pool";
-            reg = <0x0 0x70000000 0x0 0x10000000>;
-            no-map;
+            reg = <0x0 0x20000000 0x0 0x20000000>;
+            reusable;
         };
 
-        shared_dev_pool: shared-dev-pool@800000000 {
+        app_bank0: buffer@50000000000 {
             compatible = "shared-dma-pool";
-            reg = <0x8 0x00000000 0x0 0x40000000>;
-            no-map;
+            reg = <0x500 0x0 0x1 0x0>;
+            reusable;
+            linux,cma-default;
         };
     };
 
@@ -201,34 +217,36 @@ examples:
         bank@0 {
             compatible    = "amd,tessai-agent-bank";
             reg           = <0>;
-            memory-region = <&shared_rpu_pool>;
+            memory-region = <&tess_rpu_gem_carveout>;
         };
 
         bank@1 {
             compatible    = "amd,tessai-agent-bank";
             reg           = <1>;
-            memory-region = <&shared_dev_pool>;
+            memory-region = <&app_bank0>;
         };
     };
   - |
     /*
      * IOMMU-enabled variant: each bank attaches to its own SMMU stream.
+     * Same reusable shared-dma-pool layout as the non-IOMMU example.
      */
     reserved-memory {
         #address-cells = <2>;
         #size-cells = <2>;
         ranges;
 
-        shared_rpu_pool: shared-rpu-pool@70000000 {
+        tess_rpu_gem_carveout: buffer@20000000 {
             compatible = "shared-dma-pool";
-            reg = <0x0 0x70000000 0x0 0x10000000>;
-            no-map;
+            reg = <0x0 0x20000000 0x0 0x20000000>;
+            reusable;
         };
 
-        shared_dev_pool: shared-dev-pool@800000000 {
+        app_bank0: buffer@50000000000 {
             compatible = "shared-dma-pool";
-            reg = <0x8 0x00000000 0x0 0x40000000>;
-            no-map;
+            reg = <0x500 0x0 0x1 0x0>;
+            reusable;
+            linux,cma-default;
         };
     };
 
@@ -247,14 +265,14 @@ examples:
         bank@0 {
             compatible    = "amd,tessai-agent-bank";
             reg           = <0>;
-            memory-region = <&shared_rpu_pool>;
+            memory-region = <&tess_rpu_gem_carveout>;
             iommus        = <&smmu_rpu 0x42 0x0>;
         };
 
         bank@1 {
             compatible    = "amd,tessai-agent-bank";
             reg           = <1>;
-            memory-region = <&shared_dev_pool>;
+            memory-region = <&app_bank0>;
             iommus        = <&smmu_dev 0x43 0x0>;
         };
     };
