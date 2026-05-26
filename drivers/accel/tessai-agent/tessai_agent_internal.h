@@ -7,7 +7,7 @@
 #define _TESSAI_AGENT_INTERNAL_H_
 
 #include <linux/dma-fence.h>
-#include <linux/idr.h>
+#include <linux/xarray.h>
 #include <linux/kref.h>
 #include <linux/of.h>
 #include <linux/ktime.h>
@@ -48,40 +48,11 @@ enum tessai_bank_index {
 struct tessai_dev;
 struct tessai_cmd;
 
-/* Driver ↔ RPU ioctl payload (drm_file → tessai_rpmsg). Not exported in UAPI. */
-enum tessai_op_ctrl {
-	TESSAI_OP_EXEC = 0,
-	TESSAI_OP_PING = 1,
-};
-
-/**
- * @cmd_op: packed little-endian halves on the RPMsg correlator LE32:
- *	     bits [31..16] = tessai_op_ctrl, bits [15..0] = op_app.
- */
-struct tessai_submit_cmd {
-	__s32 drm_sync_obj_handle;
-	__u32 cmd_op;
-	__u32 command_op;
-	__u32 num_args;
-	struct tessai_arg args[];
-};
-
-static inline u32 tessai_pack_cmd_op(u16 op_ctrl, u16 op_app)
-{
-	return ((__u32)op_ctrl << 16) | (u16)op_app;
-}
-
-static inline void tessai_unpack_cmd_op(u32 packed, u16 *op_ctrl, u16 *op_app)
-{
-	*op_ctrl = (u16)((packed >> 16) & 0xffff);
-	*op_app = (u16)(packed & 0xffff);
-}
-
 /* Visible part of ioctl tessai_cmd_submit (flex array starts at tessai_arg[]) */
 #define TESSAI_SUBMIT_ABI_HDR_SZ	offsetof(struct tessai_cmd_submit, args)
 
-/* tessai_wire_cmd.flags: ask firmware to drop work keyed by correlation @op_app. */
-#define TESSAI_WIRE_FLAG_ABORT	0x80000001u
+/* cmd not indexed in cmd_xa (wire seq 0 and UINT_MAX are both valid ids). */
+#define TESSAI_CMD_SEQ_NONE	((u32)~0U)
 
 /* --------------------------------------------------------------- */
 /* Memory bank                                                     */
@@ -103,16 +74,17 @@ struct tessai_bank {
 struct tessai_dev {
 	struct drm_device	drm;
 	struct device		*dev;
-	/* Refcounted target of "amd,remoteproc"; used to find peer instances. */
+	/* Refcounted target of "amd,remoteproc" (DT binding). */
 	struct device_node	*linked_rproc;
 
 	struct tessai_bank	banks[TESSAI_NUM_BANKS];
 
 	struct rpmsg_device	*rpdev;
-	struct mutex		rpmsg_lock;
+	struct mutex		rpmsg_lock;	/* rpmsg send path */
 
-	struct mutex		cmd_lock;
-	struct idr		cmd_idr;
+	struct mutex		cmd_lock;	/* cmd_xa alloc/erase */
+	struct xarray		cmd_xa;		/* in-flight cmds; id via xa_alloc_cyclic */
+	u32			cmd_xa_next;	/* xa_alloc_cyclic cursor */
 	atomic_t		fence_seqno;
 	u64			fence_context;
 };
@@ -132,6 +104,8 @@ struct tessai_gem {
 	void			*kvaddr;
 	dma_addr_t		dma_addr;
 	size_t			size;
+	enum dma_data_direction	dma_dir;
+	struct page		*page;
 	struct sg_table		*sgt;
 };
 
@@ -152,15 +126,16 @@ enum tessai_cmd_state {
 struct tessai_cmd {
 	struct tessai_dev		*tdev;
 	struct drm_file		*owner;
-	s32			handle;
+	u32			seq;		/* wire tessai_wire_cmd.seq / tessai_wire_rsp.seq */
+	bool			in_cmd_xa;
 	u32			command_op;
 
-	struct mutex		state_lock;
+	struct mutex		state_lock;	/* state, term_status, bo_refs */
 	enum tessai_cmd_state	state;
 	int			term_status;
 
 	struct drm_syncobj	*syncobj;
-	spinlock_t		fence_lock;
+	spinlock_t		fence_lock;	/* pending_fence */
 	struct dma_fence	*pending_fence;
 
 	struct drm_gem_object	**bo_refs;
@@ -186,16 +161,17 @@ void tessai_drm_unregister(struct tessai_dev *tdev);
 long tessai_ioctl_cmd_submit(struct drm_device *ddev, void __user *uarg, struct drm_file *file);
 void tessai_cmd_release_owner(struct tessai_dev *tdev, struct drm_file *file);
 void tessai_cmd_dispatch_response(struct tessai_dev *tdev,
-				const void *payload, size_t len);
+				  const void *payload, size_t len);
 int  tessai_cmd_init(struct tessai_dev *tdev);
 void tessai_cmd_fini(struct tessai_dev *tdev);
 
-void tessai_cmd_abort_inflight_rpmsg_detach(struct tessai_dev *tdev, int err);
+void tessai_cmd_drain_inflight_rpmsg_detach(struct tessai_dev *tdev, int err);
 
 int  tessai_rpmsg_register(void);
 void tessai_rpmsg_unregister(void);
-int  tessai_rpmsg_send_cmd(struct tessai_dev *tdev, u16 op_ctrl, u16 op_app,
-			 u32 command_op, u32 flags, const __le64 *args,
+/* @seq: driver command id (tessai_cmd.seq), not supplied by userspace. */
+int  tessai_rpmsg_send_cmd(struct tessai_dev *tdev, u32 seq,
+			   u32 command_op, u32 flags, const __le64 *args,
 			 u32 num_args);
 
 #endif /* _TESSAI_AGENT_INTERNAL_H_ */
