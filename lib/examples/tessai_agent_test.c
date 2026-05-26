@@ -109,9 +109,11 @@ static const char *memory_type_str(uint32_t t)
  *   "scalar:<u64>"          -> tessai_arg{ .size = 0,    .value = u64 }
  *   "buf:<handle>:<offset>" -> tessai_arg{ .size = ~0u,  .bo = {handle, offset} }
  *
- * The "size" of buffer args is the byte length of the GEM slice (must be
- * <= BO size minus offset).  For a six-arg in/out layout see OP_CODE_CMD0 in
- * include/uapi/tessai-agent/tessai_agent.h.  Most quick tests use fw_echo instead.
+ * The "size" of buffer args is set by the caller to the slice length the
+ * firmware should treat the buffer as. For raw cmd_submit testing we use
+ * the offset value as a stand-in: it does not matter to the kernel because
+ * the kernel only needs the handle to resolve dma_addr; the firmware-side
+ * interpretation depends on the op. Most users will want fw_echo instead.
  */
 static int parse_arg_token(const char *tok, struct tessai_arg *out)
 {
@@ -133,8 +135,9 @@ static int parse_arg_token(const char *tok, struct tessai_arg *out)
 		}
 		handle = parse_u32(p);
 		offset = parse_u32(colon + 1);
-		/* Non-zero size: GEM slice length (validated vs BO size).  CLI uses
-		 * size 1 for minimal smoke tests; real ops need the firmware length.
+		/* Non-zero size flags this as a buffer arg to the kernel.
+		 * The kernel only inspects the handle/offset; size is opaque
+		 * to it. Use 1 to mean "minimum valid buffer slice".
 		 */
 		out->size = 1;
 		out->bo.drm_buffer_handle = (int32_t)handle;
@@ -385,13 +388,13 @@ static int do_fw_echo(int fd, int argc, char **argv)
 	printf("=== fw_echo: payload=0x%016" PRIx64 ", 0x%016" PRIx64 " ===\n",
 	       v1, v2);
 
-	printf("[1/6] buf_alloc rpu rsp size=%u\n", TESSAI_FW_RSP_BO_SIZE);
+	printf("[1/8] buf_alloc rpu rsp size=%u\n", TESSAI_FW_RSP_BO_SIZE);
 	rc = tessai_agent_buf_alloc(fd, TESSAI_MEMORY_RPU,
 				    TESSAI_FW_RSP_BO_SIZE, &rsp_bo);
 	if (rc) { ret = report("buf_alloc(rpu)", rc); goto out; }
 	printf("      -> rsp_bo=%u\n", rsp_bo);
 
-	printf("[2/6] buf_alloc device extra size=%u\n", TESSAI_FW_EXTRA_BO_SIZE);
+	printf("[2/8] buf_alloc device extra size=%u\n", TESSAI_FW_EXTRA_BO_SIZE);
 	rc = tessai_agent_buf_alloc(fd, TESSAI_MEMORY_DEVICE,
 				    TESSAI_FW_EXTRA_BO_SIZE, &extra_bo);
 	if (rc) { ret = report("buf_alloc(device)", rc); goto out; }
@@ -418,7 +421,30 @@ static int do_fw_echo(int fd, int argc, char **argv)
 		goto out;
 	}
 	memset(map, 0x0a, TESSAI_FW_RSP_BO_SIZE);
-	printf("[3/6] mmap rsp_bo + canary (0x0a)\n");
+	printf("[3/8] mmap rsp_bo + canary (0x0a)\n");
+
+	/*
+	 * Bank BOs are allocated with dma_alloc_noncoherent() so the
+	 * APU CPU-side mapping is cacheable.  Any range the device will
+	 * read must be flushed from CPU caches first, otherwise the RPU
+	 * could observe stale (un-flushed) bytes when it inspects the
+	 * buffer.  length=0 means "from offset through end-of-buffer".
+	 *
+	 * rsp_bo: flush the 0x0a canary so the RPU sees it before it
+	 *         overwrites the buffer with the ASCII reply.
+	 *
+	 * extra_bo: the current FW_ECHO opcode does not actually inspect
+	 *         this buffer, but we sync it anyway so this example
+	 *         stays a faithful template for ops that DO read their
+	 *         "extra" / scratch BOs.  The buffer holds whatever
+	 *         dma_alloc_noncoherent() left in cache; the sync is a
+	 *         no-op on contents but exercises the contract.
+	 */
+	printf("[4/8] buf_sync TO_DEVICE (rsp_bo canary + extra_bo)\n");
+	rc = tessai_agent_buf_sync_to_device(fd, rsp_bo, 0, 0);
+	if (rc) { ret = report("buf_sync(rsp_bo, to_device)", rc); goto out; }
+	rc = tessai_agent_buf_sync_to_device(fd, extra_bo, 0, 0);
+	if (rc) { ret = report("buf_sync(extra_bo, to_device)", rc); goto out; }
 
 	memset(args, 0, sizeof(args));
 	args[0].size = TESSAI_FW_RSP_TEXT_MAX;
@@ -433,13 +459,13 @@ static int do_fw_echo(int fd, int argc, char **argv)
 	args[3].bo.offset = 0;
 
 	memset(&hdr, 0, sizeof(hdr));
-	printf("[4/6] cmd_submit op=0x%08x num_args=4\n", TESSAI_FW_ECHO_OP);
+	printf("[5/8] cmd_submit op=0x%08x num_args=4\n", TESSAI_FW_ECHO_OP);
 	rc = tessai_agent_cmd_submit(fd, TESSAI_FW_ECHO_OP, args, 4,
 				     &hdr, sizeof(hdr));
 	if (rc) { ret = report("cmd_submit", rc); goto out; }
 	printf("      -> syncobj_handle=%d\n", hdr.drm_sync_obj_handle);
 
-	printf("[5/6] syncobj_wait (timeout=%" PRId64 "ns)\n",
+	printf("[6/8] syncobj_wait (timeout=%" PRId64 "ns)\n",
 	       TESSAI_DEFAULT_WAIT_NS);
 	rc = tessai_agent_syncobj_wait_complete(
 		fd, (uint32_t)hdr.drm_sync_obj_handle,
@@ -459,7 +485,17 @@ static int do_fw_echo(int fd, int argc, char **argv)
 		goto out;
 	}
 
-	printf("[6/6] parse RPU reply\n");
+	/*
+	 * RPU has signalled COMPLETE, which means its writes into the
+	 * carveout are observable on the bus.  But the APU CPU may
+	 * still have stale (canary) cache lines for this BO; invalidate
+	 * before sscanf so we read the freshly-DMA'd ASCII reply.
+	 */
+	printf("[7/8] buf_sync FROM_DEVICE (invalidate CPU view)\n");
+	rc = tessai_agent_buf_sync_from_device(fd, rsp_bo, 0, 0);
+	if (rc) { ret = report("buf_sync(from_device)", rc); goto out; }
+
+	printf("[8/8] parse RPU reply\n");
 	if (sscanf(map, "rsp: command id: %u, num_args: %u",
 		   &rpu_cid, &rpu_nargs) != 2) {
 		fprintf(stderr,
