@@ -71,7 +71,17 @@ if(TESSAI_AGENT_LIB_BUILD_STATIC)
 endif()
 
 if(TESSAI_AGENT_LIB_BUILD_EXAMPLES AND _installed_targets)
-	set(_tess_examples tessai_agent_test)
+	# tessai_agent_test:          fw_echo round-trip CLI.
+	# tessai_agent_inout_example: COPY_IN_OUT end-to-end through the
+	#                             RPURuntime slave (see
+	#                             lib/examples/README-inout-example.md).
+	#                             Restored after the fac10e9 reference
+	#                             merge dropped it from this list;
+	#                             build/build.sh + boot_vek385.py both
+	#                             expect this binary at bin/.
+	set(_tess_examples
+		tessai_agent_test
+		tessai_agent_inout_example)
 	if(TESSAI_AGENT_LINK_EXAMPLES_STATIC)
 		if(NOT TARGET tessai_agent_static)
 			message(FATAL_ERROR

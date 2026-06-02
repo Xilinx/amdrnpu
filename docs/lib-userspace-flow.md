@@ -160,6 +160,6 @@ flowchart LR
 ```
 
 For runnable examples covering every UAPI op (buf_alloc, cmd_submit,
-lifecycle, fw_echo writeback, and the full Phase 2 fault-class
-fence-error suite) see
+lifecycle, fw_echo writeback, and the full fault-class fence-error
+suite) see
 [`lib/examples/tessai_agent_test.c`](../lib/examples/tessai_agent_test.c).

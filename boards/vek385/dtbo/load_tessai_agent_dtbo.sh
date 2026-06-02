@@ -3,12 +3,12 @@
 # (optionally) load the tessai_agent driver module.
 #
 # Adds a /tessai-agent node (compatible "amd,tessai-agent") with:
-#   - amd,remoteproc -> remoteproc r52f@0  (label r5f_0 in base DTB)
+#   - amd,remoteproc -> remoteproc r52f@1  (label r5f_1 in base DTB).
 #   - bank@0 memory-region -> tess_rpu_gem_carveout (RPU GEM, 0x20000000..0x3fffffff)
 #   - bank@1 memory-region -> app_bank0 (high DDR CMA pool)
 #
 # REQUIRES the kernel to be booted with a multi-DTB / symbol-exporting base
-# DTB that defines r5f_0, tess_rpu_gem_carveout, and app_bank0 in
+# DTB that defines r5f_1, tess_rpu_gem_carveout, and app_bank0 in
 # /__symbols__ (same as amdxdna VEK385 prep).  See README.md.
 #
 # Usage:

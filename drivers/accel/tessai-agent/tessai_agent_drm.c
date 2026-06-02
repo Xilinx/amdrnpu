@@ -230,6 +230,24 @@ static int tessai_buf_alloc(struct drm_device *ddev, struct tessai_buf_alloc *ar
 	if (!args->size || args->size > SZ_2G)
 		return -EINVAL;
 
+	/*
+	 * Reject memory_type values outside the UAPI enum BEFORE the bank
+	 * lookup. tessai_bank_memory_type() returns NULL for both "value
+	 * is not a known enum" and "value is known but no bank registered
+	 * for this region" -- conflating those into one errno makes it
+	 * impossible for userspace to tell a typo from a missing carveout.
+	 * EINVAL is for the former (bad input value, Linux convention);
+	 * ENODEV below stays for the latter (valid input, hardware/DT
+	 * can't satisfy it).
+	 */
+	switch (args->memory_type) {
+	case TESSAI_MEMORY_RPU:
+	case TESSAI_MEMORY_DEVICE:
+		break;
+	default:
+		return -EINVAL;
+	}
+
 	bank = tessai_bank_memory_type(tdev, args->memory_type);
 	if (!bank)
 		return -ENODEV;
@@ -245,9 +263,20 @@ static int tessai_buf_alloc(struct drm_device *ddev, struct tessai_buf_alloc *ar
 		return PTR_ERR(bo);
 
 	bo->dma_dir = DMA_BIDIRECTIONAL;
+	/*
+	 * __GFP_NOWARN: legitimate large requests (e.g. userspace probing
+	 * "give me 1 GiB on a 512 MiB carveout") fail cleanly with -ENOMEM
+	 * and we already report that to the caller. The page allocator's
+	 * "order too large" WARN_ON_ONCE backtrace is just noise on top --
+	 * it tags every boot's dmesg with a scary trace that has nothing
+	 * to do with a real bug. __GFP_NORETRY keeps the OOM killer from
+	 * thrashing for an allocation the caller can already gracefully
+	 * recover from.
+	 */
 	bo->kvaddr = dma_alloc_noncoherent(bank->dev, bo->size,
 					   &bo->dma_addr, bo->dma_dir,
-					   GFP_KERNEL);
+					   GFP_KERNEL | __GFP_NOWARN |
+					   __GFP_NORETRY);
 	if (!bo->kvaddr) {
 		ret = -ENOMEM;
 		goto err_release;

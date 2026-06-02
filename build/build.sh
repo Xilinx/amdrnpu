@@ -3,10 +3,20 @@
 #
 # tessai-agent unified build orchestrator.
 #
-# Builds all three deliverables, out-of-source, into build/<TYPE>/:
+# Builds all deliverables, out-of-source, into build/<TYPE>/:
 #   - drivers/accel/tessai-agent/ -> tessai_agent.ko        (kernel module)
 #   - lib/                        -> libtessai_agent.{so*,a}
 #   - lib/examples/               -> tessai_agent_test      (CLI)
+#                                    tessai_agent_inout_example (CLI;
+#                                    COPY_IN_OUT smoke test)
+#   - tests/unittests/            -> tessai_agent_unittest  (gtest-based
+#                                    Link A acceptance suite; skip the
+#                                    tests/ phase entirely with
+#                                    -no-tests; the gtest binary
+#                                    itself is opt-in via -unit_tests
+#                                    so the cross-vitis flow doesn't
+#                                    drag in a C++17 toolchain unless
+#                                    you ask for it.)
 #
 # Three modes:
 #
@@ -31,6 +41,8 @@
 #   build/<TYPE>/driver/    final .ko
 #   build/<TYPE>/lib/       libtessai_agent.{so*,a}
 #   build/<TYPE>/bin/       tessai_agent_test
+#                           tessai_agent_inout_example
+#                           tessai_agent_unittest         (only with -unit_tests)
 #   build/<TYPE>/obj/       kbuild mirror: directories are real, source
 #                           files are symlinks back into the repo,
 #                           kbuild outputs (.o, .ko, .mod*, .cmd) are
@@ -60,6 +72,8 @@ STRIP_DIRTY=1
 SYSROOT=""           # -sysroot, used by -cross-vitis lib step
 YOCTO_BUILD=""       # -cross-yocto PATH
 YOCTO_MACHINE=""     # -yocto-machine override
+BUILD_TESTS=1        # build tests/ tree (-no-tests to skip)
+BUILD_UNITTESTS=0    # gtest tessai_agent_unittest (-unit_tests to opt in)
 
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
 log()  { printf "${GREEN}[build]${NC} %s\n" "$*"; }
@@ -71,7 +85,7 @@ usage() {
 Usage: build/build.sh [OPTIONS]
 
   Native: build/build.sh
-    Builds kernel module + userspace lib + tessai_agent_test against the
+    Builds kernel module + userspace lib + example CLIs against the
     running kernel and the host's libdrm-dev. Artifacts in build/Release/.
 
   Cross (Vitis toolchain, no Yocto): build/build.sh -cross-vitis -sysroot PATH
@@ -121,11 +135,29 @@ Options:
                        Default: '$LOCALVERSION'
   -no-strip-dirty      Skip the post-build vermagic '-dirty' strip
                        (cross modes only).
+  -no-tests            Skip the tests/ target entirely (the gtest
+                       tessai_agent_unittest Link A acceptance
+                       suite). On by default; this flag is mostly
+                       for fast iteration when only the lib or kmod
+                       changed.
+  -unit_tests          Also build tests/unittests/ (gtest-based
+                       tessai_agent_unittest). OFF by default because
+                       it needs a C++17 cross toolchain + a sysroot
+                       with libstdc++ + a complete bits/ tree
+                       (some cross sysroots ship aarch64-only
+                       timesize-64.h but no timesize-32.h, which
+                       trips libstdc++'s <chrono> include path on
+                       compilers that don't honor CMAKE_SYSROOT
+                       correctly for the C++ frontend). When opted
+                       in here, build.sh also sets CMAKE_CXX_COMPILER
+                       to the matching cross g++.
 
 Outputs (per build):
   build/<TYPE>/driver/tessai_agent.ko
   build/<TYPE>/lib/libtessai_agent.{so*,a}
   build/<TYPE>/bin/tessai_agent_test
+  build/<TYPE>/bin/tessai_agent_inout_example
+  build/<TYPE>/bin/tessai_agent_unittest (only with -unit_tests; needs C++17)
 EOF
 }
 
@@ -142,6 +174,9 @@ while [ $# -gt 0 ]; do
         -toolchain)        VITIS_TC="$2"; shift 2 ;;
         -localversion)     LOCALVERSION="$2"; shift 2 ;;
         -no-strip-dirty)   STRIP_DIRTY=0; shift ;;
+        -no-tests)         BUILD_TESTS=0; shift ;;
+        -unit_tests|-unit-tests)
+                           BUILD_UNITTESTS=1; shift ;;
         -sysroot)          SYSROOT="$2"; shift 2 ;;
         *) die "Unknown option: $1 (try -help)" ;;
     esac
@@ -165,8 +200,11 @@ if [ "$CLEAN" -eq 1 ]; then
 fi
 
 # ---------- per-mode setup ----------
-# CC/AR/RANLIB used by the lib cmake invocation in cross modes.
+# CC/CXX/AR/RANLIB used by the lib + tests cmake invocations in cross
+# modes. CROSS_CXX is only consumed by build_tests() when unittests are
+# opted in (-unit_tests); the kmod + lib + lifecycle paths are all C.
 CROSS_CC=""
+CROSS_CXX=""
 CROSS_AR=""
 CROSS_RANLIB=""
 KOBJ=""                # only set in cross-yocto mode (separate src/build trees)
@@ -176,6 +214,7 @@ NATIVE_SYSROOT_BIN=""  # for the cross-yocto PATH prefix (host-side build tools)
 if [ "$CROSS_VITIS" -eq 1 ]; then
     [ -n "$KDIR" ] || KDIR="$CROSS_VITIS_KDIR_DEFAULT"
     CROSS_CC="$VITIS_TC/bin/aarch64-linux-gnu-gcc"
+    CROSS_CXX="$VITIS_TC/bin/aarch64-linux-gnu-g++"
     CROSS_AR="$VITIS_TC/bin/aarch64-linux-gnu-ar"
     CROSS_RANLIB="$VITIS_TC/bin/aarch64-linux-gnu-ranlib"
 
@@ -265,6 +304,7 @@ elif [ "$CROSS_YOCTO" -eq 1 ]; then
         || die "no target sysroot found (need edf-linux-disk-image/*/rootfs with libdrm.pc, or any recipe-sysroot)"
 
     CROSS_CC="$NATIVE_SYSROOT_BIN/aarch64-amd-linux-gcc"
+    CROSS_CXX="$NATIVE_SYSROOT_BIN/aarch64-amd-linux-g++"
     CROSS_AR="$NATIVE_SYSROOT_BIN/aarch64-amd-linux-ar"
     CROSS_RANLIB="$NATIVE_SYSROOT_BIN/aarch64-amd-linux-ranlib"
 
@@ -374,7 +414,7 @@ build_kmod() {
 
 # ---------- userspace lib + CLI phase ----------
 build_lib() {
-    log "Building userspace lib + tessai_agent_test"
+    log "Building userspace lib + example CLIs"
 
     local cmake_args=(
         -S "$REPO/lib"
@@ -423,20 +463,114 @@ build_lib() {
         || die "no libtessai_agent.* produced (see $OUT/cmake-build.log)"
     cp -af "${libs[@]}" "$OUT/lib/"
 
-    [ -f "$OUT/cmake-lib/tessai_agent_test" ] \
-        || die "tessai_agent_test was not produced (see $OUT/cmake-build.log)"
-    cp -f "$OUT/cmake-lib/tessai_agent_test" "$OUT/bin/"
+    # Copy every example listed in lib/CMakeLists.txt _tess_examples into
+    # bin/. Kept as an explicit list (not a glob over cmake-lib/) so that
+    # a renamed or deleted example fails the build loudly with the
+    # "was not produced" die instead of silently dropping out of the
+    # artifact set. Must stay in lockstep with _tess_examples in
+    # lib/CMakeLists.txt.
+    local examples=( tessai_agent_test tessai_agent_inout_example )
+    for _exe in "${examples[@]}"; do
+        [ -f "$OUT/cmake-lib/$_exe" ] \
+            || die "$_exe was not produced (see $OUT/cmake-build.log)"
+        cp -f "$OUT/cmake-lib/$_exe" "$OUT/bin/"
+    done
 
     log "  -> $OUT/lib/ ($(ls -1 "$OUT/lib/" | tr '\n' ' '))"
-    log "  -> $OUT/bin/tessai_agent_test"
+    for _exe in "${examples[@]}"; do log "  -> $OUT/bin/$_exe"; done
+    echo
+}
+
+# ---------- userspace tests phase ----------
+# Build tests/unittests/tessai_agent_unittest (Link A acceptance
+# suite). The parent tests/ CMake project itself only contains the
+# gate flag (TESSAI_AGENT_BUILD_UNITTESTS) and the add_subdirectory
+# call -- there is no longer a standalone C smoke binary, so without
+# -unit_tests the tests/ phase is effectively a no-op configure pass
+# kept solely for symmetry with -no-tests.
+#
+# The gtest binary itself is libdrm-free -- it only depends on the
+# kernel UAPI headers (drm/, linux/sync_file) and this repo's
+# include/uapi/tessai-agent/tessai_agent.h, plus a C++17 toolchain
+# (libstdc++ <chrono>/<thread>/<atomic>/<filesystem>). In cross
+# modes we still need a SYSROOT to find the kernel UAPI headers.
+build_tests() {
+    [ "$BUILD_TESTS" -eq 1 ] || { log "Skipping tests/ (-no-tests)"; return 0; }
+    [ -f "$REPO/tests/CMakeLists.txt" ] \
+        || { warn "tests/CMakeLists.txt not present, skipping"; return 0; }
+
+    if [ "$BUILD_UNITTESTS" -ne 1 ]; then
+        log "tests/ configured for unittests-OFF (no-op without -unit_tests)"
+        return 0
+    fi
+
+    log "Building Link A gtest suite (tests/unittests/)"
+
+    local cmake_args=(
+        -S "$REPO/tests"
+        -B "$OUT/cmake-tests"
+        -DCMAKE_BUILD_TYPE=Release
+        -DTESSAI_AGENT_BUILD_UNITTESTS=ON
+        # Auto-stage on every link so incremental rebuilds
+        # (`make -C $OUT/cmake-tests/unittests`) keep $OUT/bin/
+        # in sync without needing a full ./build/build.sh
+        # re-run. boot_vek385.py reads $OUT/bin/, so a stale
+        # staged copy is an easy way to chase a "but I just fixed
+        # that!" ghost (the new binary builds, the OLD one runs).
+        -DTESSAI_AGENT_STAGE_BIN_DIR="$OUT/bin"
+    )
+    local cmake_env=()
+
+    if [ "$CROSS" -eq 1 ]; then
+        cmake_args+=(
+            -DCMAKE_SYSTEM_NAME=Linux
+            -DCMAKE_SYSTEM_PROCESSOR=aarch64
+            -DCMAKE_C_COMPILER="$CROSS_CC"
+            -DCMAKE_AR="$CROSS_AR"
+            -DCMAKE_RANLIB="$CROSS_RANLIB"
+            -DCMAKE_SYSROOT="$SYSROOT"
+            -DCMAKE_FIND_ROOT_PATH="$SYSROOT"
+            -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER
+            -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY
+            -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY
+            -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY
+        )
+        [ -x "$CROSS_CXX" ] \
+            || die "-unit_tests requires a cross g++ at $CROSS_CXX"
+        cmake_args+=( -DCMAKE_CXX_COMPILER="$CROSS_CXX" )
+    fi
+
+    env "${cmake_env[@]}" cmake "${cmake_args[@]}" >"$OUT/cmake-tests-configure.log" 2>&1 \
+        || { cat "$OUT/cmake-tests-configure.log" >&2; die "tests cmake configure failed"; }
+    env "${cmake_env[@]}" cmake --build "$OUT/cmake-tests" -j "$JOBS" 2>&1 \
+        | tee "$OUT/cmake-tests-build.log" \
+        | grep -E '^\[|error:|Error|warning:' || true
+
+    if [ -f "$OUT/cmake-tests/unittests/tessai_agent_unittest" ]; then
+        cp -f "$OUT/cmake-tests/unittests/tessai_agent_unittest" "$OUT/bin/"
+        log "  -> $OUT/bin/tessai_agent_unittest"
+    else
+        die "tessai_agent_unittest was not produced (see $OUT/cmake-tests-build.log). \
+Did you run: git submodule update --init --recursive ?"
+    fi
+
+    # Surface the bundled RPURuntime firmware path so users / CI know
+    # where to grab the Link A reference image to flash on remoteproc1.
+    if [ -f "$REPO/tests/rpu_app/rpu_app_link_a.elf" ]; then
+        log "  Bundled RPU firmware: $REPO/tests/rpu_app/rpu_app_link_a.elf"
+    else
+        warn "  tests/rpu_app/rpu_app_link_a.elf is missing"
+        warn "  (rebuild it from tests/rpu_app/ via: cd tests/rpu_app && ./build.sh tests/tessai_agent_test)"
+    fi
     echo
 }
 
 # ---------- run ----------
 build_kmod
 build_lib
+build_tests
 
 log "Done. Artifacts under $OUT/:"
 log "  driver/tessai_agent.ko"
 for f in $(ls -1 "$OUT/lib/"); do log "  lib/$f"; done
-log "  bin/tessai_agent_test"
+for f in $(ls -1 "$OUT/bin/"); do log "  bin/$f"; done

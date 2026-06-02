@@ -51,7 +51,7 @@ tessai-agent/
 
 The single source of truth for the user/kernel ABI is
 [`include/uapi/tessai-agent/tessai_agent.h`](include/uapi/tessai-agent/tessai_agent.h)
-(magic `'T'`, ABI version `13` at time of writing); both the kernel module
+(magic `'T'`, ABI version `1` at time of writing); both the kernel module
 and the user-space library include it directly.
 
 ## UAPI at a glance
@@ -180,26 +180,45 @@ close) looks like:
 ```c
 #include <tessai_agent/tessai_agent_lib.h>
 
-int fd = tessai_agent_open_render_node();          /* picks the tessai_agent DRM node */
+#define OP_CODE_CMD0  0x00000001u
+#define INPUT_BO      1ull
+#define OUTPUT_BO     2ull
+#define SZ_16M        (16u * 1024u * 1024u)
+#define SZ_8M         (8u * 1024u * 1024u)
 
-uint32_t bo;
-tessai_agent_buf_alloc(fd, TESSAI_MEMORY_DEVICE, 4096, &bo);
+int fd = tessai_agent_open_render_node();
+uint32_t bo0_hd, bo1_hd;
+struct tessai_arg args[6];
+struct tessai_cmd_submit hdr;
+int32_t status = 0;
 
-uint64_t map_offset;
-tessai_agent_map_dumb(fd, bo, &map_offset);
-void *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, map_offset);
+tessai_agent_buf_alloc(fd, TESSAI_MEMORY_DEVICE, SZ_16M, &bo0_hd);
+tessai_agent_buf_alloc(fd, TESSAI_MEMORY_DEVICE, SZ_8M, &bo1_hd);
 
-struct tessai_cmd_submit_hdr hdr = {
-    .command_op = 0xCAFEBABE,
-    .num_args   = 0,
+args[0] = (struct tessai_arg){ .size = 0, .value = INPUT_BO };
+args[1] = (struct tessai_arg){ .size = 0, .value = SZ_16M };
+args[2] = (struct tessai_arg){
+	.size = SZ_16M,
+	.bo = { .drm_buffer_handle = (__s32)bo0_hd, .offset = 0 },
 };
-tessai_agent_cmd_submit(fd, &hdr, /* args */ NULL);
+args[3] = (struct tessai_arg){ .size = 0, .value = OUTPUT_BO };
+args[4] = (struct tessai_arg){ .size = 0, .value = SZ_8M };
+args[5] = (struct tessai_arg){
+	.size = SZ_8M,
+	.bo = { .drm_buffer_handle = (__s32)bo1_hd, .offset = 0 },
+};
 
-tessai_agent_syncobj_wait(fd, hdr.drm_sync_obj_handle, /*timeout_ns=*/2000000000);
+tessai_agent_cmd_submit(fd, OP_CODE_CMD0, args, 6, &hdr, sizeof(hdr));
+tessai_agent_syncobj_wait_complete(fd, hdr.drm_sync_obj_handle,
+				   2000000000LL, &status);
 
-tessai_agent_buf_close(fd, bo);
+tessai_agent_buf_close(fd, bo0_hd);
+tessai_agent_buf_close(fd, bo1_hd);
 close(fd);
 ```
+
+A raw-`ioctl` variant (no library) is documented in
+[`include/uapi/tessai-agent/tessai_agent.h`](include/uapi/tessai-agent/tessai_agent.h).
 
 The `tessai_agent_test` CLI (built by default with the lib) exercises every
 UAPI op individually plus a `lifecycle` shortcut and a fault-class

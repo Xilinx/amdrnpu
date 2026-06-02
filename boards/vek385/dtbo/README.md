@@ -7,9 +7,9 @@ same symbol names as the amdxdna VEK385 flow.
 
 | File | Role |
 |------|------|
-| `tessai-agent-add.dts` | Plugin overlay source |
-| `build_tessai_agent_dtbo.sh` | Compile `.dts` → `tessai-agent-add.dtbo` |
+| `build_tessai_agent_dtbo.sh` | Generate `tessai-agent-add.dtbo` (the overlay dts is a heredoc inside this script — single source of truth, no checked-in `.dts` to drift) |
 | `load_tessai_agent_dtbo.sh` | `apply` / `remove` / `status` on the board |
+| `tessai-agent-add.dtbo` | Build artifact (regenerate by re-running the script above) |
 
 ## Base DTB prerequisites
 
@@ -17,7 +17,7 @@ The overlay resolves these labels from the **booted** FDT `/__symbols__`:
 
 | Label | Use |
 |-------|-----|
-| `r5f_0` | `amd,remoteproc` on `tessai-agent` |
+| `r5f_1` | `amd,remoteproc` on `tessai-agent` (RPU running RPURuntime link-A endpoint) |
 | `tess_rpu_gem_carveout` | `bank@0` `memory-region` (512 MiB reusable @ `0x20000000`) |
 | `app_bank0` | `bank@1` `memory-region` (high DDR CMA pool) |
 
@@ -54,6 +54,8 @@ ls /proc/device-tree/tessai-agent/
 
 ## Relation to `amdxdna-add.dtbo`
 
-Both overlays can be applied on the same base DTB: **amdxdna** adds `/amdxdna`,
-**tessai-agent** adds `/tessai-agent`. They share `r5f_0` and `tess_rpu_gem_carveout`
-but bind different kernel drivers and RPMsg channel names.
+Both overlays can be applied on the same base DTB: **amdxdna** adds `/amdxdna`
+(binds `r5f_0` and `tess_rpu_gem_carveout`), **tessai-agent** adds `/tessai-agent`
+(binds `r5f_1` and `tess_rpu_gem_carveout`). They share the GEM carveout but
+target different remoteprocs and bind different kernel drivers / RPMsg channel
+names, so both can coexist on the same boot.
