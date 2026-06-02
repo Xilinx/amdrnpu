@@ -556,10 +556,10 @@ Did you run: git submodule update --init --recursive ?"
 
     # Surface the bundled RPURuntime firmware path so users / CI know
     # where to grab the Link A reference image to flash on remoteproc1.
-    if [ -f "$REPO/tests/rpu_app/rpu_app_link_a.elf" ]; then
-        log "  Bundled RPU firmware: $REPO/tests/rpu_app/rpu_app_link_a.elf"
+    if [ -f "$REPO/tests/rpu_app/zephyr/build/zephyr/zephyr.elf" ]; then
+        log "  Bundled RPU firmware: $REPO/tests/rpu_app/zephyr/build/zephyr/zephyr.elf"
     else
-        warn "  tests/rpu_app/rpu_app_link_a.elf is missing"
+        warn "  tests/rpu_app/zephyr/build/zephyr/zephyr.elf is missing"
         warn "  (rebuild it from tests/rpu_app/ via: cd tests/rpu_app && ./build.sh tests/tessai_agent_test)"
     fi
     echo

@@ -1,0 +1,277 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+
+/*
+ * Board DTS fragments for the AMD R52 cluster on the Versal Gen 2
+ * PS11. Layered onto the lopper-emitted SoC DTS by build.sh, which
+ * rsyncs this file into the upstream R52 board directory under
+ * zephyr/boards/amd/ and appends `#include "reserved.dtsi"` to the
+ * end of the board DTS after lopper has run. The base SoC labels
+ * referenced via `&...` below (OCM banks, ipi2 children) MUST
+ * already be defined upstream, hence the trailing-include order.
+ *
+ * Section A — DDR carve-out (reserved-memory)
+ *   Declares a Linux-style reserved region so the range is not treated as generic
+ *   system RAM in DT.  `no-map` marks it as not foldable into the normal RAM pool
+ *   (document intent; if the main `memory` node still covers the same PA, adjust
+ *   that `reg` or linker layout so Zephyr does not place sections there).
+ *
+ *   If your board DTS already defines `/reserved-memory`, do NOT add another
+ *   `/ { reserved-memory { ... }; };` block (duplicate node).  Extend the existing
+ *   node instead, e.g.:
+ *     &{/reserved-memory} {
+ *       rsv_512m: memory@20000000 { reg = <...>; no-map; };
+ *     };
+ *
+ * Section B — PS OCM banks (MPU via devicetree)
+ *   OCM is described as `mmio-sram`; that binding does not allow `zephyr,memory-attr`.
+ *   Prepend compatible `zephyr,memory-region` so `zephyr,memory-attr` is valid
+ *   (see dts/bindings/base/zephyr,memory-region.yaml and zephyr,memory-common.yaml).
+ *   Each `zephyr,memory-region` string MUST be unique (linker / gen_defines requirement).
+ *
+ *   Requires CONFIG_MEM_ATTR=y (often default with ARM MPU) so mem_attr + MPU
+ *   setup consumes these nodes at boot.
+ *
+ * Physical map (typical PS11 OCM on this board):
+ *   BANK0  0xBBF0_0000  512 KiB   ps_wizard_0_ps11_0_ocm_ram_0_memory
+ *   BANK1  0xBBF8_0000  512 KiB   ps_wizard_0_ps11_0_ocm_ram_1_memory
+ *   BANK2  0xBBE0_0000  512 KiB   ps_wizard_0_ps11_0_ocm_ram_2_memory
+ *   BANK3  0xBBE8_0000  512 KiB   ps_wizard_0_ps11_0_ocm_ram_3_memory
+ *
+ * If SDT renames these labels, update the &... references to match the lopper-
+ * emitted SoC DTS.
+ */
+
+#include <zephyr/dt-bindings/memory-attr/memory-attr-arm.h>
+
+/ {
+	/* 512 MB carve-out @ 0x2000_0000 (no-map: not merged into general RAM pools) */
+	reserved-memory {
+		#address-cells = <0x2>;
+		#size-cells = <0x2>;
+		ranges;
+
+		/* 512 MiB @ 0x2000_0000 — reserved, not generic Zephyr RAM */
+		rsv_512m: memory@20000000 {
+			reg = <0x0 0x20000000 0x0 0x20000000>;
+			no-map;
+		};
+	};
+};
+
+&ps_wizard_0_ps11_0_ocm_ram_3_memory {
+	compatible = "zephyr,memory-region", "xlnx,ocm-ram-11.0", "mmio-sram";
+	zephyr,memory-region = "OCM_PS11_BANK3";
+	zephyr,memory-attr = <(DT_MEM_ARM(ATTR_MPU_RAM))>;
+};
+
+&ipi2 {
+	status = "okay";
+};
+
+/*
+ * Link A IPI mailbox: RPURuntime (RPU-APP IPI_2, hw xlnx,ipi-id=4)
+ * -> Linux APU IPI_5 (hw xlnx,ipi-id=7, mailbox@eb380000, SPI 62).
+ *
+ * Wiring matches the platform design doc:
+ *   "Platform assigns 3 IPIs to APU - IPI_3, IPI_4, IPI_5"
+ *   "Platform assigns 1 IPI to RPU-APP - IPI_2"
+ *   "In RPU-APPs, IPI is shared across mgmt mailbox response from
+ *    RPU-FW; mgmt mailbox request from APU; ..."
+ *
+ * The upstream SoC DTS child labels use the design-doc logical IPI
+ * numbering (X in ipi_2_to_ipi_X = logical APU IPI_X), NOT the raw
+ * Vivado xlnx,ipi-id. So ipi_2_to_ipi_5 = "RPU-APP IPI_2 -> APU IPI_5",
+ * with hw xlnx,ipi-id=7 underneath. This is the same hw IPI that
+ * rpu-fw's apu_mailbox: child@eb380000 (xlnx,ipi-id=7) uses for its
+ * own APU<->RPU-FW link - we are deliberately SHARING the Linux APU
+ * IPI_5 parent across both r52f@0 (rpu-fw) and r52f@1 (RPURuntime),
+ * per the design doc's "IPI is shared" rule.
+ *
+ * Counterpart kernel-DT wiring: r52f@1.mboxes = <0x17d 0x00 0x17d 0x01>
+ * = /axi/mailbox@eb380000/child@eb350000 (target xlnx,ipi-id=4 = us).
+ * See apply_tessai_patch.py R52_CORE1_INJECT.
+ */
+&ipi_2_to_ipi_5 {
+	status = "okay";
+};
+
+/ {
+	/*
+	 * Section C — RPMsg / VirtIO shared memory (Protocol 1, Link B).
+	 *
+	 * Fixed addresses matching RPU_FW's memory layout. Both consumers
+	 * (rpmsg_platform.c which located these via DT_CHOSEN(zephyr_ipc_shm)
+	 * + DT_NODELABEL(rsctbl), and the shmem_platform.c alternative
+	 * which ignored them) were dropped from the rpu_app snapshot in
+	 * the Link-A-only cleanup, so these nodes are currently UNUSED.
+	 *
+	 * Kept in the DTS verbatim so reviving the Link B transport from
+	 * branch wip/link-b-phase2b-copy-in-out-forwarder is a pure source
+	 * restore -- no DT churn. If the snapshot is ever frozen
+	 * Link-A-only for good, these two nodes can be removed (288 KiB +
+	 * 256 B of reserved physical address space; they are passive
+	 * mmio-sram declarations and do not affect Link A at runtime).
+	 *
+	 *   rpmsg_shmem  0x9900000  0x48000 (288 KB) — VirtIO vrings + buffers
+	 *   rsctbl       0x9800000  0x100   (256  B) — RPU_FW resource table
+	 */
+	rpmsg_shmem: memory@9900000 {
+		compatible = "mmio-sram";
+		reg = <0x0 0x9900000 0x0 0x48000>;
+	};
+
+	rsctbl: memory@9800000 {
+		compatible = "mmio-sram";
+		reg = <0x0 0x9800000 0x0 0x100>;
+	};
+
+	/*
+	 * Section D — Link A (APU<->RPURuntime, "tessai-agent" rpmsg endpoint).
+	 *
+	 * apu_rsctbl uses zephyr,memory-region = "RSC_TABLE" so the standard
+	 * CONFIG_OPENAMP_RSC_TABLE linker fragment (resource_table.ld pattern)
+	 * places the generated table here. apu_rpmsg_shmem holds the two
+	 * vrings + shared buffer pool. apu_rpmsg_fw is the firmware ELF load
+	 * region (Linux remoteproc copies the RPURuntime ELF text/data into
+	 * it; mirrors rpu-fw's ddr_firmware at 0x09800100).
+	 *
+	 *   apu_rsctbl       0x0A00_0000  0x100    rsctbl (zephyr places .resource_table here)
+	 *   apu_rpmsg_fw     0x0A00_0100  0xFFF00  RPURuntime ELF load region (~1 MiB)
+	 *   apu_rpmsg_shmem  0x0A10_0000  0x48000  vrings + buffer pool (288 KiB)
+	 *
+	 * Phase 3 relocates this entire region into OCM Bank 1 (0xBBF8_0000)
+	 * per the Ryzen+T20 architecture doc. Keep the layout aligned with
+	 * the kernel DT carveouts (rsc_tbl_carveout_1, ddrboot@a000100,
+	 * rpu1vdev0*) and the lopper apply_tessai_patch.py injection.
+	 *
+	 * NB: The firmware-load carveout (apu_rpmsg_fw on the RPURuntime side)
+	 * MUST be exposed to Linux as a /reserved-memory node literally named
+	 * `ddrboot@*`. The Xilinx xlnx_r5_remoteproc.c driver finds the DDR
+	 * boot address via rproc_find_carveout_by_name(rproc, "ddrboot"); any
+	 * other name silently falls back to TCM/LOVEC=0 boot, R52 fetches
+	 * from empty ATCM, and the firmware never executes (the kernel still
+	 * prints "remote processor ... is now up" -- that just means reset
+	 * was released, not that anything started running).
+	 */
+	apu_rsctbl: memory@a000000 {
+		compatible = "zephyr,memory-region", "mmio-sram";
+		reg = <0x0 0x0a000000 0x0 0x100>;
+		zephyr,memory-region = "RSC_TABLE";
+		zephyr,memory-attr = <(DT_MEM_ARM(ATTR_MPU_RAM))>;
+	};
+
+	apu_rpmsg_fw: memory@a000100 {
+		compatible = "zephyr,memory-region", "mmio-sram";
+		reg = <0x0 0x0a000100 0x0 0xfff00>;
+		zephyr,memory-region = "APU_RPMSG_FW";
+		zephyr,memory-attr = <(DT_MEM_ARM(ATTR_MPU_RAM))>;
+	};
+
+	apu_rpmsg_shmem: memory@a100000 {
+		compatible = "zephyr,memory-region", "mmio-sram";
+		reg = <0x0 0x0a100000 0x0 0x48000>;
+		zephyr,memory-region = "APU_RPMSG_SHM";
+		zephyr,memory-attr = <(DT_MEM_ARM(ATTR_MPU_RAM))>;
+	};
+
+	/*
+	 * Section E — tessai-agent RPU GEM carveout.
+	 *
+	 * Address (PA 0x20000000) and size (512 MiB) are LOCKSTEP with
+	 * the Linux side rpu_gem_cma@20000000 reserved-memory node
+	 * (carrying phandle = <0x500> and linux,cma-default in the
+	 * official Versal-net layout) and with the BUILD_ASSERT in
+	 * xrt/src/driver/src/tessai_agent_endpoint.c
+	 * (DT_NODELABEL(tess_rpu_gem_carveout) -- the Zephyr-side label
+	 * is internal to this DT; the Linux side leaves the matching
+	 * pool node unlabeled and references it by numeric phandle).
+	 *
+	 * This is the canonical tessai-agent RPU-bank layout shared
+	 * across:
+	 *   - tessai-agent/Documentation/devicetree/bindings/accel/
+	 *     amd,tessai-agent.yaml (yaml example uses
+	 *     rpu_gem_cma@20000000 + memory-region = <0x500>)
+	 *   - tessai-agent/boards/vek385/dtbo/build_tessai_agent_dtbo.sh
+	 *     (in-tree dtbo generator: bank@0 memory-region = <0x500>)
+	 *   - tessai-agent/lib/examples/README-inout-example.md
+	 *     (userspace contract: 'RPU GEM carveout 0x20000000 512 MiB')
+	 *   - rpu-fw-platforms/platforms/siva-sentry-mode/dts/
+	 *     apply_tessai_patch.py (RPU_GEM_CMA_BLOCK injects the
+	 *     same node with phandle <0x500> + linux,cma-default into
+	 *     the kernel DTS)
+	 *   - rpu-fw/rpu_fw/boards/<upstream RPU board>.overlay
+	 *     (tess_rpu_gem_carveout: memory@20000000, 512 MiB,
+	 *      chosen,zephyr,tess-rpu-gem-shm; rpu-fw still uses the
+	 *      tess_rpu_gem_carveout label internally because it's
+	 *      its own Zephyr DT, same pattern as this file)
+	 *
+	 * When tessai-agent userspace TESSAI_BUF_ALLOC returns a
+	 * TESSAI_MEMORY_RPU dma_addr, the BO physically lives here
+	 * and is reachable from the R52 via this MPU window. The
+	 * fw_echo writeback path + the Phase 2a slave-local COPY_IN_OUT
+	 * + the Phase 2b link-B-forwarded COPY_IN_OUT all bounds-check
+	 * incoming PAs against this DT node (base/size pulled at compile
+	 * time so the three sides can't skew).
+	 *
+	 * The kernel-side mirror is declared as
+	 *   compatible = "shared-dma-pool"; reusable; linux,cma-default;
+	 * (NOT no-map) so that of_reserved_mem_device_init_by_idx()
+	 * populates dev->cma_area on the bank@0 platform device. The
+	 * tessai-agent driver uses dma_alloc_noncoherent(), which on
+	 * Linux 6.x only honors dev->cma_area; a no-map shared-dma-pool
+	 * would silently fall back to the generic CMA pool and produce
+	 * dma_addr values outside this 512 MiB window. linux,cma-default
+	 * is on THIS pool (the small RPU-reachable one), making it the
+	 * system-wide CMA fallback so other APU-side drivers without
+	 * their own memory-region also land here -- size accordingly.
+	 * See the long comment in apply_tessai_patch.py RPU_GEM_CMA_BLOCK
+	 * for the full dma_alloc_noncoherent -> dma_alloc_contiguous
+	 * trace.
+	 *
+	 * ATTR_MPU_RAM_NOCACHE so RPU stores propagate to the AXI bus
+	 * before the COMPLETE response IPI - userspace's BUF_SYNC then
+	 * sees the bytes without an explicit RPU-side cache flush.
+	 *
+	 * Address history: this carveout briefly lived at 0x10000000
+	 * (16 MiB, Phase 1+2a) and then at 0x30000000 (16 MiB, an
+	 * interim Phase 2b draft) before reverting to the canonical
+	 * 0x20000000/512 MiB layout. The interim placements were too
+	 * small for multi-MB GEM BOs and drifted from every published
+	 * tessai-agent doc. The AIE-staging anchors in RPURuntime/tests
+	 * /common/run.tcl (0x20000000/0x21000000/0x22000000) only run
+	 * under XSDB-driven test contexts; production AIE handover goes
+	 * through tessai-agent BO allocations in THIS pool, so there
+	 * is no aliasing concern at runtime.
+	 *
+	 * Contract doc lines 153-167 record the canonical owner of
+	 * this carveout. Any drift between this entry, the
+	 * apply_tessai_patch.py RPU_GEM_CMA_BLOCK, and (eventually)
+	 * the in-tree VEK385 kernel DTS silently breaks fw_echo
+	 * writeback - so the BUILD_ASSERT and the comments above all
+	 * reference the same base/size.
+	 */
+	tess_rpu_gem_carveout: memory@20000000 {
+		compatible = "zephyr,memory-region", "mmio-sram";
+		reg = <0x0 0x20000000 0x0 0x20000000>;
+		zephyr,memory-region = "TESS_RPU_GEM_CARVEOUT";
+		zephyr,memory-attr = <(DT_MEM_ARM(ATTR_MPU_RAM_NOCACHE))>;
+	};
+
+	/*
+	 * tessai-agent high-DDR bank (TESSAI_MEMORY_DEVICE / bank@1,
+	 * buffer@50000000000 @ 0x500_0000_0000 in the official Versal-
+	 * net layout; referenced from the Linux tessai-agent node by
+	 * numeric phandle <0x01>) is intentionally NOT declared here.
+	 * R52 is 32-bit and cannot reach beyond 32 bits without a NoC
+	 * NMU remap; declaring it with truncated 32-bit reg cells would
+	 * be misleading. The tessai_agent_endpoint.c port references
+	 * only tess_rpu_gem_carveout, mirroring the rpu-fw original's
+	 * fw_echo writeback domain. The DAPP handler accepts a device-
+	 * shmem PA on the wire but never dereferences it -- the whole
+	 * point of the test is to prove the wire carries the PA back
+	 * faithfully even though the RPU has no MPU window for it.
+	 * Phase 4 may add a NoC remap + matching low-32-bit DT alias
+	 * if RPU-APP execution ever needs the high bank.
+	 */
+};
