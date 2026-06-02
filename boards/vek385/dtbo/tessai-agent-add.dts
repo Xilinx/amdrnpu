@@ -1,0 +1,53 @@
+/*
+ * Slim runtime overlay: adds /tessai-agent (compatible "amd,tessai-agent").
+ *
+ * REQUIRES the base DTB to have been compiled with `dtc -@` and to export
+ * the following labels in /__symbols__ (same prep as amdxdna on VEK385):
+ *
+ *   r5f_0                 -> /remoteproc@.../r52f@0
+ *                            (RPU running rpu_fw with "tessai-agent" RPMsg)
+ *   tess_rpu_gem_carveout -> /reserved-memory/buffer@20000000
+ *                            (512 MiB reusable shared-dma-pool 0x20000000..0x3fffffff;
+ *                             bank@0 / TESSAI_MEMORY_RPU)
+ *   app_bank0             -> /reserved-memory/buffer@50000000000
+ *                            (high DDR linux,cma-default reusable pool;
+ *                             bank@1 / TESSAI_MEMORY_DEVICE)
+ *
+ * Use boards/vek385/scripts/build_amdxdna_dt.sh (in vek385 tree) or boot
+ * vek385-*-amdxdna-base.dtb so those symbols exist before applying this
+ * overlay.  See README.md in this directory.
+ *
+ * Compile: ./build_tessai_agent_dtbo.sh
+ * On target: ./load_tessai_agent_dtbo.sh apply
+ */
+
+/dts-v1/;
+/plugin/;
+
+/ {
+	fragment@0 {
+		target-path = "/";
+
+		__overlay__ {
+			tessai-agent {
+				compatible = "amd,tessai-agent";
+				amd,remoteproc = <&r5f_0>;
+
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				bank@0 {
+					compatible = "amd,tessai-agent-bank";
+					reg = <0>;
+					memory-region = <&tess_rpu_gem_carveout>;
+				};
+
+				bank@1 {
+					compatible = "amd,tessai-agent-bank";
+					reg = <1>;
+					memory-region = <&app_bank0>;
+				};
+			};
+		};
+	};
+};
