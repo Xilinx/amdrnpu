@@ -59,7 +59,7 @@ tests/
     │   ├── test-error.cpp   # negative API tests (new coverage)
     │   ├── test-memory.cpp  # BO alloc/mmap/buf_sync (incl. partial round trip)
     │   ├── test-cmd.cpp     # fw_echo writeback + burst sequential
-    │   ├── test-fence.cpp   # sync_file poll, busy_poll, in-flight pin
+    │   ├── test-fence.cpp   # sync_file poll, busy_poll, in-flight pin, nested-scope capture
     │   └── test-fault.cpp   # REMI/NOTS/CANC/BADC fence-errno mapping
     └── thirdparty/
         └── googletest/   # vendored gtest v1.17.0 (git submodule)
@@ -213,6 +213,7 @@ porting to gtest.
 | Tier A (fence query)         | `test_non_blocking_fence_status_before_after` | `TessaiAgentFence.FenceStatusBeforeAndAfter` | `SYNC_IOC_FILE_INFO` probe before+after blocking wait. |
 | Tier A (busy poll)           | `test_wait_busy_poll_sleep_interval`      | `TessaiAgentFence.BusyPollSleepInterval` | 10ms-interval poll loop on `fence_status`. |
 | Tier A (in-flight pin)       | `test_inflight_pin_survives_gem_close`    | `TessaiAgentFence.InflightPinSurvivesGemClose` | `GEM_CLOSE` immediately after submit; verify writeback observable via the surviving mmap. |
+| Tier A (RAII FD teardown)    | `test_unique_fd_closes_at_inner_scope_exit` | `TessaiAgentFence.UniqueFdClosesAtInnerScopeExit` | `int captured = -1; { unique_fd local{open_drm()}; captured = local.get(); }` then exercise `captured` with `DRM_IOCTL_VERSION` and verify it returns `-EBADF` -- pins down the contract that RAII wrappers close the held fd at scope exit. |
 | Tier B (fault opcodes)       | `test_fence_error_remoteio`               | `TessaiAgentFault.RemoteIo` | Op `'REMI'` -> `fence_status == -EREMOTEIO`. |
 | Tier B (fault opcodes)       | `test_fence_error_notsupp`                | `TessaiAgentFault.NotSupported` | Op `'NOTS'` -> `fence_status == -EOPNOTSUPP`. |
 | Tier B (fault opcodes)       | `test_fence_error_cancelled`              | `TessaiAgentFault.Cancelled` | Op `'CANC'` -> `fence_status == -ECANCELED`. |

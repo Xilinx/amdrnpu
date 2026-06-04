@@ -4,10 +4,11 @@
 // Tier A: async/poll completion + in-flight pin lifetime.
 //
 // Tests in this file (mapping kept for tests/README.md cross-ref):
-//   - TessaiAgentFence.PollOnSyncFile               (sync_file fd poll)
-//   - TessaiAgentFence.FenceStatusBeforeAndAfter    (SYNC_IOC_FILE_INFO)
-//   - TessaiAgentFence.BusyPollSleepInterval        (10 ms busy poll)
-//   - TessaiAgentFence.InflightPinSurvivesGemClose  (early GEM_CLOSE)
+//   - TessaiAgentFence.PollOnSyncFile                  (sync_file fd poll)
+//   - TessaiAgentFence.FenceStatusBeforeAndAfter       (SYNC_IOC_FILE_INFO)
+//   - TessaiAgentFence.BusyPollSleepInterval           (10 ms busy poll)
+//   - TessaiAgentFence.InflightPinSurvivesGemClose     (early GEM_CLOSE)
+//   - TessaiAgentFence.UniqueFdClosesAtInnerScopeExit  (RAII teardown contract)
 
 #include "common.h"
 
@@ -225,4 +226,39 @@ TEST_F(TessaiAgentFence, InflightPinSurvivesGemClose)
 
 	(void)do_syncobj_destroy(fd_, syncobj);
 	::munmap(map, kFwRspBoSize);
+}
+
+// RAII unique_fd must close the held fd at scope exit; a raw-int
+// copy leaked via get() is then unusable (-EBADF) past the brace.
+TEST_F(TessaiAgentFence, UniqueFdClosesAtInnerScopeExit)
+{
+	struct unique_fd {
+		int fd = -1;
+		unique_fd() = default;
+		explicit unique_fd(int f) noexcept : fd(f) {}
+		~unique_fd() noexcept { if (fd >= 0) ::close(fd); }
+		unique_fd(const unique_fd &)            = delete;
+		unique_fd &operator=(const unique_fd &) = delete;
+		int get() const noexcept { return fd; }
+	};
+
+	ASSERT_GE(fd_, 0);
+
+	int captured_fd = -1;
+	char name[64] = {};
+	{
+		char      path[PATH_MAX] = {};
+		unique_fd local{open_tessai_card(path, sizeof(path))};
+		ASSERT_GE(local.get(), 0);
+		captured_fd = local.get();
+		// Should successfully get the name of card0
+		ASSERT_EQ(drm_get_name(captured_fd, name, sizeof(name)), 0);
+	}
+
+	ASSERT_GE(captured_fd, 0);
+
+	int  rc       = drm_get_name(captured_fd, name, sizeof(name));
+	SCOPED_TRACE(testing::Message()
+		     << "captured_fd=" << captured_fd << " rc=" << rc);
+	EXPECT_EQ(rc, -EBADF);
 }
