@@ -144,7 +144,9 @@ Probe sequence:
 
 Each bank's `memory-region` points at a **`shared-dma-pool`** reserved-memory
 node. On VEK385-class systems both banks use **reusable** CMA pools (not
-`no-map`):
+`no-map`). The official Versal-net base DT declares both pools with
+**explicit `phandle` values** and **no DT labels**, so the
+`tessai-agent` node references them by numeric phandle:
 
 ```dts
 reserved-memory {
@@ -153,22 +155,29 @@ reserved-memory {
     ranges;
 
     /*
-     * RPU bank (bank@0): below 4 GiB, reusable CMA — bound as dev->cma_area.
+     * RPU bank (bank@0): below 4 GiB, reusable CMA — bound as
+     * dev->cma_area. Also carries linux,cma-default (system-wide CMA
+     * fallback for APU-side drivers that don't declare their own
+     * memory-region).
      */
-    tess_rpu_gem_carveout: buffer@20000000 {
+    rpu_gem_cma@20000000 {
+        phandle = <0x500>;
         compatible = "shared-dma-pool";
-        reg = <0x0 0x20000000 0x0 0x20000000>; /* 512 MiB */
         reusable;
+        reg = <0x0 0x20000000 0x0 0x20000000>; /* 512 MiB */
+        linux,cma-default;
     };
 
     /*
-     * Device bank (bank@1): high DDR, default system CMA when idle.
+     * Device bank (bank@1): high DDR, 4 GiB. Reusable CMA but
+     * intentionally NOT linux,cma-default -- exclusive to consumers
+     * that bind it by explicit memory-region phandle.
      */
-    app_bank0: buffer@50000000000 {
-        compatible = "shared-dma-pool";
+    buffer@50000000000 {
         reg = <0x500 0x0 0x1 0x0>;
+        compatible = "shared-dma-pool";
         reusable;
-        linux,cma-default;
+        phandle = <0x01>;
     };
 };
 ```
@@ -178,8 +187,19 @@ Notes:
 - **`compatible = "shared-dma-pool"`** and **`reusable`** are required for
   the RPU CMA heap (`bank@0`). Do **not** add **`no-map`** on that node;
   the kernel registers a CMA pool, not a dedicated `dma_mem` carveout.
-- **`linux,cma-default`** on **`bank@1`** is optional but typical on Telluride /
-  VEK385 when reusing the existing high-DDR CMA blob.
+- **`linux,cma-default`** sits on **`bank@0`** (`rpu_gem_cma@20000000`),
+  making the small 512 MiB RPU-reachable pool the system-wide CMA
+  fallback. APU-side drivers without their own `memory-region` therefore
+  share this pool with `tessai-agent`'s RPU bank — size
+  `CONFIG_CMA_SIZE_MBYTES` and any contended-driver allocation budgets
+  with that in mind.
+- **`bank@1`** intentionally does **not** carry `linux,cma-default` — the
+  4 GiB high-DDR pool is reachable only by drivers that bind it by
+  explicit `memory-region` phandle.
+- Phandle values `0x500` (RPU pool) and `0x01` (device pool) are part of
+  the Versal-net SoC-level DT contract: the Versal-net team owns the
+  pool definitions, `tessai-agent` owns the consumer references. Any
+  change to either side requires multi-team alignment.
 - Sizes and base addresses are SoC-specific; RPU firmware MPU must agree on
   the physical span referenced by **`bank@0`**.
 
@@ -193,22 +213,24 @@ Notes:
     #address-cells = <2>;
     #size-cells = <2>;
 
-    /* ---------------- reserved-memory pools ---------------- */
+    /* ---------------- reserved-memory pools (official Versal-net layout) ----------- */
     reserved-memory {
         #address-cells = <2>;
         #size-cells = <2>;
         ranges;
 
-        tess_rpu_gem_carveout: buffer@20000000 {
+        rpu_gem_cma@20000000 {
+            phandle = <0x500>;
             compatible = "shared-dma-pool";
+            reusable;
             reg = <0x0 0x20000000 0x0 0x20000000>;
-            reusable;
-        };
-        app_bank0: buffer@50000000000 {
-            compatible = "shared-dma-pool";
-            reg = <0x500 0x0 0x1 0x0>;
-            reusable;
             linux,cma-default;
+        };
+        buffer@50000000000 {
+            reg = <0x500 0x0 0x1 0x0>;
+            compatible = "shared-dma-pool";
+            reusable;
+            phandle = <0x01>;
         };
     };
 
@@ -230,21 +252,26 @@ Notes:
         /*
          * RPU-visible heap — driver coerces 32-bit coherent dma-mask.
          * reg = <0> matches TESSAI_BANK_RPU and TESSAI_MEMORY_RPU.
+         * memory-region binds by numeric phandle 0x500
+         * (rpu_gem_cma@20000000) -- the official Versal-net pool is
+         * unlabeled, so symbolic &references aren't an option.
          */
         npu_bank_rpu: bank@0 {
             compatible    = "amd,tessai-agent-bank";
             reg           = <0>;
-            memory-region = <&tess_rpu_gem_carveout>;
+            memory-region = <0x500>;
         };
 
         /*
          * Device-side accelerator heap — prefers 64-bit mask (falls back to 32).
          * reg = <1> matches TESSAI_BANK_DEV and TESSAI_MEMORY_DEVICE.
+         * memory-region binds by numeric phandle 0x01
+         * (buffer@50000000000), same labelless contract.
          */
         npu_bank_dev: bank@1 {
             compatible    = "amd,tessai-agent-bank";
             reg           = <1>;
-            memory-region = <&app_bank0>;
+            memory-region = <0x01>;
         };
     };
 };
@@ -329,7 +356,7 @@ automatically.
 
 ## 8. Common pitfalls
 
-- **`TESSAI_MEMORY_RPU` without an RPU-aligned carveout.** On VEK385, **`tess_rpu_gem_carveout`** is a **`shared-dma-pool`** with **`reusable`** at PA **`0x20000000`**, **512 MiB** (through **`0x3fffffff`**). The **`bank@0`** subnode needs **`memory-region = <&tess_rpu_gem_carveout>`** (or **`tess_rpu_mgmt_ddr`** from the merge script). RPU firmware MPU must map the same span via **`zephyr,tess-rpu-gem-shm`**. Otherwise GEM alloc fails (`-ENXIO`) or the RPU faults when it dereferences **`dma_addr`**.
+- **`TESSAI_MEMORY_RPU` without an RPU-aligned carveout.** On VEK385, the RPU GEM CMA pool is `rpu_gem_cma@20000000` (a **`shared-dma-pool`** with **`reusable`** + **`linux,cma-default`** at PA **`0x20000000`**, **512 MiB** through **`0x3fffffff`**, exposed as phandle **`<0x500>`**). The **`bank@0`** subnode needs **`memory-region = <0x500>`** (numeric phandle — the official Versal-net pool is unlabeled, so symbolic `&references` won't resolve). RPU firmware MPU must map the same span via **`zephyr,tess-rpu-gem-shm`**. Otherwise GEM alloc fails (`-ENXIO`) or the RPU faults when it dereferences **`dma_addr`**.
 - **Wrong `reg` for the role.** `bank@0` must have `reg = <0>` (RPU) and `bank@1` must have `reg = <1>` (device). Swapping them silently mis-routes 64-bit GEMs into the 32-bit heap (or vice versa). The schema pins `reg` per node name and the driver re-checks at probe.
 - **Stale DTS using two separate compatibles** (`amd,tessai-agent-rpu-bank` / `-dev-bank`) **or no `reg`/unit-address.** Older drafts are deprecated; the schema and driver no longer accept them. Use the single shared `amd,tessai-agent-bank` compatible plus `reg`.
 - **Sharing one reserved-memory pool between both banks.** The driver attaches each heap to separate `struct device`; sharing defeats per-bank `dma-mask`.

@@ -60,7 +60,7 @@ Two custom ioctls under magic `'T'`:
 
 | Ioctl | Purpose |
 |---|---|
-| `TESSAI_BUF_ALLOC`  | Allocate a GEM-backed BO from one of the device's reserved-memory **banks** (`TESSAI_MEMORY_RPU` for RPU-reachable carveouts, `TESSAI_MEMORY_DEVICE` for the larger device-memory pool). Returns a DRM handle that can be `MAP_DUMB`-ed and `mmap`-ed. |
+| `TESSAI_BUF_ALLOC`  | Allocate a GEM-backed BO from one of the device's reserved-memory **banks** (`TESSAI_MEMORY_RPU` for the RPU-reachable 512 MiB `linux,cma-default` pool, `TESSAI_MEMORY_DEVICE` for the 4 GiB high-DDR pool — see [`docs/devicetree-binding.md` §4](docs/devicetree-binding.md#4-reserved-memory-companion-nodes) for the official Versal-net layout and sharing semantics). Returns a DRM handle that can be `MAP_DUMB`-ed and `mmap`-ed. |
 | `TESSAI_CMD_SUBMIT` | Submit a command to the RPU side. Args are an array of `struct tessai_arg` entries; each is either a scalar QWORD or a GEM-slice descriptor `(drm_buffer_handle, offset)` that the driver resolves to an RPU-side physical address. Returns a `drm_syncobj` handle the caller waits on for completion. |
 
 Standard DRM ioctls (GEM, dumb buffer, syncobj, PRIME) are reachable on the

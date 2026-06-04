@@ -4,12 +4,20 @@
 #
 # Adds a /tessai-agent node (compatible "amd,tessai-agent") with:
 #   - amd,remoteproc -> remoteproc r52f@1  (label r5f_1 in base DTB).
-#   - bank@0 memory-region -> tess_rpu_gem_carveout (RPU GEM, 0x20000000..0x3fffffff)
-#   - bank@1 memory-region -> app_bank0 (high DDR CMA pool)
+#   - bank@0 memory-region -> phandle <0x500>  (= official rpu_gem_cma@20000000:
+#                             RPU GEM 0x20000000..0x3fffffff, 512 MiB reusable
+#                             shared-dma-pool + linux,cma-default)
+#   - bank@1 memory-region -> phandle <0x01>   (= official buffer@50000000000:
+#                             4 GiB high-DDR reusable shared-dma-pool;
+#                             unlabeled in the official Versal-net DT, so
+#                             we bind it by its declared numeric phandle)
 #
 # REQUIRES the kernel to be booted with a multi-DTB / symbol-exporting base
-# DTB that defines r5f_1, tess_rpu_gem_carveout, and app_bank0 in
-# /__symbols__ (same as amdxdna VEK385 prep).  See README.md.
+# DTB that defines r5f_1 in /__symbols__ AND declares rpu_gem_cma@20000000
+# (phandle 0x500) plus buffer@50000000000 (phandle 0x01) in /reserved-memory
+# at the contractual phandle values (the official Versal-net pool nodes
+# are unlabeled, so the overlay references them by numeric phandle rather
+# than via /__symbols__).  See README.md.
 #
 # Usage:
 #   ./load_tessai_agent_dtbo.sh [apply|remove|status]   (default: apply)

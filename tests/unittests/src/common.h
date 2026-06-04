@@ -71,27 +71,27 @@ constexpr uint32_t kFwRspBoSize  = 4096u;
 constexpr uint32_t kFwOpEchoRegion  = 0x52474E45u;
 constexpr uint32_t kFwEchoRegionMax = 400u;
 
-// VEK385 DEVICE-bank PA window -- the reservation that bank@1 in
-// our DT binds to via `memory-region = <&app_bank0>`.
+// VEK385 DEVICE-bank PA window -- the reservation that bank@1 in our
+// DT binds to via `memory-region = <0x01>` (numeric phandle, not a
+// label; the official Versal-net /reserved-memory layout doesn't
+// label these pools, so the tessai-agent node references the pool
+// by its declared phandle value).
 //
-// `&app_bank0` resolves to the high-DDR CMA pool declared by the
-// base DTB as:
+// Phandle 0x01 resolves to the high-DDR pool declared by the
+// official base DT as:
 //
-//   app_bank0: buffer@50000000000 {
-//       compatible       = "shared-dma-pool";
+//   buffer@50000000000 {
 //       reg              = <0x500 0x0 0x1 0x0>;   // base 0x500_0000_0000, size 4 GiB
+//       compatible       = "shared-dma-pool";
 //       reusable;
-//       linux,cma-default;
+//       phandle          = <0x01>;
 //   };
 //
-// This pool is also the system-wide CMA default (`linux,cma-default`),
-// so other APU-side drivers that do NOT declare their own
-// `memory-region` land in the same pool implicitly -- tessai-agent
-// shares it rather than owning an exclusive carveout. See
-// `docs/devicetree-binding.md` §4 for the sharing semantics
-// (`shared-dma-pool` is a common bitmap-tracked CMA resource; a
-// runaway allocator in any participating driver can starve the
-// others until allocations are released).
+// The system-wide CMA fallback (`linux,cma-default`) lives on the
+// SEPARATE 512 MiB RPU pool (`rpu_gem_cma@20000000`, phandle 0x500)
+// in the official layout -- NOT on this 4 GiB high-DDR pool. So this
+// device bank is, in practice, dedicated to consumers that bind it
+// by explicit memory-region phandle (today: tessai-agent's bank@1).
 //
 // To verify the live layout matches these constants on the board:
 //   ssh root@vek385 'hexdump -e "\" 0x%08x\"\n" \
@@ -107,7 +107,7 @@ constexpr uint32_t kFwEchoRegionMax = 400u;
 // Used by TessaiAgentCmd.DeviceShmemAddrRoundTrip to assert that the
 // PA the kernel patched into the wire (and that the RPU echoed back)
 // really landed inside the DEVICE bank.
-constexpr uint64_t kDeviceShmemBase = 0x50000000000ull;  // 0x500_0000_0000 = app_bank0 base
+constexpr uint64_t kDeviceShmemBase = 0x50000000000ull;  // 0x500_0000_0000 = buffer@50000000000 base
 constexpr uint64_t kDeviceShmemSize = 0x000100000000ull;  // 4 GiB (matches dts <0x500 0x0 0x1 0x0>)
 constexpr uint64_t kDeviceShmemEnd  = kDeviceShmemBase + kDeviceShmemSize;
 

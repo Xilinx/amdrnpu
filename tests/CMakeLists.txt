@@ -26,10 +26,11 @@
 #   - Partial-window BUF_SYNC round trip via fw_echo_region
 #     -> TessaiAgentMemory.BufSyncPartialRoundTrip
 #   - DEVICE-bank PA round trip via TESSAI_FW_OP_DEVICE_ADDR_PING
-#     ('DAPP'): adaptive (1 GiB -> halving fallback) BO from app_bank0
-#     (the 4 GiB shared linux,cma-default pool at 0x500_0000_0000),
-#     kernel-patched PA echoed back into a separate small carveout BO
-#     -- proves the wire carries
+#     ('DAPP'): adaptive (1 GiB -> halving fallback) BO from
+#     buffer@50000000000 (the 4 GiB high-DDR reusable CMA pool at
+#     0x500_0000_0000, bound to bank@1 by the official Versal-net
+#     phandle <0x01>), kernel-patched PA echoed back into a separate
+#     small carveout BO -- proves the wire carries
 #     APU-only PAs faithfully even though the RPU has no MPU window
 #     covering device shmem.
 #     -> TessaiAgentCmd.DeviceShmemAddrRoundTrip

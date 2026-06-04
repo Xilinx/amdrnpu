@@ -13,7 +13,7 @@ OpenAMP reserved memory (must match `rpu_fw/boards/versal2_rpu.overlay`):
 | VirtIO vring 0 | `0x09860000` | 16 KiB |
 | VirtIO vring 1 | `0x09864000` | 16 KiB |
 | VirtIO buffer pool | `0x09868000` | 256 KiB |
-| RPU GEM carveout (`tess_rpu_gem_carveout`) | `0x20000000` | 512 MiB (reusable) |
+| RPU GEM carveout (`rpu_gem_cma@20000000`, phandle `<0x500>`) | `0x20000000` | 512 MiB (reusable + `linux,cma-default`) |
 
 IPI for RPMsg doorbell: RPU `ipi_nobuf2` @ `0xeb3b1000` notifies Linux `ipi_nobuf1`
 @ `0xeb3b0000` (`xlnx,ipi-id = <10>` in the Zephyr overlay).
@@ -30,9 +30,9 @@ Rebuild and load via remoteproc after updating the ELF on the target.
 ## Linux
 
 - `tessai_agent.ko` loaded
-- DT node `amd,tessai-agent` with `bank@0` `memory-region` → `tess_rpu_gem_carveout`
+- DT node `amd,tessai-agent` with `bank@0` `memory-region` → numeric phandle `<0x500>` (= `rpu_gem_cma@20000000` in the official Versal-net layout; unlabeled, so referenced by explicit phandle)
 - Demo allocates **both buffers as RPU BOs** (`TESSAI_MEMORY_RPU`) so firmware can
-  access the resolved physical addresses in `tess_rpu_gem_carveout`.
+  access the resolved physical addresses in `rpu_gem_cma@20000000`.
 - Example opens **`/dev/dri/cardN`** (not `renderD*`) for mmap
 
 ## Run

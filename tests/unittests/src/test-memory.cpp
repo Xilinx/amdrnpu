@@ -348,11 +348,12 @@ TEST_F(TessaiAgentMemory, BufMmapFillVerifyPattern)
 
 TEST_F(TessaiAgentMemory, BufAllocLargeRequestEitherSucceedsOrEinval)
 {
-	// 1 GiB request. On VEK385 the RPU bank carveout is 512 MiB, so
-	// this should EITHER fail cleanly (carveout exhausted / driver
-	// cap hit) OR succeed (driver decided it can satisfy from the
-	// linux,cma-default pool). The test asserts only "no kernel
-	// crash / no hang"; either return shape is acceptable.
+	// 1 GiB request from the DEVICE bank. On VEK385 bank@1 binds to
+	// buffer@50000000000 (4 GiB reusable shared-dma-pool), so this
+	// should EITHER fail cleanly (CMA fragmented / driver cap hit)
+	// OR succeed (1 GiB fits with room to spare in 4 GiB). The test
+	// asserts only "no kernel crash / no hang"; either return shape
+	// is acceptable.
 	uint32_t bo = 0;
 	int rc = do_buf_alloc(fd_, TESSAI_MEMORY_DEVICE, GB(1), &bo);
 	if (rc == 0) {

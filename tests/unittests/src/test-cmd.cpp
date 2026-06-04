@@ -185,9 +185,9 @@ TEST_F(TessaiAgentCmd, DeviceShmemAddrRoundTrip)
 	//                                            the bank itself is registered
 	//                                            and the dma_alloc path works.
 	//   - even 1 MiB fails with EINVAL/ENOMEM -> bank-setup regression
-	//                                            (app_bank0 wasn't wired to
-	//                                            TESSAI_MEMORY_DEVICE, or
-	//                                            of_reserved_mem_device_init
+	//                                            (buffer@50000000000 wasn't
+	//                                            wired to TESSAI_MEMORY_DEVICE,
+	//                                            or of_reserved_mem_device_init
 	//                                            silently failed). SKIP loudly.
 	//   - any other errno on any size         -> hard FAIL; that's a real bug
 	//                                            we want to surface, not paper
@@ -239,30 +239,36 @@ TEST_F(TessaiAgentCmd, DeviceShmemAddrRoundTrip)
 	if (device_bo_size == 0) {
 		// Every size from 1 GiB down to 1 MiB failed. This is NOT
 		// just CMA fragmentation -- 1 MiB should always fit in any
-		// app_bank0 worth registering. Almost certainly a bank
-		// setup regression. SKIP rather than FAIL so the suite
-		// stays green on broken-but-not-our-fault rootfs/dts
-		// combos, but make the diagnostic loud.
+		// device-bank reservation worth registering. Almost
+		// certainly a bank-setup regression. SKIP rather than FAIL
+		// so the suite stays green on broken-but-not-our-fault
+		// rootfs/dts combos, but make the diagnostic loud.
 		GTEST_SKIP() << "TESSAI_MEMORY_DEVICE alloc failed at EVERY "
 				"size from 1 GiB down to 1 MiB (last errno="
 			     << last_rc << "). The DEVICE bank is probably "
 				"not registered correctly -- check (a) the "
-				"app_bank0 reservation in the live DTB "
-				"matches reg = <0x500 0x0 0x1 0x0> with "
+				"buffer@50000000000 reservation in the live "
+				"DTB matches reg = <0x500 0x0 0x1 0x0> with "
 				"#address-cells = 2, #size-cells = 2 (verify "
 				"on the board with 'hexdump -C /proc/device-"
 				"tree/reserved-memory/buffer@50000000000/"
-				"reg'), (b) that bank@1 in the tessai-agent "
-				"node points at &app_bank0 (the label, not "
-				"the unit-address), and (c) dmesg for "
-				"'of_reserved_mem_device_init' / 'cma_init' "
-				"failures. BufAllocDeviceBank (which only "
-				"asks for 1 MiB) should ALSO be failing if "
-				"this is a real bank-setup issue. The pool "
-				"is linux,cma-default and SHARED with other "
-				"APU drivers, so a sustained -ENOMEM on small "
-				"sizes also suggests another driver is "
-				"holding most of the pool.";
+				"reg') AND carries the explicit phandle = "
+				"<0x01>; that the tessai-agent node binds to, "
+				"(b) that bank@1 in the tessai-agent node has "
+				"memory-region = <0x01> (the numeric phandle, "
+				"not a &label reference -- the official "
+				"Versal-net pool is unlabeled), and (c) dmesg "
+				"for 'of_reserved_mem_device_init' / "
+				"'cma_init' failures. BufAllocDeviceBank "
+				"(which only asks for 1 MiB) should ALSO be "
+				"failing if this is a real bank-setup issue. "
+				"NOTE: linux,cma-default lives on the SMALL "
+				"RPU pool (rpu_gem_cma@20000000, phandle "
+				"0x500), NOT this 4 GiB high-DDR pool, so the "
+				"high-DDR pool is exclusive to drivers that "
+				"bind it by explicit memory-region phandle "
+				"and shouldn't be starved by unrelated "
+				"allocators.";
 	}
 
 	ASSERT_NE(dev_bo, 0u);

@@ -58,7 +58,7 @@ sequenceDiagram
 | `memory_type` | Bank | Typical use |
 |----------------|------|----------------|
 | `TESSAI_MEMORY_RPU` (`0`) | `bank@0` (`TESSAI_BANK_RPU`) | R5F-accessible DDR carveout for firmware |
-| `TESSAI_MEMORY_DEVICE` (`1`, `TESSAI_MEMORY_DEFAULT`) | `bank@1` (`TESSAI_BANK_DEV`) | Default 64-bit device pool |
+| `TESSAI_MEMORY_DEVICE` (`1`, `TESSAI_MEMORY_DEFAULT`) | `bank@1` (`TESSAI_BANK_DEV`) | Default 64-bit device pool. On VEK385 this is `buffer@50000000000` (4 GiB high-DDR reusable CMA pool at PA `0x500_0000_0000`), bound by numeric phandle `<0x01>` because the official Versal-net base DT leaves the pool unlabeled. Does **not** carry `linux,cma-default` — exclusive to consumers that bind it explicitly. |
 
 ---
 

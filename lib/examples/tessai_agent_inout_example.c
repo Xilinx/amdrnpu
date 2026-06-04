@@ -13,7 +13,9 @@
  *   - RPU firmware registers RPMsg channel "tessai-agent" (tessai_agent_ept.c).
  *   - OpenAMP rsctbl/vrings match DT: 0x9800000 / 0x9860000 / 0x9864000 / 0x9868000.
  *   - tessai-agent driver loaded; DT node amd,tessai-agent with bank@0
- *     memory-region -> tess_rpu_gem_carveout (0x20000000, 512 MiB reusable).
+ *     memory-region bound (by numeric phandle 0x500 in the official
+ *     Versal-net layout) to rpu_gem_cma@20000000 (0x20000000, 512 MiB
+ *     reusable shared-dma-pool + linux,cma-default).
  *   - Open /dev/dri/cardN for tessai_agent (MODE_MAP_DUMB requires card, not renderD*).
  *
  * Usage:

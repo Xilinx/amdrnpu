@@ -2,17 +2,37 @@
 # Generate the tessai-agent /__symbols__ overlay (.dtbo) for VEK385.
 #
 # The overlay source is fully deterministic -- there is no user-
-# tweakable content, every label it references (r5f_1,
-# tess_rpu_gem_carveout, app_bank0) must already exist in the booted
-# base DTB's /__symbols__ (same prep as amdxdna VEK385). Carrying a
-# checked-in tessai-agent-add.dts alongside this script was a chronic
-# "two files to keep in sync" pitfall: a label rename in the base DTB
-# only ever showed up on the board side, never in this repo.
+# tweakable content. Two pieces of base-DTB state are required:
 #
-# This script now EMITS the dts inline (heredoc -> /tmp), runs dtc,
-# then deletes the temp file. The dts content is the single source of
-# truth; if a label changes upstream, edit the heredoc below in one
-# place and re-run.
+#   /__symbols__ must export the label `r5f_1` resolving to the
+#       second R52 core (cluster 0 core 1) on which RPURuntime is
+#       loaded. The standalone Versal-net base DT does NOT export
+#       this today -- only apply_tessai_patch.py adds it. Once the
+#       upstream kernel DT carries r5f_1 natively the overlay path
+#       becomes generally usable; until then it's primarily a
+#       reference / dtbs_check artifact, not the production boot
+#       path (production uses the patcher).
+#
+#   /reserved-memory must declare the official Versal-net pool
+#       layout with the contractual phandle values:
+#         rpu_gem_cma@20000000   -> phandle = <0x500>
+#                                   (linux,cma-default, 512 MiB,
+#                                    reusable shared-dma-pool;
+#                                    bank@0 / TESSAI_MEMORY_RPU)
+#         buffer@50000000000     -> phandle = <0x01>
+#                                   (4 GiB high-DDR, reusable
+#                                    shared-dma-pool; bank@1 /
+#                                    TESSAI_MEMORY_DEVICE)
+#       Neither pool is labeled in the official layout, so the
+#       overlay references them by numeric phandle below.
+#
+# Carrying a checked-in tessai-agent-add.dts alongside this script
+# was a chronic "two files to keep in sync" pitfall: a label rename
+# in the base DTB only ever showed up on the board side, never in
+# this repo. This script now EMITS the dts inline (heredoc -> /tmp),
+# runs dtc, then deletes the temp file. The dts content is the
+# single source of truth; if a label or phandle changes upstream,
+# edit the heredoc below in one place and re-run.
 #
 # Why not just inline it into a `dtc -` pipe? dtc accepts dts on
 # stdin via `dtc -I dts -O dtb -` but then loses the file path it
@@ -21,7 +41,8 @@
 # so a botched edit is still trivially debuggable.
 #
 # Overlay is resolved at apply time against the live FDT's
-# /__symbols__; it does NOT patch the base DTB. Boot with a symbol-
+# /__symbols__ (for r5f_1) plus literal phandle values (for the
+# pools); it does NOT patch the base DTB. Boot with a symbol-
 # exporting base DTB (see README.md) and apply via configfs through
 # load_tessai_agent_dtbo.sh.
 
@@ -43,26 +64,27 @@ cat >"${DTS}" <<'EOF'
  * copy of this file -- there isn't one; the heredoc in the build
  * script is the single source of truth).
  *
- * REQUIRES the base DTB to have been compiled with `dtc -@` and to
- * export the following labels in /__symbols__ (same prep as amdxdna
- * on VEK385):
+ * Base-DTB dependencies (see build_tessai_agent_dtbo.sh banner for
+ * the full rationale):
  *
- *   r5f_1                 -> /remoteproc@.../r52f@1
- *                            (RPU running RPURuntime with the link A
- *                             "tessai-agent" rpmsg endpoint)
- *   tess_rpu_gem_carveout -> /reserved-memory/buffer@20000000
- *                            (512 MiB reusable shared-dma-pool
- *                             0x20000000..0x3fffffff; bank@0 /
- *                             TESSAI_MEMORY_RPU)
- *   app_bank0             -> /reserved-memory/buffer@50000000000
- *                            (high DDR linux,cma-default reusable
- *                             pool; bank@1 / TESSAI_MEMORY_DEVICE)
+ *   - /__symbols__ must export `r5f_1` for the second R52 core (the
+ *     one running RPURuntime with the link-A "tessai-agent" rpmsg
+ *     endpoint). The standalone Versal-net base DT does not export
+ *     this today -- only apply_tessai_patch.py adds it.
+ *
+ *   - /reserved-memory must declare the official Versal-net pools at
+ *     their contractual phandle values:
+ *       phandle = <0x500>  ->  rpu_gem_cma@20000000 (bank@0)
+ *       phandle = <0x01>   ->  buffer@50000000000   (bank@1)
+ *     Both pools are unlabeled in the official layout, so the
+ *     overlay references them by numeric phandle below.
  *
  * NOTE: the live VEK385 boot flow currently uses apply_tessai_patch.py
  * to INJECT a /tessai-agent node directly into the lopper-patched DTB
- * (the in-DTB node also references &r5f_1). This overlay is the
- * standalone path for systems that do not patch the DTB at build
- * time; if both are active you will see a duplicate-node failure.
+ * (the in-DTB node also references &r5f_1 and uses the same numeric
+ * phandles 0x500 / 0x01). This overlay is the standalone path for
+ * systems that do not patch the DTB at build time; if both are
+ * active you will see a duplicate-node failure.
  */
 
 /dts-v1/;
@@ -83,13 +105,13 @@ cat >"${DTS}" <<'EOF'
 				bank@0 {
 					compatible = "amd,tessai-agent-bank";
 					reg = <0>;
-					memory-region = <&tess_rpu_gem_carveout>;
+					memory-region = <0x500>; /* rpu_gem_cma@20000000 */
 				};
 
 				bank@1 {
 					compatible = "amd,tessai-agent-bank";
 					reg = <1>;
-					memory-region = <&app_bank0>;
+					memory-region = <0x01>;  /* buffer@50000000000 */
 				};
 			};
 		};

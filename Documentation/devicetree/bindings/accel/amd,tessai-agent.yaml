@@ -108,6 +108,13 @@ properties:
           from that pool. The RPU firmware must be able to access the
           physical addresses in this span (MPU / carveout agreement).
 
+          On Versal-net / VEK385 the official base DT places "linux,cma-
+          default" on this 32-bit-reachable pool (rpu_gem_cma@20000000,
+          phandle 0x500). That makes it the system-wide CMA fallback in
+          addition to being tessai-agent's RPU heap, so it is implicitly
+          shared with any other APU-side driver that does not declare its
+          own memory-region. Size accordingly.
+
       iommus:
         $ref: /schemas/types.yaml#/definitions/phandle-array
         description: |
@@ -151,10 +158,18 @@ properties:
 
             compatible = "shared-dma-pool";
             reusable;
-            linux,cma-default;
 
           "no-map" is not required for this bank; reusable CMA pools are
           sufficient when the platform exposes a 64-bit-reachable region.
+
+          On Versal-net / VEK385 the official base DT exposes this as an
+          unlabeled buffer@50000000000 (4 GiB at 0x500_0000_0000) carrying
+          an explicit phandle = <0x01>. Because there is no DT label, the
+          tessai-agent node references the pool by numeric phandle
+          (memory-region = <0x01>). The pool does NOT carry "linux,cma-
+          default" -- that flag is on rpu_gem_cma@20000000 (bank@0)
+          instead -- so this 4 GiB pool is effectively exclusive to
+          consumers that bind it by explicit memory-region phandle.
 
       iommus:
         $ref: /schemas/types.yaml#/definitions/phandle-array
@@ -179,25 +194,31 @@ additionalProperties: false
 examples:
   - |
     /*
-     * Versal / VEK385-style: RPU bank uses a reusable CMA pool below 4 GiB;
-     * device bank uses the high-DDR linux,cma-default reusable pool.
+     * Versal-net / VEK385: official Versal-net base DT layout. Both
+     * reserved-memory pools are declared with explicit phandle values
+     * and NO DT labels; tessai-agent's banks reference them by
+     * numeric phandle. linux,cma-default lives on the small RPU pool
+     * (system-wide CMA fallback), the 4 GiB pool is exclusive to
+     * consumers that bind it explicitly.
      */
     reserved-memory {
         #address-cells = <2>;
         #size-cells = <2>;
         ranges;
 
-        tess_rpu_gem_carveout: buffer@20000000 {
+        rpu_gem_cma@20000000 {
+            phandle = <0x500>;
             compatible = "shared-dma-pool";
-            reg = <0x0 0x20000000 0x0 0x20000000>;
             reusable;
+            reg = <0x0 0x20000000 0x0 0x20000000>;
+            linux,cma-default;
         };
 
-        app_bank0: buffer@50000000000 {
-            compatible = "shared-dma-pool";
+        buffer@50000000000 {
             reg = <0x500 0x0 0x1 0x0>;
+            compatible = "shared-dma-pool";
             reusable;
-            linux,cma-default;
+            phandle = <0x01>;
         };
     };
 
@@ -217,36 +238,38 @@ examples:
         bank@0 {
             compatible    = "amd,tessai-agent-bank";
             reg           = <0>;
-            memory-region = <&tess_rpu_gem_carveout>;
+            memory-region = <0x500>; /* rpu_gem_cma@20000000 */
         };
 
         bank@1 {
             compatible    = "amd,tessai-agent-bank";
             reg           = <1>;
-            memory-region = <&app_bank0>;
+            memory-region = <0x01>;  /* buffer@50000000000 */
         };
     };
   - |
     /*
      * IOMMU-enabled variant: each bank attaches to its own SMMU stream.
-     * Same reusable shared-dma-pool layout as the non-IOMMU example.
+     * Same official Versal-net pool layout as the non-IOMMU example.
      */
     reserved-memory {
         #address-cells = <2>;
         #size-cells = <2>;
         ranges;
 
-        tess_rpu_gem_carveout: buffer@20000000 {
+        rpu_gem_cma@20000000 {
+            phandle = <0x500>;
             compatible = "shared-dma-pool";
-            reg = <0x0 0x20000000 0x0 0x20000000>;
             reusable;
+            reg = <0x0 0x20000000 0x0 0x20000000>;
+            linux,cma-default;
         };
 
-        app_bank0: buffer@50000000000 {
-            compatible = "shared-dma-pool";
+        buffer@50000000000 {
             reg = <0x500 0x0 0x1 0x0>;
+            compatible = "shared-dma-pool";
             reusable;
-            linux,cma-default;
+            phandle = <0x01>;
         };
     };
 
@@ -265,14 +288,14 @@ examples:
         bank@0 {
             compatible    = "amd,tessai-agent-bank";
             reg           = <0>;
-            memory-region = <&tess_rpu_gem_carveout>;
+            memory-region = <0x500>; /* rpu_gem_cma@20000000 */
             iommus        = <&smmu_rpu 0x42 0x0>;
         };
 
         bank@1 {
             compatible    = "amd,tessai-agent-bank";
             reg           = <1>;
-            memory-region = <&app_bank0>;
+            memory-region = <0x01>;  /* buffer@50000000000 */
             iommus        = <&smmu_dev 0x43 0x0>;
         };
     };
