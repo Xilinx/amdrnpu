@@ -10,7 +10,10 @@
 .venv/
 .west/
 .Xil/
-zephyr/
+# Anchored to this subtree's top level so the west workspace dir is
+# ignored, but a nested module dir named zephyr/ (e.g.
+# src/driver/zephyr/module.yml) stays tracked.
+/zephyr/
 zephyr.upstream/
 zephyr-sdk-*/
 modules/

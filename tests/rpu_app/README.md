@@ -33,8 +33,8 @@ rpu_app/
 │   │   └── reserved.dtsi               # rsync'd into the upstream R52 board DTS by build.sh
 │   ├── linker/rpu_apu_rpmsg.ld         # custom SOC linker (RSC_TABLE → apu_rsctbl)
 │   └── example_design_pfm_fixed.xsa    # XSA → lopper → SDT for cortexr52_2
-├── xrt/
-│   └── src/driver/                     # Zephyr module: ZEPHYR_EXTRA_MODULES target.
+├── src/
+│   └── driver/                         # Zephyr module: ZEPHYR_EXTRA_MODULES target.
 │                                       #   - apu_rpmsg_platform.c + tessai_agent_endpoint.c
 │                                       #     (link A — gated on CONFIG_TESSAI_APU_RPMSG_SLAVE;
 │                                       #     TESSAI_DBG / TESSAI_ERR logging macros live at
@@ -51,7 +51,7 @@ rpu_app/
 └── tests/
     ├── common/prj.conf                 # base Kconfig: logging, heap, stacks, CPP toggle
     └── tessai_agent_test/              # build target — produces zephyr.elf
-        ├── CMakeLists.txt              # ZEPHYR_EXTRA_MODULES += xrt/src/driver,
+        ├── CMakeLists.txt              # ZEPHYR_EXTRA_MODULES += src/driver,
         │                               #   DTC_OVERLAY_FILE = boards/rpu.overlay,
         │                               #   zephyr_linker_sources resource_table.ld
         ├── prj.conf                    # CONFIG_TESSAI_APU_RPMSG_SLAVE=y + TESSAI_VERBOSE=y
@@ -200,8 +200,7 @@ cp     "$SRC/build.sh" "$SRC/setup.sh" "$SRC/LICENSE" "$DST/"
 cp     "$SRC/platform/dts/reserved.dtsi"                  "$DST/platform/dts/"
 cp     "$SRC/platform/linker/rpu_apu_rpmsg.ld"            "$DST/platform/linker/"
 cp     "$SRC/platform/example_design_pfm_fixed.xsa"       "$DST/platform/"
-cp -a  "$SRC/xrt/include/."     "$DST/xrt/include/"
-cp -a  "$SRC/xrt/src/driver/."  "$DST/xrt/src/driver/"
+cp -a  "$SRC/xrt/src/driver/."  "$DST/src/driver/"
 cp     "$SRC/tests/common/prj.conf"      "$DST/tests/common/"
 cp -a  "$SRC/tests/tessai_agent_test/."  "$DST/tests/tessai_agent_test/"
 ```

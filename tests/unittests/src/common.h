@@ -47,7 +47,7 @@ namespace tessai_test {
 // ---------------------------------------------------------------------
 // Magic firmware opcodes (kept in lockstep with the slave's
 // tessai_agent_endpoint.c -- mirror copy at
-// tests/rpu_app/xrt/src/driver/src/tessai_agent_endpoint.c).
+// tests/rpu_app/src/driver/src/tessai_agent_endpoint.c).
 // ---------------------------------------------------------------------
 
 // fw_echo writeback: firmware snprintfs "rsp: command id: %u,

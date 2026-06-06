@@ -3,7 +3,7 @@
 # Zephyr AMD Build Script
 # Usage: ./build.sh <test_case_name>
 #        ./build.sh clean
-# Example: ./build.sh tests/xrt_test
+# Example: ./build.sh tests/tessai_agent_test
 
 # Ensure script runs in bash (re-execute with bash if not)
 if [ -z "$BASH_VERSION" ]; then
@@ -91,7 +91,7 @@ if [ "$1" = "clean" ]; then
     echo "  • Downloaded SDK archives (tar.xz files)"
     echo ""
     echo "The following will NOT be removed:"
-    echo "  • xrt/ (XRT Lite library source)"
+    echo "  • src/ (Link A driver source)"
     echo "  • tests/ (test applications)"
     echo "  • platform/dts/ (board Device Tree fragments, e.g. reserved.dtsi)"
     echo "  • platform/ (platform files, e.g. example_design_pfm_fixed.xsa)"
@@ -273,7 +273,7 @@ if [ $# -ne 1 ]; then
     echo "  $0 clean                         - Remove all build artifacts"
     echo ""
     echo "Examples:"
-    echo "  $0 tests/xrt_test"
+    echo "  $0 tests/tessai_agent_test"
     echo "  $0 clean"
     exit 1
 fi
@@ -644,13 +644,13 @@ if [ -z "$VIRTUAL_ENV" ]; then
     echo "✓ Virtual environment activated"
 fi
 
-# Sync xrt/ and tests/ into zephyr/ — only modified files are updated
+# Sync src/ and tests/ into zephyr/ — only modified files are updated
 # so that incremental builds work correctly
-if [ -d "${SCRIPT_DIR}/xrt" ]; then
-    echo "Syncing xrt into zephyr/xrt/..."
-    mkdir -p zephyr/xrt
-    rsync -av --delete ${SCRIPT_DIR}/xrt/ zephyr/xrt/
-    echo "✓ xrt synced"
+if [ -d "${SCRIPT_DIR}/src" ]; then
+    echo "Syncing src into zephyr/src/..."
+    mkdir -p zephyr/src
+    rsync -av --delete ${SCRIPT_DIR}/src/ zephyr/src/
+    echo "✓ src synced"
 fi
 if [ -d "${SCRIPT_DIR}/tests" ]; then
     echo "Syncing tests into zephyr/tests/..."

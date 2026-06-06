@@ -182,7 +182,7 @@
 	 * the Linux side rpu_gem_cma@20000000 reserved-memory node
 	 * (carrying phandle = <0x500> and linux,cma-default in the
 	 * official Versal-net layout) and with the BUILD_ASSERT in
-	 * xrt/src/driver/src/tessai_agent_endpoint.c
+	 * src/driver/src/tessai_agent_endpoint.h
 	 * (DT_NODELABEL(tess_rpu_gem_carveout) -- the Zephyr-side label
 	 * is internal to this DT; the Linux side leaves the matching
 	 * pool node unlabeled and references it by numeric phandle).

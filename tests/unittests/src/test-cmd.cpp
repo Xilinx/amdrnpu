@@ -379,7 +379,7 @@ TEST_F(TessaiAgentCmd, DeviceShmemAddrRoundTrip)
 				"TESSAI_FW_OP_DEVICE_ADDR_PING. Re-flash with "
 				"a RPURuntime build that has "
 				"tessai_fw_device_addr_ping() in "
-				"xrt/src/driver/src/tessai_agent_endpoint.c.";
+				"src/driver/src/tessai_agent_endpoint.c.";
 	}
 
 	std::cout << "  DAPP echo: pa=0x" << std::hex << rpu_pa

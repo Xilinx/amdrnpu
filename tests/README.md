@@ -47,7 +47,7 @@ tests/
 │   ├── build.sh          # `./build.sh tests/tessai_agent_test` → zephyr.elf
 │   ├── rpu_app_link_a.elf  # bundled RPURuntime build (Link A reference)
 │   ├── platform/         # XSA, reserved.dtsi, linker fragment, dt-bindings
-│   ├── xrt/              # public xrt headers + xrt/src/driver Zephyr module
+│   ├── src/              # src/driver Zephyr module (link A transport + endpoint)
 │   └── tests/            # tessai_agent_test target + tests/common/prj.conf
 └── unittests/            # gtest-based unit suite
     ├── CMakeLists.txt
@@ -121,7 +121,7 @@ and the manual recipe under [Running on the board](#running-on-the-board)
 work out of the box without an RPURuntime install.
 
 When you need to rebuild it (driver source changes under
-`rpu_app/xrt/src/driver/`, a new fault opcode in
+`rpu_app/src/driver/`, a new fault opcode in
 `tessai_agent_endpoint.c`, sharper debug printk in
 `apu_rpmsg_platform.c`, etc.) the `rpu_app/` subtree is fully
 self-contained — no external RPURuntime clone required:

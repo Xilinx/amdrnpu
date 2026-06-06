@@ -9,16 +9,16 @@
 #
 # CONFIG_TESSAI_APU_RPMSG_SLAVE=y in prj.conf is what actually turns
 # on the link A transport + endpoint compilation in
-# xrt/src/driver/CMakeLists.txt.
+# src/driver/CMakeLists.txt.
 
 cmake_minimum_required(VERSION 3.20.0)
 
 set(COMMON_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../common)
 
-# Pull the xrt driver in as a Zephyr module so apu_rpmsg_platform.c
+# Pull the driver in as a Zephyr module so apu_rpmsg_platform.c
 # and tessai_agent_endpoint.c are eligible for compilation when
 # CONFIG_TESSAI_APU_RPMSG_SLAVE=y (set in this target's prj.conf).
-set(TESSAI_DRIVER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../xrt/src/driver/)
+set(TESSAI_DRIVER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../src/driver/)
 list(APPEND ZEPHYR_EXTRA_MODULES ${TESSAI_DRIVER_DIR})
 
 # Layer: common/prj.conf base, then this target's prj.conf overlay
