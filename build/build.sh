@@ -67,7 +67,13 @@ KDIR=""
 NATIVE_KDIR_DEFAULT="/lib/modules/$(uname -r)/build"
 CROSS_VITIS_KDIR_DEFAULT="/proj/xsjhdstaff4/hlaccabu/kernel-6.12-vek385"
 VITIS_TC="/proj/xbuilds/2025.1_PRIME_0522_1/installs/lin64/Vitis/2025.1/gnu/aarch64/lin/aarch64-linux"
-LOCALVERSION="-g31626ef92ff1"
+# Suffix appended to vermagic (CONFIG_LOCALVERSION) in -cross-vitis mode.
+# The deployed VEK385 board kernel reports a clean vermagic with no git-SHA
+# suffix ("6.12.40-xilinx"), so this must be empty for insmod to accept the
+# module. (The kernel-6.12-vek385 tree's utsrelease.h + an empty .scmversion
+# are pinned to the same clean string.) Override per-build with -localversion
+# if you ever flash a kernel whose UTS_RELEASE carries a SHA suffix.
+LOCALVERSION=""
 STRIP_DIRTY=1
 SYSROOT=""           # -sysroot, used by -cross-vitis lib step
 YOCTO_BUILD=""       # -cross-yocto PATH
@@ -207,6 +213,7 @@ CROSS_CC=""
 CROSS_CXX=""
 CROSS_AR=""
 CROSS_RANLIB=""
+CROSS_EXTRA_CFLAGS=""   # e.g. -B<gcc-startfile-dir> for the Vitis toolchain
 KOBJ=""                # only set in cross-yocto mode (separate src/build trees)
 KBUILD_EXTRA=()        # extra "VAR=val" args appended to the kbuild make line
 NATIVE_SYSROOT_BIN=""  # for the cross-yocto PATH prefix (host-side build tools)
@@ -220,6 +227,21 @@ if [ "$CROSS_VITIS" -eq 1 ]; then
 
     [ -x "$CROSS_CC" ] \
         || die "cross-compiler not found at $CROSS_CC (pass -toolchain PATH)"
+
+    # The Vitis gcc keeps its runtime startfiles (crtbeginS.o, libgcc.a) in
+    # its built-in sysroot (cortexa72-cortexa53-amd-linux/...). The userspace
+    # cmake builds below override --sysroot to the board rootfs (needed for
+    # libdrm.pc), which is a runtime image with no gcc startfiles, so the
+    # compiler can no longer find crtbeginS.o/-lgcc and the cmake C-compiler
+    # check fails. Pin the startfile search path with -B (queried without
+    # --sysroot so it resolves to the toolchain's own copy).
+    _vitis_crtdir=$(dirname "$("$CROSS_CC" -print-file-name=crtbeginS.o 2>/dev/null)")
+    if [ -n "$_vitis_crtdir" ] && [ -f "$_vitis_crtdir/crtbeginS.o" ]; then
+        CROSS_EXTRA_CFLAGS="-B$_vitis_crtdir"
+    else
+        warn "could not locate Vitis gcc startfiles (crtbeginS.o); userspace
+       cross link may fail with 'cannot find crtbeginS.o'"
+    fi
     [ -f "$KDIR/Makefile" ] && [ -d "$KDIR/scripts" ] \
         || die "KDIR is not a kernel build tree: $KDIR (pass -kdir PATH)"
     [ -n "$SYSROOT" ] \
@@ -387,9 +409,17 @@ build_kmod() {
     # warnings; required when KDIR's Module.symvers is empty (common for
     # shared prepared trees that were never fully built). Symbols still
     # resolve at load time on the running kernel.
+    # -fno-stack-protector (via KCFLAGS, appended after the arch's
+    # -fstack-protector-strong so it wins): the deployed board kernel does
+    # not provide __stack_chk_guard to modules (insmod fails with
+    # "Unknown symbol __stack_chk_guard (err -2)") because its
+    # stack-protector scheme differs from this prepared KDIR's .config, and
+    # KDIR's Module.symvers is empty so modpost can't catch it at build
+    # time. Dropping the canary from the module is ABI-safe and sidesteps
+    # the mismatch entirely.
     KBUILD_MODPOST_WARN=1 \
         make -C "$KDIR" M="$MIRROR_M" -j "$JOBS" \
-             "${KBUILD_EXTRA[@]}" modules 2>&1 \
+             "${KBUILD_EXTRA[@]}" KCFLAGS=-fno-stack-protector modules 2>&1 \
             | tee "$OUT/build-kmod.log" \
             | grep -E '^(  CC|  LD|  MODPOST|ERROR|make.*Error|WARNING)' \
             || true
@@ -438,6 +468,10 @@ build_lib() {
             -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY
             -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY
             -DTESSAI_AGENT_LINK_EXAMPLES_STATIC=ON
+        )
+        [ -n "$CROSS_EXTRA_CFLAGS" ] && cmake_args+=(
+            -DCMAKE_C_FLAGS="$CROSS_EXTRA_CFLAGS"
+            -DCMAKE_CXX_FLAGS="$CROSS_EXTRA_CFLAGS"
         )
         cmake_env+=(
             "PKG_CONFIG_SYSROOT_DIR=$SYSROOT"
@@ -538,6 +572,10 @@ build_tests() {
         [ -x "$CROSS_CXX" ] \
             || die "-unit_tests requires a cross g++ at $CROSS_CXX"
         cmake_args+=( -DCMAKE_CXX_COMPILER="$CROSS_CXX" )
+        [ -n "$CROSS_EXTRA_CFLAGS" ] && cmake_args+=(
+            -DCMAKE_C_FLAGS="$CROSS_EXTRA_CFLAGS"
+            -DCMAKE_CXX_FLAGS="$CROSS_EXTRA_CFLAGS"
+        )
     fi
 
     env "${cmake_env[@]}" cmake "${cmake_args[@]}" >"$OUT/cmake-tests-configure.log" 2>&1 \
