@@ -7,10 +7,11 @@
  *
  * Mirrors rpu-fw/rpu_fw/linker/rpu_openamp.ld but places the
  * .resource_table section in the RSC_TABLE memory region declared on
- * apu_rsctbl (0x0A000000) in
+ * apu_rsctbl (OCM Bank 1, 0xBBF80000) in
  * RPURuntime/boards/amd/tessai_rpu/reserved.dtsi, so the Linux kernel
  * remoteproc framework can find the resource table when loading the
- * RPURuntime ELF.
+ * RPURuntime ELF. (Binding is by region NAME, so the placement follows
+ * apu_rsctbl automatically wherever it is mapped.)
  *
  * Test apps that enable CONFIG_TESSAI_APU_RPMSG_SLAVE must point
  * SOC_LINKER_SCRIPT at this file before find_package(Zephyr).

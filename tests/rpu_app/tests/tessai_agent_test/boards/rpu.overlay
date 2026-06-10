@@ -11,8 +11,8 @@
  * by apply_tessai_patch.py) doesn't cover 0x00100000. Re-pointing
  * zephyr,sram at &apu_rpmsg_fw (reserved.dtsi Section D) links
  * RPURuntime's loadable text/data into the carveout Linux already
- * reserves for rproc1. .resource_table stays at apu_rsctbl (0x0a000000),
- * matching kernel-DT rsc_tbl_carveout_1.
+ * reserves for rproc1. .resource_table stays at apu_rsctbl (OCM Bank 1,
+ * 0xBBF80000), matching kernel-DT rsc_tbl_carveout_1.
  *
  * The compatible re-narrow on &apu_rpmsg_fw drops the
  * zephyr,memory-region binding so making it the main SRAM doesn't

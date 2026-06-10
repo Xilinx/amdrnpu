@@ -59,11 +59,52 @@
 	};
 };
 
-&ps_wizard_0_ps11_0_ocm_ram_3_memory {
-	compatible = "zephyr,memory-region", "xlnx,ocm-ram-11.0", "mmio-sram";
-	zephyr,memory-region = "OCM_PS11_BANK3";
-	zephyr,memory-attr = <(DT_MEM_ARM(ATTR_MPU_RAM))>;
-};
+/*
+ * OCM Bank 1 (0xBBF8_0000, 512 KiB) hosts the Link A OpenAMP comms
+ * region (resource table + vrings + buffer pool) per the official
+ * Ryzen+T20 layout. The firmware ELF load region (apu_rpmsg_fw) stays
+ * in DDR since it does not fit alongside the rings in 512 KiB.
+ *
+ * CRITICAL -- node-address collision with the SoC OCM bank node:
+ *   The lopper-emitted SoC DTS already declares OCM Bank 1 as
+ *   `ps_wizard_0_ps11_0_ocm_ram_1_memory: memory@BBF80000`. Our
+ *   apu_rsctbl node (below) is `memory@bbf80000` -- the SAME unit
+ *   address. DT node *names* are case-sensitive so dtc keeps both, but
+ *   gen_defines normalises the unit address, so BOTH nodes collapse onto
+ *   the same DT_N_S_memory_bbf80000_* macros. The upshot:
+ *   DT_MEMORY_ATTR_FOREACH (consumed by mpu_configure_regions_from_dt(),
+ *   arch/arm/core/mpu/arm_mpu.c) emits the memory-attr region TWICE --
+ *   two identical entries at 0xbbf80000. ARMv8-R PMSA forbids
+ *   overlapping MPU regions (CONFIG_MPU_REQUIRES_NON_OVERLAPPING_REGIONS),
+ *   so the duplicate makes the OCM region invalid and the R52 takes a
+ *   Translation Fault @ 0xbbf8002d on the first resource-table access
+ *   (rproc_virtio_create_vdev, ldrb [rsc+0x2d]). This is the whole bug;
+ *   it never bit in DDR because apu_rsctbl@0x0a000000 collided with no
+ *   SoC node.
+ *
+ *   Fix: delete the redundant SoC bank node so apu_rsctbl is the SOLE
+ *   node at 0xbbf80000 -> exactly one MPU region, no overlap. The node
+ *   is a passive leaf `memory` declaration referenced by nothing (its
+ *   phandle is unused), so deleting it is safe.
+ *
+ * MPU strategy (after the collision is removed): ONE
+ * ATTR_MPU_RAM_NOCACHE region covers the whole comms span (resource
+ * table + vrings + buffer pool), carried by apu_rsctbl whose reg is
+ * widened to 0x49000 (0x1000 rsc + 0x48000 shmem). apu_rpmsg_shmem is
+ * left linker-only (zephyr,memory-region, NO zephyr,memory-attr) so it
+ * does not create a second, overlapping region. NOCACHE because Linux
+ * maps these carveouts write-combine (rproc-virtio ioremap_wc /
+ * shared-dma-pool), so the R52 must not cache them or vring/rsc updates
+ * would not stay coherent with the APU.
+ *
+ * Region budget note: this R52's EL1 PMSA MPU has only a handful of
+ * regions (8 static SoC regions consume the low slots). Folding OCM
+ * Bank 1 into ONE region (and dropping the unused OCM_PS11_BANK3 region
+ * above) keeps DT MPU usage minimal, which also restored headroom for
+ * userspace memory-domain partitions (was "no free partition slots
+ * available").
+ */
+/delete-node/ &ps_wizard_0_ps11_0_ocm_ram_1_memory;
 
 &ipi2 {
 	status = "okay";
@@ -136,14 +177,20 @@
 	 * region (Linux remoteproc copies the RPURuntime ELF text/data into
 	 * it; mirrors rpu-fw's ddr_firmware at 0x09800100).
 	 *
-	 *   apu_rsctbl       0x0A00_0000  0x100    rsctbl (zephyr places .resource_table here)
-	 *   apu_rpmsg_fw     0x0A00_0100  0xFFF00  RPURuntime ELF load region (~1 MiB)
-	 *   apu_rpmsg_shmem  0x0A10_0000  0x48000  vrings + buffer pool (288 KiB)
+	 * the resource table + vrings + buffer pool now live in
+	 * OCM Bank 1 (0xBBF8_0000, 512 KiB) per the Ryzen+T20 architecture
+	 * doc. The firmware ELF load region (apu_rpmsg_fw) deliberately STAYS
+	 * in DDR -- at ~1 MiB it does not fit alongside the rings in the
+	 * 512 KiB bank. The OpenAMP/RPMSG transport itself is unchanged; this
+	 * is purely a memory relocation (node names + sizes are identical).
 	 *
-	 * Phase 3 relocates this entire region into OCM Bank 1 (0xBBF8_0000)
-	 * per the Ryzen+T20 architecture doc. Keep the layout aligned with
-	 * the kernel DT carveouts (rsc_tbl_carveout_1, ddrboot@a000100,
-	 * rpu1vdev0*) and the lopper apply_tessai_patch.py injection.
+	 *   apu_rsctbl       0xBBF8_0000  0x1000   rsctbl (zephyr places .resource_table here; 256 B used)
+	 *   apu_rpmsg_shmem  0xBBF8_1000  0x48000  vrings + buffer pool (288 KiB), OCM Bank 1
+	 *   apu_rpmsg_fw     0x0A00_0100  0xFFF00  RPURuntime ELF load region (~1 MiB), DDR
+	 *
+	 * Keep the layout aligned with the kernel DT carveouts (rsctbl +
+	 * vdev0vring0/1 + vdev0buffer in OCM Bank 1, ddrboot@a000100 in DDR)
+	 * and the lopper apply_tessai_patch.py injection.
 	 *
 	 * NB: The firmware-load carveout (apu_rpmsg_fw on the RPURuntime side)
 	 * MUST be exposed to Linux as a /reserved-memory node literally named
@@ -154,11 +201,23 @@
 	 * prints "remote processor ... is now up" -- that just means reset
 	 * was released, not that anything started running).
 	 */
-	apu_rsctbl: memory@a000000 {
+	/*
+	 * apu_rsctbl carries the SINGLE OCM Bank 1 comms MPU region (see the
+	 * long rationale above). Its reg is widened to 0x49000 so the one
+	 * ATTR_MPU_RAM_NOCACHE region spans BOTH the resource table
+	 * (0xbbf80000, 0x1000) and the vrings/buffer pool (0xbbf81000,
+	 * 0x48000). zephyr,memory-region = "RSC_TABLE" still places only the
+	 * generated .resource_table (256 B) at 0xbbf80000 via the OpenAMP
+	 * resource_table.ld fragment; the remaining 0x48000 of this region's
+	 * address range belongs to apu_rpmsg_shmem (APU_RPMSG_SHM linker
+	 * region below), which is intentionally MPU-attr-less so it does not
+	 * create a second, overlapping MPU region.
+	 */
+	apu_rsctbl: memory@bbf80000 {
 		compatible = "zephyr,memory-region", "mmio-sram";
-		reg = <0x0 0x0a000000 0x0 0x100>;
+		reg = <0x0 0xbbf80000 0x0 0x49000>;
 		zephyr,memory-region = "RSC_TABLE";
-		zephyr,memory-attr = <(DT_MEM_ARM(ATTR_MPU_RAM))>;
+		zephyr,memory-attr = <(DT_MEM_ARM(ATTR_MPU_RAM_NOCACHE))>;
 	};
 
 	apu_rpmsg_fw: memory@a000100 {
@@ -168,11 +227,10 @@
 		zephyr,memory-attr = <(DT_MEM_ARM(ATTR_MPU_RAM))>;
 	};
 
-	apu_rpmsg_shmem: memory@a100000 {
+	apu_rpmsg_shmem: memory@bbf81000 {
 		compatible = "zephyr,memory-region", "mmio-sram";
-		reg = <0x0 0x0a100000 0x0 0x48000>;
+		reg = <0x0 0xbbf81000 0x0 0x48000>;
 		zephyr,memory-region = "APU_RPMSG_SHM";
-		zephyr,memory-attr = <(DT_MEM_ARM(ATTR_MPU_RAM))>;
 	};
 
 	/*
@@ -208,11 +266,7 @@
 	 *
 	 * When tessai-agent userspace TESSAI_BUF_ALLOC returns a
 	 * TESSAI_MEMORY_RPU dma_addr, the BO physically lives here
-	 * and is reachable from the R52 via this MPU window. The
-	 * fw_echo writeback path + the Phase 2a slave-local COPY_IN_OUT
-	 * + the Phase 2b link-B-forwarded COPY_IN_OUT all bounds-check
-	 * incoming PAs against this DT node (base/size pulled at compile
-	 * time so the three sides can't skew).
+	 * and is reachable from the R52 via this MPU window.
 	 *
 	 * The kernel-side mirror is declared as
 	 *   compatible = "shared-dma-pool"; reusable; linux,cma-default;
@@ -233,12 +287,7 @@
 	 * before the COMPLETE response IPI - userspace's BUF_SYNC then
 	 * sees the bytes without an explicit RPU-side cache flush.
 	 *
-	 * Address history: this carveout briefly lived at 0x10000000
-	 * (16 MiB, Phase 1+2a) and then at 0x30000000 (16 MiB, an
-	 * interim Phase 2b draft) before reverting to the canonical
-	 * 0x20000000/512 MiB layout. The interim placements were too
-	 * small for multi-MB GEM BOs and drifted from every published
-	 * tessai-agent doc. The AIE-staging anchors in RPURuntime/tests
+	 * The AIE-staging anchors in RPURuntime/tests
 	 * /common/run.tcl (0x20000000/0x21000000/0x22000000) only run
 	 * under XSDB-driven test contexts; production AIE handover goes
 	 * through tessai-agent BO allocations in THIS pool, so there
@@ -271,7 +320,5 @@
 	 * shmem PA on the wire but never dereferences it -- the whole
 	 * point of the test is to prove the wire carries the PA back
 	 * faithfully even though the RPU has no MPU window for it.
-	 * Phase 4 may add a NoC remap + matching low-32-bit DT alias
-	 * if RPU-APP execution ever needs the high bank.
 	 */
 };

@@ -56,7 +56,7 @@ rpu_app/
         │                               #   zephyr_linker_sources resource_table.ld
         ├── prj.conf                    # CONFIG_TESSAI_APU_RPMSG_SLAVE=y + TESSAI_VERBOSE=y
         ├── boards/rpu.overlay          # chosen.zephyr,sram → &apu_rpmsg_fw (= ddrboot@a000100)
-        ├── linker/resource_table.ld    # .resource_table → RSC_TABLE (apu_rsctbl@0x0A000000)
+        ├── linker/resource_table.ld    # .resource_table → RSC_TABLE (apu_rsctbl, OCM Bank 1 @0xBBF80000)
         └── src/main.c                  # passive: SYS_INIT brings up endpoint, main idles
 ```
 
@@ -134,9 +134,9 @@ Linux `remoteproc1` will reject it with `bad phdr da 0x100000`. See
 ### Key memory regions
 
 ```text
-RAM                    : 672 KiB / 1023 KiB used   (apu_rpmsg_fw carveout)
-RSC_TABLE              :  88 B   /  256 B used     (apu_rsctbl, loader handshake)
-APU_RPMSG_SHM          :   0     /  288 KiB         (sized by remoteproc DT)
+RAM                    : 672 KiB / 1023 KiB used   (apu_rpmsg_fw carveout, DDR @0x0A000100)
+RSC_TABLE              :  88 B   /    4 KiB         (apu_rsctbl, OCM Bank 1 @0xBBF80000)
+APU_RPMSG_SHM          :   0     /  288 KiB         (vrings+buffer, OCM Bank 1 @0xBBF81000)
 TESS_RPU_GEM_CARVEOUT  :   0     /  512 MiB         (sized by remoteproc DT)
 ```
 
