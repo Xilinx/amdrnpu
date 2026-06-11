@@ -65,46 +65,19 @@
  * Ryzen+T20 layout. The firmware ELF load region (apu_rpmsg_fw) stays
  * in DDR since it does not fit alongside the rings in 512 KiB.
  *
- * CRITICAL -- node-address collision with the SoC OCM bank node:
- *   The lopper-emitted SoC DTS already declares OCM Bank 1 as
- *   `ps_wizard_0_ps11_0_ocm_ram_1_memory: memory@BBF80000`. Our
- *   apu_rsctbl node (below) is `memory@bbf80000` -- the SAME unit
- *   address. DT node *names* are case-sensitive so dtc keeps both, but
- *   gen_defines normalises the unit address, so BOTH nodes collapse onto
- *   the same DT_N_S_memory_bbf80000_* macros. The upshot:
- *   DT_MEMORY_ATTR_FOREACH (consumed by mpu_configure_regions_from_dt(),
- *   arch/arm/core/mpu/arm_mpu.c) emits the memory-attr region TWICE --
- *   two identical entries at 0xbbf80000. ARMv8-R PMSA forbids
- *   overlapping MPU regions (CONFIG_MPU_REQUIRES_NON_OVERLAPPING_REGIONS),
- *   so the duplicate makes the OCM region invalid and the R52 takes a
- *   Translation Fault @ 0xbbf8002d on the first resource-table access
- *   (rproc_virtio_create_vdev, ldrb [rsc+0x2d]). This is the whole bug;
- *   it never bit in DDR because apu_rsctbl@0x0a000000 collided with no
- *   SoC node.
- *
- *   Fix: delete the redundant SoC bank node so apu_rsctbl is the SOLE
- *   node at 0xbbf80000 -> exactly one MPU region, no overlap. The node
- *   is a passive leaf `memory` declaration referenced by nothing (its
- *   phandle is unused), so deleting it is safe.
- *
- * MPU strategy (after the collision is removed): ONE
- * ATTR_MPU_RAM_NOCACHE region covers the whole comms span (resource
- * table + vrings + buffer pool), carried by apu_rsctbl whose reg is
- * widened to 0x49000 (0x1000 rsc + 0x48000 shmem). apu_rpmsg_shmem is
- * left linker-only (zephyr,memory-region, NO zephyr,memory-attr) so it
- * does not create a second, overlapping region. NOCACHE because Linux
- * maps these carveouts write-combine (rproc-virtio ioremap_wc /
- * shared-dma-pool), so the R52 must not cache them or vring/rsc updates
- * would not stay coherent with the APU.
- *
  * Region budget note: this R52's EL1 PMSA MPU has only a handful of
  * regions (8 static SoC regions consume the low slots). Folding OCM
- * Bank 1 into ONE region (and dropping the unused OCM_PS11_BANK3 region
- * above) keeps DT MPU usage minimal, which also restored headroom for
- * userspace memory-domain partitions (was "no free partition slots
- * available").
+ * Bank 1 into ONE region keeps DT MPU usage minimal, which preserves
+ * headroom for userspace memory-domain partitions (otherwise "no free
+ * partition slots available").
  */
 /delete-node/ &ps_wizard_0_ps11_0_ocm_ram_1_memory;
+
+&ps_wizard_0_ps11_0_ocm_ram_3_memory {
+	compatible = "zephyr,memory-region", "xlnx,ocm-ram-11.0", "mmio-sram";
+	zephyr,memory-region = "OCM_PS11_BANK3";
+	zephyr,memory-attr = <(DT_MEM_ARM(ATTR_MPU_RAM))>;
+};
 
 &ipi2 {
 	status = "okay";
@@ -138,35 +111,6 @@
 };
 
 / {
-	/*
-	 * Section C — RPMsg / VirtIO shared memory (Protocol 1, Link B).
-	 *
-	 * Fixed addresses matching RPU_FW's memory layout. Both consumers
-	 * (rpmsg_platform.c which located these via DT_CHOSEN(zephyr_ipc_shm)
-	 * + DT_NODELABEL(rsctbl), and the shmem_platform.c alternative
-	 * which ignored them) were dropped from the rpu_app snapshot in
-	 * the Link-A-only cleanup, so these nodes are currently UNUSED.
-	 *
-	 * Kept in the DTS verbatim so reviving the Link B transport from
-	 * branch wip/link-b-phase2b-copy-in-out-forwarder is a pure source
-	 * restore -- no DT churn. If the snapshot is ever frozen
-	 * Link-A-only for good, these two nodes can be removed (288 KiB +
-	 * 256 B of reserved physical address space; they are passive
-	 * mmio-sram declarations and do not affect Link A at runtime).
-	 *
-	 *   rpmsg_shmem  0x9900000  0x48000 (288 KB) — VirtIO vrings + buffers
-	 *   rsctbl       0x9800000  0x100   (256  B) — RPU_FW resource table
-	 */
-	rpmsg_shmem: memory@9900000 {
-		compatible = "mmio-sram";
-		reg = <0x0 0x9900000 0x0 0x48000>;
-	};
-
-	rsctbl: memory@9800000 {
-		compatible = "mmio-sram";
-		reg = <0x0 0x9800000 0x0 0x100>;
-	};
-
 	/*
 	 * Section D — Link A (APU<->RPURuntime, "tessai-agent" rpmsg endpoint).
 	 *
