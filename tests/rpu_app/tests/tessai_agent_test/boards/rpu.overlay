@@ -7,7 +7,7 @@
  * The stock upstream R52 board sets chosen.zephyr,sram to
  * /memory@00000000 (NoC DDR @ 0x00100000), which is fine for JTAG/XSDB
  * boot but is rejected by Linux remoteproc when rproc1 tries to load
- * the ELF: the kernel-side carveout ddrboot@0a000100 (1 MiB, injected
+ * the ELF: the kernel-side carveout ddrboot@0a000000 (1 MiB, injected
  * by apply_tessai_patch.py) doesn't cover 0x00100000. Re-pointing
  * zephyr,sram at &apu_rpmsg_fw (reserved.dtsi Section D) links
  * RPURuntime's loadable text/data into the carveout Linux already
@@ -19,8 +19,8 @@
  * also emit a duplicate MEMORY block / burn an extra MPU slot.
  *
  * Boundary contract (do not break in isolation):
- *   apu_rpmsg_fw.reg      == ddrboot@a000100 kernel carveout
- *                            (reg = <0x00 0x0a000100 0x00 0xfff00>)
+ *   apu_rpmsg_fw.reg      == ddrboot@a000000 kernel carveout
+ *                            (reg = <0x00 0x0a000000 0x00 0x100000>)
  *   apu_rsctbl.reg        == rsc_tbl_carveout_1
  *   apu_rpmsg_shmem.reg   == rpu1vdev0vring0/1 + rpu1vdev0buffer cluster
  */

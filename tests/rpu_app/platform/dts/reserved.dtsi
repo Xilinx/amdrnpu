@@ -119,7 +119,7 @@
 	 * places the generated table here. apu_rpmsg_shmem holds the two
 	 * vrings + shared buffer pool. apu_rpmsg_fw is the firmware ELF load
 	 * region (Linux remoteproc copies the RPURuntime ELF text/data into
-	 * it; mirrors rpu-fw's ddr_firmware at 0x09800100).
+	 * it; mirrors rpu-fw's ddr_firmware at 0x09800000).
 	 *
 	 * the resource table + vrings + buffer pool now live in
 	 * OCM Bank 1 (0xBBF8_0000, 512 KiB) per the Ryzen+T20 architecture
@@ -130,10 +130,10 @@
 	 *
 	 *   apu_rsctbl       0xBBF8_0000  0x1000   rsctbl (zephyr places .resource_table here; 256 B used)
 	 *   apu_rpmsg_shmem  0xBBF8_1000  0x48000  vrings + buffer pool (288 KiB), OCM Bank 1
-	 *   apu_rpmsg_fw     0x0A00_0100  0xFFF00  RPURuntime ELF load region (~1 MiB), DDR
+	 *   apu_rpmsg_fw     0x0A00_0000  0x100000 RPURuntime ELF load region (1 MiB), DDR
 	 *
 	 * Keep the layout aligned with the kernel DT carveouts (rsctbl +
-	 * vdev0vring0/1 + vdev0buffer in OCM Bank 1, ddrboot@a000100 in DDR)
+	 * vdev0vring0/1 + vdev0buffer in OCM Bank 1, ddrboot@a000000 in DDR)
 	 * and the lopper apply_tessai_patch.py injection.
 	 *
 	 * NB: The firmware-load carveout (apu_rpmsg_fw on the RPURuntime side)
@@ -164,9 +164,9 @@
 		zephyr,memory-attr = <(DT_MEM_ARM(ATTR_MPU_RAM_NOCACHE))>;
 	};
 
-	apu_rpmsg_fw: memory@a000100 {
+	apu_rpmsg_fw: memory@a000000 {
 		compatible = "zephyr,memory-region", "mmio-sram";
-		reg = <0x0 0x0a000100 0x0 0xfff00>;
+		reg = <0x0 0x0a000000 0x0 0x100000>;
 		zephyr,memory-region = "APU_RPMSG_FW";
 		zephyr,memory-attr = <(DT_MEM_ARM(ATTR_MPU_RAM))>;
 	};
