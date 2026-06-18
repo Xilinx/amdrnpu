@@ -278,19 +278,19 @@ install(TARGETS tessai_agent_unittest
 	RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
-# ---- auto-stage for build/build.sh + boot_vek385.py ------------------
+# ---- auto-stage for build/build.sh ---------------------------------
 # build/build.sh does a one-shot `cp -f cmake-tests/unittests/
 # tessai_agent_unittest $OUT/bin/` at the END of build_tests(), so the
 # very first build wires up $OUT/bin/tessai_agent_unittest for
-# boot_vek385.py to push to the board. But incremental rebuilds done
-# straight against the cmake-tests subtree (the common "edit a .cpp,
+# deployment to the board. But incremental rebuilds done straight
+# against the cmake-tests subtree (the common "edit a .cpp,
 # `make -C build/<TYPE>/cmake-tests/unittests`" dev loop) skip that
 # stage step, leaving $OUT/bin/tessai_agent_unittest stale.
 #
 # That asymmetry caused a real bug we want to never see again: a
-# rebuild compiled clean, the dev expected boot_vek385.py to push the
-# new binary, but the board ran the OLD staged copy and the failing
-# test reproduced unchanged. To make this self-healing, we wire up a
+# rebuild compiled clean, the dev deployed the staged binary to the
+# board, but the board ran the OLD staged copy and the failing test
+# reproduced unchanged. To make this self-healing, we wire up a
 # POST_BUILD copy_if_different driven by a cache variable that
 # build.sh sets to "$OUT/bin"; native standalone CMake builds (option
 # 2 in the file header, e.g. `cmake -S tests/unittests -B build/utest`)
@@ -300,7 +300,7 @@ install(TARGETS tessai_agent_unittest
 # concatenation -- multi-string docstrings break the cache entry in a
 # way that's silent until POST_BUILD interpolation produces a garbled
 # path like "Auto-staging -> ;CACHE;PATH;Directory...".
-set(TESSAI_AGENT_STAGE_BIN_DIR "" CACHE PATH "Directory to auto-stage tessai_agent_unittest into after each link; set by build/build.sh to $OUT/bin so boot_vek385.py always sees the freshly-built binary. Empty -> stage skipped (standalone cmake -S tests/unittests case).")
+set(TESSAI_AGENT_STAGE_BIN_DIR "" CACHE PATH "Directory to auto-stage tessai_agent_unittest into after each link; set by build/build.sh to $OUT/bin so board deployment always sees the freshly-built binary. Empty -> stage skipped (standalone cmake -S tests/unittests case).")
 if(TESSAI_AGENT_STAGE_BIN_DIR)
 	# copy_if_different keeps mtime stable when the link did NOT
 	# actually change the binary (e.g. recompile of an unrelated .cpp

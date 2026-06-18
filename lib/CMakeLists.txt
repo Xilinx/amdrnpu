@@ -77,8 +77,8 @@ if(TESSAI_AGENT_LIB_BUILD_EXAMPLES AND _installed_targets)
 	#                             lib/examples/README-inout-example.md).
 	#                             Restored after the fac10e9 reference
 	#                             merge dropped it from this list;
-	#                             build/build.sh + boot_vek385.py both
-	#                             expect this binary at bin/.
+	#                             build/build.sh expects this binary
+	#                             at bin/.
 	set(_tess_examples
 		tessai_agent_test
 		tessai_agent_inout_example)

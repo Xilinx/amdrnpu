@@ -365,7 +365,7 @@ static uint32_t tessai_copy_in_out(uint32_t seq, uint32_t num_args,
 	memcpy(out_va, in_va, copy_len);
 	barrier_dsync_fence_full();
 
-	/* LOG_INF: boot_vek385.py greps for this marker. */
+	/* LOG_INF so the COPY completion is visible in the RPU console. */
 	LOG_INF("COPY op seq=%u len=%zu in=0x%llx out=0x%llx -> COMPLETE",
 		seq, copy_len,
 		(unsigned long long)in_pa,

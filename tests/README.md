@@ -2,7 +2,7 @@
 
 This directory ships a single gtest binary, `tessai_agent_unittest`,
 that exercises every documented Link A wire behavior of the
-`tessai-agent` driver and its slave firmware (RPURuntime on R5_1,
+`tessai-agent` driver and its slave endpoint (RPURuntime on R5_1,
 talking to APU userspace over rpmsg / OpenAMP). Layout and naming
 mirror `testcases-v2/unittests/{common,hip}` so contributors used to
 that tree don't have to relearn anything.
@@ -42,10 +42,10 @@ end-to-end path snapshot).
 tests/
 ├── CMakeLists.txt        # parent CMake: gate flag + adds unittests/ subtree
 ├── README.md             # this file
-├── rpu_app/              # minimal RPURuntime source snapshot + prebuilt ELF
+├── rpu_app/              # RPURuntime source snapshot (Link A slave endpoint)
 │   ├── README.md         # provenance / rebuild instructions
 │   ├── build.sh          # `./build.sh tests/tessai_agent_test` → zephyr.elf
-│   ├── rpu_app_link_a.elf  # bundled RPURuntime build (Link A reference)
+│   ├── rpu_app.elf       # RPURuntime slave runtime library (see rpu_app/README.md)
 │   ├── platform/         # XSA, reserved.dtsi, linker fragment, dt-bindings
 │   ├── src/              # src/driver Zephyr module (link A transport + endpoint)
 │   └── tests/            # tessai_agent_test target + tests/common/prj.conf
@@ -109,16 +109,16 @@ cmake --build build/utest-native -j
 ctest --test-dir build/utest-native --output-on-failure
 ```
 
-### Building the RPU-side slave firmware (`rpu_app_link_a.elf`)
+### Building the RPU-side runtime library
 
 The host-side gtest binary above only covers the APU half of Link A.
 The matching RPU slave — the Zephyr image that registers the
 `"tessai-agent"` rpmsg endpoint, replies to `fw_echo` and
 `fw_echo_region`, and services the `REMI`/`NOTS`/`CANC`/`BADC`
-fault-injection opcodes — ships **prebuilt** as
-`rpu_app/rpu_app_link_a.elf` so `boot_vek385.py --flow link-a-suite`
-and the manual recipe under [Running on the board](#running-on-the-board)
-work out of the box without an RPURuntime install.
+fault-injection opcodes — ships as
+`rpu_app/rpu_app.elf` so the manual recipe under
+[Running on the board](#running-on-the-board) works out of the box
+without an external RPURuntime clone.
 
 When you need to rebuild it (driver source changes under
 `rpu_app/src/driver/`, a new fault opcode in
@@ -138,17 +138,9 @@ cd tests/rpu_app
 # / zephyr / output_dir and jumps straight to `west build -p always`).
 ./build.sh tests/tessai_agent_test
 
-# Fresh ELF lands here -- this is the default boot_vek385.py picks up
-# via RPU_APP_FW_SRC_DEFAULT, so `boot_vek385.py … --flow link-a-suite`
-# now uses your rebuilt binary with no extra flags:
+# Fresh ELF lands here:
 ls -l zephyr/build/zephyr/zephyr.elf
 
-# To also refresh the bundled prebuilt copy that ships in-tree (so
-# users without an RPU build environment get your fix), overwrite
-# rpu_app_link_a.elf in place and update the sha256 + commit fields
-# in rpu_app/README.md:
-cp zephyr/build/zephyr/zephyr.elf rpu_app_link_a.elf
-sha256sum rpu_app_link_a.elf
 ```
 
 Layout, what was/wasn't copied from RPURuntime, and the exact `cp`
@@ -168,21 +160,21 @@ Prerequisites on the VEK385 target:
    injects it with `bank@0`/`bank@1` bound to the official
    `rpu_gem_cma@20000000` (phandle `0x500`) and `buffer@50000000000`
    (phandle `0x01`) pools by numeric phandle).
-2. Push the bundled RPURuntime firmware and the gtest binary.
-   `rpu_app_link_a.elf` is the in-tree prebuilt slave; rebuild via
+2. Push the RPURuntime endpoint binary and the gtest binary.
+   `rpu_app.elf` is the in-tree slave endpoint; rebuild via
    `cd tests/rpu_app && ./build.sh tests/tessai_agent_test` and
    substitute `tests/rpu_app/zephyr/build/zephyr/zephyr.elf` if you
    need local source changes picked up
-   (see [Building the RPU-side slave firmware](#building-the-rpu-side-slave-firmware-rpu_app_link_aelf)).
+   (see [Building the RPU-side runtime library](#building-the-rpu-side-runtime-library)).
    ```bash
-   scp tests/rpu_app/rpu_app_link_a.elf root@vek385:/lib/firmware/
+   scp tests/rpu_app/rpu_app.elf root@vek385:/lib/firmware/
    scp build/Release-aarch64/bin/tessai_agent_unittest root@vek385:/usr/bin/
    ssh root@vek385 modprobe tessai_agent     # or insmod tessai_agent.ko
    ```
 3. Apply the DT overlay and start `remoteproc1`:
    ```bash
    # boards/vek385/dtbo/load_tessai_agent_dtbo.sh apply  (if not auto-applied)
-   echo rpu_app_link_a.elf > /sys/class/remoteproc/remoteproc1/firmware
+   echo rpu_app.elf > /sys/class/remoteproc/remoteproc1/firmware
    echo start              > /sys/class/remoteproc/remoteproc1/state
    ```
 4. Run the suite:
@@ -207,7 +199,7 @@ porting to gtest.
 | channel up                   | `test_noop_submit`                        | `TessaiAgentBasic.NoopSubmit` | Submit (num_args=0) -> syncobj SIGNALED. Channel-up, COMPLETE shape. |
 | scalar args                  | `test_scalar_args_submit`                 | `TessaiAgentBasic.ScalarArgsSubmit` | Scalar `__u64` args propagate verbatim across the wire. |
 | opcode dispatch              | `test_fw_echo_op_submit`                  | `TessaiAgentBasic.FwEchoOpSubmitScalarOnly` | `TESSAI_FW_ECHO_OP` (0x42424242) dispatch, scalar args. |
-| writeback                    | `test_fw_echo_writeback`                  | `TessaiAgentCmd.FwEchoWriteback` | `fw_echo` with an RPU-bank BO at args[0] -> firmware writes the canonical `rsp: command id: %u, num_args: %u\n` banner; sscanf verifies bytes. |
+| writeback                    | `test_fw_echo_writeback`                  | `TessaiAgentCmd.FwEchoWriteback` | `fw_echo` with an RPU-bank BO at args[0] -> endpoint writes the canonical `rsp: command id: %u, num_args: %u\n` banner; sscanf verifies bytes. |
 | burst submits                | `test_burst_sequential`                   | `TessaiAgentCmd.BurstSequentialSubmit` | 16 sequential submits all signal within timeout (no queue stalls / lost seqs). |
 | Tier A (async/poll)          | `test_completion_via_poll_on_sync_file`   | `TessaiAgentFence.PollOnSyncFile` | `DRM_SYNCOBJ_HANDLE_TO_FD` + `EXPORT_SYNC_FILE`, `poll(POLLIN, 2s)` wakeup. |
 | Tier A (fence query)         | `test_non_blocking_fence_status_before_after` | `TessaiAgentFence.FenceStatusBeforeAndAfter` | `SYNC_IOC_FILE_INFO` probe before+after blocking wait. |
@@ -217,9 +209,9 @@ porting to gtest.
 | Tier B (fault opcodes)       | `test_fence_error_remoteio`               | `TessaiAgentFault.RemoteIo` | Op `'REMI'` -> `fence_status == -EREMOTEIO`. |
 | Tier B (fault opcodes)       | `test_fence_error_notsupp`                | `TessaiAgentFault.NotSupported` | Op `'NOTS'` -> `fence_status == -EOPNOTSUPP`. |
 | Tier B (fault opcodes)       | `test_fence_error_cancelled`              | `TessaiAgentFault.Cancelled` | Op `'CANC'` -> `fence_status == -ECANCELED`. |
-| Tier B (fault opcodes)       | `test_invalid_rsp_type_to_remoteio`       | `TessaiAgentFault.InvalidRspTypeFallback` | Op `'BADC'` -> driver-side fallback `-EREMOTEIO` (firmware emits out-of-range rsp_type=99). |
+| Tier B (fault opcodes)       | `test_invalid_rsp_type_to_remoteio`       | `TessaiAgentFault.InvalidRspTypeFallback` | Op `'BADC'` -> driver-side fallback `-EREMOTEIO` (endpoint emits out-of-range rsp_type=99). |
 | partial BUF_SYNC round trip  | (no equivalent)                           | `TessaiAgentMemory.BufSyncPartialRoundTrip` | `fw_echo_region` (`'RGNE'`) round trip: partial `BUF_SYNC TO_DEVICE` window flushed -> RPU echoes 8-byte input back in the banner (proves TO_DEVICE reached memory) -> partial `BUF_SYNC FROM_DEVICE` invalidate -> banner visible (proves FROM_DEVICE reached cache); sentinels outside the window prove the partial sync didn't widen. |
-| DEVICE-bank PA round trip    | (no equivalent)                           | `TessaiAgentCmd.DeviceShmemAddrRoundTrip` | `TESSAI_FW_OP_DEVICE_ADDR_PING` (`'DAPP'`): BO allocated in `TESSAI_MEMORY_DEVICE` (= `buffer@50000000000`, 4 GiB high-DDR reusable CMA pool at PA `0x500_0000_0000`, bound by numeric phandle `<0x01>` -- the official Versal-net layout leaves this pool unlabeled) at the largest size the host's CMA pool can satisfy — tries 1 GiB first, then halves down to 1 MiB on `-EINVAL`/`-ENOMEM`. The halving fallback distinguishes "CMA just fragmented" (succeeds at a smaller size) from "DEVICE bank wasn't registered at all" (every size fails -> SKIP with a dts-pointer diagnostic). Kernel patches the PA into `args[1]` and a separate small RPU-bank carveout BO into `args[0]`. RPU NEVER touches device shmem (it has no MPU window covering it) — it just `snprintf`s `"dev-ping pa=0x%016llx size=%llu seq=%u"` into the carveout. Userspace `sscanf`s the banner and asserts (a) PA inside `[0x50000000000, 0x50100000000)`, (b) `pa+size` doesn't overflow the bank, (c) echoed size == requested (whatever size won the fallback), (d) bytes past `kFwDappBannerMax` survived the pre-fill (cap-honoring sentinel). Skips cleanly when the bank looks broken or firmware pre-dates the DAPP opcode. |
+| DEVICE-bank PA round trip    | (no equivalent)                           | `TessaiAgentCmd.DeviceShmemAddrRoundTrip` | `TESSAI_FW_OP_DEVICE_ADDR_PING` (`'DAPP'`): BO allocated in `TESSAI_MEMORY_DEVICE` (= `buffer@50000000000`, 4 GiB high-DDR reusable CMA pool at PA `0x500_0000_0000`, bound by numeric phandle `<0x01>` -- the official Versal-net layout leaves this pool unlabeled) at the largest size the host's CMA pool can satisfy — tries 1 GiB first, then halves down to 1 MiB on `-EINVAL`/`-ENOMEM`. The halving fallback distinguishes "CMA just fragmented" (succeeds at a smaller size) from "DEVICE bank wasn't registered at all" (every size fails -> SKIP with a dts-pointer diagnostic). Kernel patches the PA into `args[1]` and a separate small RPU-bank carveout BO into `args[0]`. RPU NEVER touches device shmem (it has no MPU window covering it) — it just `snprintf`s `"dev-ping pa=0x%016llx size=%llu seq=%u"` into the carveout. Userspace `sscanf`s the banner and asserts (a) PA inside `[0x50000000000, 0x50100000000)`, (b) `pa+size` doesn't overflow the bank, (c) echoed size == requested (whatever size won the fallback), (d) bytes past `kFwDappBannerMax` survived the pre-fill (cap-honoring sentinel). Skips cleanly when the bank looks broken or endpoint pre-dates the DAPP opcode. |
 | UAPI version                 | (no equivalent)                           | `TessaiAgentDevice.{AbiVersionMatchesUapiHeader,DrmVersionPopulated}` | UAPI ABI version + `DRM_IOCTL_VERSION` triple. |
 | per-fd thread-safety         | (no equivalent)                           | `TessaiAgentDevice.ConcurrentSubmitSingleFd` | N threads × M submits on the same fd; per-file idr / xa thread-safety. |
 | multi-fd                     | (no equivalent)                           | `TessaiAgentDeviceStandalone.MultipleOpenClose` | Multiple simultaneous opens of the same card, independent per-fd state. |
@@ -245,15 +237,15 @@ binary works on dev hosts without the hardware.
   or the rpmsg channel did not bind. Check
   `dmesg | grep -E 'tessai-agent|rpmsg.*tessai'`.
 - Basic channel-up + scalar-args subtests PASS but `fw_echo` writeback
-  or later fail — firmware is alive but the running RPURuntime build
+  or later fail — endpoint is alive but the running RPURuntime build
   pre-dates the writeback / Tier-A / Tier-B handlers. Re-flash with
-  the bundled `tests/rpu_app/rpu_app_link_a.elf`.
+  the endpoint from `tests/rpu_app/`.
 - `TessaiAgentMemory.BufSyncPartialRoundTrip` SKIPs with "RPU
-  firmware does not recognize 'RGNE'" — the running slave pre-dates
+  endpoint does not recognize 'RGNE'" — the running slave pre-dates
   the `fw_echo_region` opcode. Rebuild from `tests/rpu_app/` (see
   above) and re-flash.
 - Tier B fault tests (`TessaiAgentFault.*`) FAIL/`-ETIMEDOUT` while Tier
-  A passes — the firmware on the board does not recognize the
+  A passes — the endpoint on the board does not recognize the
   fault-injection opcodes (older RPURuntime build). Re-flash with the
   bundled ELF, which has all four fault handlers compiled in.
 - Gtest binary fails to build with `thirdparty/googletest is missing` —

@@ -8,7 +8,7 @@
 // FROM_DEVICE sync -> readback) is covered end-to-end by
 // TessaiAgentCmd.FwEchoWriteback; here we split each step into its
 // own TEST_F so a regression in (e.g.) MAP_DUMB shows up without
-// dragging the entire firmware round-trip in. The partial-window
+// dragging the entire endpoint round-trip in. The partial-window
 // round trip (TO_DEVICE+FROM_DEVICE on a sub-page range, validated
 // via the RPU's fw_echo_region opcode) lives at the bottom in
 // TessaiAgentMemory.BufSyncPartialRoundTrip.
@@ -105,7 +105,7 @@ TEST_F(TessaiAgentMemory, BufSyncPartialRange)
 //
 // This test closes that gap with an end-to-end exchange through the
 // RPU's TESSAI_FW_OP_ECHO_REGION ('RGNE') opcode, which on the
-// firmware side (see RPURuntime tessai_agent_endpoint.c:
+// endpoint side (see RPURuntime tessai_agent_endpoint.c:
 // tessai_fw_echo_region) does two things in one round trip:
 //
 //   1. Reads 8 bytes at the window's start. Whatever userspace
@@ -132,12 +132,12 @@ TEST_F(TessaiAgentMemory, BufSyncPartialRange)
 //          [winoff .. winoff+winlen) -- partial window  (RPU writes)
 //          [winoff+winlen .. page)   pre-fill 0x33, never synced
 //
-// Skip cleanly if 'RGNE' isn't recognized (older firmware build):
-// the wait will still succeed (the firmware sends COMPLETE for
+// Skip cleanly if 'RGNE' isn't recognized (older endpoint build):
+// the wait will still succeed (the endpoint sends COMPLETE for
 // every unknown opcode), but the banner sscanf will fail. We
-// distinguish "old firmware" from "real regression" by checking
+// distinguish "old endpoint" from "real regression" by checking
 // whether the window bytes still equal the pre-submit 0x33 fill
-// -- if they do, the firmware never wrote anything (= unknown
+// -- if they do, the endpoint never wrote anything (= unknown
 // opcode); if they're partially modified, it's a real bug.
 TEST_F(TessaiAgentMemory, BufSyncPartialRoundTrip)
 {
@@ -231,7 +231,7 @@ TEST_F(TessaiAgentMemory, BufSyncPartialRoundTrip)
 				  "region seq=%u off=%llu len=%llu in=0x%llx",
 				  &rpu_seq, &rpu_off, &rpu_len, &rpu_in);
 
-	// "Old firmware build" branch: every byte of the window still
+	// "Old endpoint build" branch: every byte of the window still
 	// matches the pre-submit 0x33 fill -> RPU treated 'RGNE' as
 	// unknown opcode (sent COMPLETE without writing anything).
 	// SKIP rather than FAIL so flashing an older slave doesn't
@@ -246,9 +246,9 @@ TEST_F(TessaiAgentMemory, BufSyncPartialRoundTrip)
 	if (matched != 4 && window_untouched) {
 		EXPECT_EQ(::munmap(map, bo_size), 0);
 		EXPECT_EQ(do_gem_close(fd_, bo), 0);
-		GTEST_SKIP() << "RPU firmware does not recognize 'RGNE' "
+		GTEST_SKIP() << "RPU endpoint does not recognize 'RGNE' "
 				"(TESSAI_FW_OP_ECHO_REGION) -- rebuild "
-				"rpu_app_link_a.elf from "
+				"zephyr.elf from "
 				"tests/rpu_app/ to pick up the partial-"
 				"sync round-trip handler";
 		return;
@@ -298,8 +298,8 @@ TEST_F(TessaiAgentMemory, BufSyncPartialRoundTrip)
 
 	// PAGE-0 byte must be untouched 0xCC. RPU widening into a
 	// different page (which can only happen via a bounds-check
-	// regression in the firmware handler) would leave whatever
-	// the firmware wrote here. Catches the worst-case "ignored
+	// regression in the endpoint handler) would leave whatever
+	// the endpoint wrote here. Catches the worst-case "ignored
 	// offset entirely" failure mode.
 	EXPECT_EQ(base[0], 0xCCu)
 		<< "page 0 sentinel clobbered (RPU ignored args[1] offset "

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 //
-// Fault-class fence-errno mapping (Tier B). Requires an RPU firmware
+// Fault-class fence-errno mapping (Tier B). Requires an RPU endpoint
 // build with TESSAI_FW_OP_FAULT_* opcodes wired into the
 // tessai_agent endpoint (tests/rpu_app/.../tessai_agent_endpoint.c
 // or RPURuntime's equivalent). The bundled
-// tests/rpu_app/rpu_app_link_a.elf has these handlers compiled in.
+// tests/rpu_app/ endpoint has these handlers compiled in.
 //
 // Tests in this file (mapping kept for tests/README.md cross-ref):
 //   - TessaiAgentFault.RemoteIo                ('REMI' -> -EREMOTEIO)
@@ -21,7 +21,7 @@ using namespace tessai_test;
 
 namespace {
 
-// Each fault opcode causes the firmware to set a specific
+// Each fault opcode causes the endpoint to set a specific
 // command_rsp_type on the wire; the driver translates into a
 // dma_fence error. SYNC_IOC_FILE_INFO surfaces the error as a
 // negative int32_t status. The blocking SYNCOBJ_WAIT here returns 0
@@ -38,7 +38,7 @@ void RunFaultClass(int fd, const char *name, uint32_t op,
 	ASSERT_NE(syncobj, 0u);
 
 	ASSERT_EQ(do_syncobj_wait(fd, syncobj, kSubmitTimeoutNs), 0)
-		<< "wait timed out -- firmware may be running a pre-Phase-2d "
+		<< "wait timed out -- endpoint may be running a pre-Phase-2d "
 		   "build without the fault opcodes";
 
 	int32_t status = 0;
