@@ -9,6 +9,8 @@
 #   - lib/examples/               -> tessai_agent_test      (CLI)
 #                                    tessai_agent_inout_example (CLI;
 #                                    COPY_IN_OUT smoke test)
+#                                    tessai_agent_xrt_test_example (CLI;
+#                                    APU_XRT_TEST full XRT end-to-end)
 #   - tests/unittests/            -> tessai_agent_unittest  (gtest-based
 #                                    Link A acceptance suite; skip the
 #                                    tests/ phase entirely with
@@ -42,6 +44,7 @@
 #   build/<TYPE>/lib/       libtessai_agent.{so*,a}
 #   build/<TYPE>/bin/       tessai_agent_test
 #                           tessai_agent_inout_example
+#                           tessai_agent_xrt_test_example
 #                           tessai_agent_unittest         (only with -unit_tests)
 #   build/<TYPE>/obj/       kbuild mirror: directories are real, source
 #                           files are symlinks back into the repo,
@@ -163,6 +166,7 @@ Outputs (per build):
   build/<TYPE>/lib/libtessai_agent.{so*,a}
   build/<TYPE>/bin/tessai_agent_test
   build/<TYPE>/bin/tessai_agent_inout_example
+  build/<TYPE>/bin/tessai_agent_xrt_test_example
   build/<TYPE>/bin/tessai_agent_unittest (only with -unit_tests; needs C++17)
 EOF
 }
@@ -503,7 +507,11 @@ build_lib() {
     # "was not produced" die instead of silently dropping out of the
     # artifact set. Must stay in lockstep with _tess_examples in
     # lib/CMakeLists.txt.
-    local examples=( tessai_agent_test tessai_agent_inout_example )
+    local examples=(
+        tessai_agent_test
+        tessai_agent_inout_example
+        tessai_agent_xrt_test_example
+    )
     for _exe in "${examples[@]}"; do
         [ -f "$OUT/cmake-lib/$_exe" ] \
             || die "$_exe was not produced (see $OUT/cmake-build.log)"

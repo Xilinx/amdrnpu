@@ -79,9 +79,12 @@ if(TESSAI_AGENT_LIB_BUILD_EXAMPLES AND _installed_targets)
 	#                             merge dropped it from this list;
 	#                             build/build.sh expects this binary
 	#                             at bin/.
+	# tessai_agent_xrt_test_example: APU_XRT_TEST ('XRTT') — full XRT
+	#                                end-to-end with ELF + kernel arg BOs.
 	set(_tess_examples
 		tessai_agent_test
-		tessai_agent_inout_example)
+		tessai_agent_inout_example
+		tessai_agent_xrt_test_example)
 	if(TESSAI_AGENT_LINK_EXAMPLES_STATIC)
 		if(NOT TARGET tessai_agent_static)
 			message(FATAL_ERROR
