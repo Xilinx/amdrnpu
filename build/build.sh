@@ -45,6 +45,7 @@
 #   build/<TYPE>/bin/       tessai_agent_test
 #                           tessai_agent_inout_example
 #                           tessai_agent_xrt_test_example
+#                           tessai_agent_echo_latency_example
 #                           tessai_agent_unittest         (only with -unit_tests)
 #   build/<TYPE>/obj/       kbuild mirror: directories are real, source
 #                           files are symlinks back into the repo,
@@ -167,6 +168,7 @@ Outputs (per build):
   build/<TYPE>/bin/tessai_agent_test
   build/<TYPE>/bin/tessai_agent_inout_example
   build/<TYPE>/bin/tessai_agent_xrt_test_example
+  build/<TYPE>/bin/tessai_agent_echo_latency_example
   build/<TYPE>/bin/tessai_agent_unittest (only with -unit_tests; needs C++17)
 EOF
 }
@@ -511,6 +513,7 @@ build_lib() {
         tessai_agent_test
         tessai_agent_inout_example
         tessai_agent_xrt_test_example
+        tessai_agent_echo_latency_example
     )
     for _exe in "${examples[@]}"; do
         [ -f "$OUT/cmake-lib/$_exe" ] \

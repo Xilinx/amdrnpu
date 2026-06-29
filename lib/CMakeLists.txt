@@ -81,10 +81,13 @@ if(TESSAI_AGENT_LIB_BUILD_EXAMPLES AND _installed_targets)
 	#                             at bin/.
 	# tessai_agent_xrt_test_example: APU_XRT_TEST ('XRTT') — full XRT
 	#                                end-to-end with ELF + kernel arg BOs.
+	# tessai_agent_echo_latency_example: Link A echo (TESSAI_FW_ECHO_OP)
+	#                                round-trip latency benchmark.
 	set(_tess_examples
 		tessai_agent_test
 		tessai_agent_inout_example
-		tessai_agent_xrt_test_example)
+		tessai_agent_xrt_test_example
+		tessai_agent_echo_latency_example)
 	if(TESSAI_AGENT_LINK_EXAMPLES_STATIC)
 		if(NOT TARGET tessai_agent_static)
 			message(FATAL_ERROR
@@ -106,6 +109,10 @@ if(TESSAI_AGENT_LIB_BUILD_EXAMPLES AND _installed_targets)
 			target_link_options(${_exe} PRIVATE "-Wl,-rpath,\$ORIGIN/../tessai-lib")
 		endif()
 	endforeach()
+	# Echo-latency benchmark uses sqrt() for stddev -> needs libm.
+	if(TARGET tessai_agent_echo_latency_example)
+		target_link_libraries(tessai_agent_echo_latency_example PRIVATE m)
+	endif()
 endif()
 
 install(TARGETS ${_installed_targets}
