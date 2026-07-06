@@ -3,6 +3,7 @@
 # tessai-agent out-of-tree DRM/RPMsg driver.
 
 ccflags-y += -I$(src)/../../../include/uapi
+ccflags-y += -I$(src)
 
 obj-m += tessai_agent.o
 

@@ -42,6 +42,7 @@
 #include <linux/stddef.h>
 
 #include "tessai_agent_internal.h"
+#include "tessai_agent_trace.h"
 
 /* --------------------------------------------------------------- */
 /* DT-based routing                                                */
@@ -146,10 +147,13 @@ static int tessai_rpmsg_cb(struct rpmsg_device *rpdev, void *data, int len,
 {
 	struct tessai_dev *tdev = dev_get_drvdata(&rpdev->dev);
 
+	trace_tessai_rpmsg_cb_enter(len, src);
+
 	if (!tdev) {
 		/* Channel was unbound while a callback was racing in. */
 		dev_warn_ratelimited(&rpdev->dev,
 				     "rpmsg msg dropped: channel not bound\n");
+		trace_tessai_rpmsg_cb_exit(0);
 		return 0;
 	}
 
@@ -157,10 +161,12 @@ static int tessai_rpmsg_cb(struct rpmsg_device *rpdev, void *data, int len,
 		dev_warn(tdev->dev,
 			 "rpmsg msg too small (%d bytes, need packed rsp hdr %zu), dropping\n",
 			 len, sizeof(struct tessai_wire_rsp));
+		trace_tessai_rpmsg_cb_exit(0);
 		return 0;
 	}
 
 	tessai_cmd_dispatch_response(tdev, data, (size_t)len);
+	trace_tessai_rpmsg_cb_exit(0);
 	return 0;
 }
 
@@ -304,7 +310,9 @@ int tessai_rpmsg_send_cmd(struct tessai_dev *tdev, u32 seq,
 	if (num_args)
 		memcpy(msg->args, args, num_args * sizeof(__le64));
 
+	trace_tessai_rpmsg_send_enter(seq, command_op, num_args);
 	ret = rpmsg_send(rpdev->ept, msg, msg_len);
+	trace_tessai_rpmsg_send_exit(seq, ret);
 	mutex_unlock(&tdev->rpmsg_lock);
 
 	kfree(msg);

@@ -25,6 +25,11 @@ endif()
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBDRM REQUIRED libdrm)
 
+# USDT/SDT static trace markers (perf-consumable) require systemtap's
+# <sys/sdt.h>. Optional: without it the TESSAI_TRACE* macros compile to no-ops.
+include(CheckIncludeFile)
+check_include_file("sys/sdt.h" TESSAI_AGENT_HAVE_SDT)
+
 set(TESSAI_AGENT_UAPI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../include/uapi"
     CACHE PATH "tessai-agent UAPI")
 set(TESSAI_AGENT_LIB_SOURCES
@@ -46,6 +51,9 @@ function(_tessai_agent_lib_configure_target tgt)
     )
     target_link_libraries(${tgt} PRIVATE ${LIBDRM_LIBRARIES})
     target_compile_options(${tgt} PRIVATE ${LIBDRM_CFLAGS_OTHER} -Wall -Wextra)
+    if(TESSAI_AGENT_HAVE_SDT)
+        target_compile_definitions(${tgt} PRIVATE TESSAI_AGENT_HAVE_SDT)
+    endif()
 endfunction()
 
 set(_installed_targets)

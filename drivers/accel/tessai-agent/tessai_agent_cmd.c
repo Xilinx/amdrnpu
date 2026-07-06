@@ -24,6 +24,7 @@
 #include <drm/drm_syncobj.h>
 
 #include "tessai_agent_internal.h"
+#include "tessai_agent_trace.h"
 
 /* --------------------------------------------------------------- */
 /* Custom dma_fence                                                */
@@ -460,6 +461,7 @@ long tessai_ioctl_cmd_submit(struct drm_device *ddev, void __user *uarg,
 
 	if (copy_from_user(&uhdr, uarg, TESSAI_SUBMIT_ABI_HDR_SZ))
 		return -EFAULT;
+	trace_tessai_cmd_submit_enter(uhdr.command_op, uhdr.num_args);
 	if (uhdr.drm_sync_obj_handle)
 		return -EINVAL;
 	if (uhdr.num_args > TESSAI_MAX_ARGS)
@@ -526,11 +528,13 @@ long tessai_ioctl_cmd_submit(struct drm_device *ddev, void __user *uarg,
 		task_pid_nr(current),
 		current->comm);
 
+	trace_tessai_cmd_submit_exit(cmd->seq, syncobj_handle, 0);
 	kvfree(words);
 	kvfree(args);
 	return 0;
 
 out_finish_cmd:
+	trace_tessai_cmd_submit_exit(cmd->seq, 0, (int)ret);
 	tessai_cmd_finish(tdev, cmd, ret < 0 ? (int)ret : -EIO);
 	kvfree(words);
 out_free_args:

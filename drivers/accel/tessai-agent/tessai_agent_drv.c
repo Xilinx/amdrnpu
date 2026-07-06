@@ -42,6 +42,9 @@
 
 #include "tessai_agent_internal.h"
 
+#define CREATE_TRACE_POINTS
+#include "tessai_agent_trace.h"
+
 static int tessai_platform_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;

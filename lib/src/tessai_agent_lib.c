@@ -23,6 +23,8 @@
 
 #include <tessai_agent/tessai_agent_lib.h>
 
+#include "tessai_agent_trace.h"
+
 #ifndef DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE
 #define DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE (1 << 0)
 #endif
@@ -72,8 +74,14 @@ static int syncobj_wait_rel(int drm_fd, uint32_t syncobj_handle,
 			wait.timeout_nsec = now + rel;
 	}
 
-	if (ioctl(drm_fd, DRM_IOCTL_SYNCOBJ_WAIT, &wait))
-		return -errno;
+	TESSAI_TRACE1(wait_ioctl_enter, syncobj_handle);
+	if (ioctl(drm_fd, DRM_IOCTL_SYNCOBJ_WAIT, &wait)) {
+		int e = -errno;
+
+		TESSAI_TRACE1(wait_ioctl_exit, e);
+		return e;
+	}
+	TESSAI_TRACE1(wait_ioctl_exit, 0);
 	return 0;
 }
 
@@ -101,11 +109,19 @@ int tessai_agent_buf_alloc(int drm_fd, uint32_t memory_type, uint64_t size,
 		.size		= size,
 	};
 
-	if (!out_handle)
+	TESSAI_TRACE2(buf_alloc_enter, memory_type, size);
+	if (!out_handle) {
+		TESSAI_TRACE2(buf_alloc_exit, 0, -EINVAL);
 		return -EINVAL;
-	if (ioctl(drm_fd, TESSAI_BUF_ALLOC, &a))
-		return -errno;
+	}
+	if (ioctl(drm_fd, TESSAI_BUF_ALLOC, &a)) {
+		int e = -errno;
+
+		TESSAI_TRACE2(buf_alloc_exit, 0, e);
+		return e;
+	}
 	*out_handle = a.drm_handle;
+	TESSAI_TRACE2(buf_alloc_exit, a.drm_handle, 0);
 	return 0;
 }
 
@@ -113,8 +129,14 @@ int tessai_agent_buf_close(int drm_fd, uint32_t handle)
 {
 	struct drm_gem_close arg = { .handle = handle };
 
-	if (ioctl(drm_fd, DRM_IOCTL_GEM_CLOSE, &arg))
-		return -errno;
+	TESSAI_TRACE1(buf_close_enter, handle);
+	if (ioctl(drm_fd, DRM_IOCTL_GEM_CLOSE, &arg)) {
+		int e = -errno;
+
+		TESSAI_TRACE1(buf_close_exit, e);
+		return e;
+	}
+	TESSAI_TRACE1(buf_close_exit, 0);
 	return 0;
 }
 
@@ -139,42 +161,48 @@ int tessai_agent_buf_mmap(int drm_fd, uint32_t handle, uint64_t buf_size,
 	unsigned long psz = tessai_page_size();
 	void *map;
 
+	TESSAI_TRACE1(buf_mmap_enter, handle);
+
 	if (!out_map)
-		return -EINVAL;
+		TESSAI_TRACE_RET(buf_mmap_exit, -EINVAL);
 
 	if (!tessai_page_aligned(offset, psz))
-		return -EINVAL;
+		TESSAI_TRACE_RET(buf_mmap_exit, -EINVAL);
 	if (length && !tessai_page_aligned(length, psz))
-		return -EINVAL;
+		TESSAI_TRACE_RET(buf_mmap_exit, -EINVAL);
 
 	if (!length) {
 		if (!buf_size || offset > buf_size)
-			return -EINVAL;
+			TESSAI_TRACE_RET(buf_mmap_exit, -EINVAL);
 		length = buf_size - offset;
 	} else if (buf_size && offset + length > buf_size) {
-		return -EINVAL;
+		TESSAI_TRACE_RET(buf_mmap_exit, -EINVAL);
 	}
 
 	if (!length)
-		return -EINVAL;
+		TESSAI_TRACE_RET(buf_mmap_exit, -EINVAL);
 
 	if (ioctl(drm_fd, DRM_IOCTL_MODE_MAP_DUMB, &md))
-		return -errno;
+		TESSAI_TRACE_RET(buf_mmap_exit, -errno);
 
 	map = mmap(NULL, (size_t)length, PROT_READ | PROT_WRITE, MAP_SHARED,
 		   drm_fd, (off_t)(md.offset + offset));
 	if (map == MAP_FAILED)
-		return -errno;
+		TESSAI_TRACE_RET(buf_mmap_exit, -errno);
 
 	*out_map = map;
-	return 0;
+	TESSAI_TRACE_RET(buf_mmap_exit, 0);
 }
 
 void tessai_agent_buf_munmap(void *addr, uint64_t length)
 {
-	if (!addr || !length)
+	TESSAI_TRACE0(buf_munmap_enter);
+	if (!addr || !length) {
+		TESSAI_TRACE0(buf_munmap_exit);
 		return;
+	}
 	(void)munmap(addr, (size_t)length);
+	TESSAI_TRACE0(buf_munmap_exit);
 }
 
 int tessai_agent_buf_sync(int drm_fd, uint32_t handle, uint32_t direction,
@@ -187,9 +215,10 @@ int tessai_agent_buf_sync(int drm_fd, uint32_t handle, uint32_t direction,
 		.length		= length,
 	};
 
+	TESSAI_TRACE2(buf_sync_enter, handle, direction);
 	if (ioctl(drm_fd, TESSAI_BUF_SYNC, &arg))
-		return -errno;
-	return 0;
+		TESSAI_TRACE_RET(buf_sync_exit, -errno);
+	TESSAI_TRACE_RET(buf_sync_exit, 0);
 }
 
 int tessai_agent_cmd_submit(int drm_fd, uint32_t command_op,
@@ -202,14 +231,15 @@ int tessai_agent_cmd_submit(int drm_fd, uint32_t command_op,
 	struct tessai_cmd_submit *cmd;
 	const size_t copy_sz = fix;
 
+	TESSAI_TRACE2(cmd_submit_enter, command_op, num_args);
 	if (!hdr_out || hdr_out_sz < copy_sz)
-		return -EINVAL;
+		TESSAI_TRACE_RET(cmd_submit_exit, -EINVAL);
 	if (num_args && !args)
-		return -EINVAL;
+		TESSAI_TRACE_RET(cmd_submit_exit, -EINVAL);
 
 	buf = calloc(1, need);
 	if (!buf)
-		return -ENOMEM;
+		TESSAI_TRACE_RET(cmd_submit_exit, -ENOMEM);
 
 	cmd = (struct tessai_cmd_submit *)buf;
 	cmd->drm_sync_obj_handle = 0;
@@ -219,13 +249,15 @@ int tessai_agent_cmd_submit(int drm_fd, uint32_t command_op,
 		memcpy(cmd->args, args, (size_t)num_args * sizeof(struct tessai_arg));
 
 	if (ioctl(drm_fd, TESSAI_CMD_SUBMIT, buf)) {
+		int e = -errno;
+
 		free(buf);
-		return -errno;
+		TESSAI_TRACE_RET(cmd_submit_exit, e);
 	}
 
 	memcpy(hdr_out, cmd, copy_sz);
 	free(buf);
-	return 0;
+	TESSAI_TRACE_RET(cmd_submit_exit, 0);
 }
 
 int tessai_agent_syncobj_wait_complete(int drm_fd, uint32_t syncobj_handle,
@@ -235,10 +267,11 @@ int tessai_agent_syncobj_wait_complete(int drm_fd, uint32_t syncobj_handle,
 	int err;
 	int32_t st;
 
+	TESSAI_TRACE2(wait_complete_enter, syncobj_handle, timeout_ns);
 	if (!out_wait_status)
-		return -EINVAL;
+		TESSAI_TRACE_RET(wait_complete_exit, -EINVAL);
 	if (timeout_ns < 0)
-		return -EINVAL;
+		TESSAI_TRACE_RET(wait_complete_exit, -EINVAL);
 
 	if (timeout_ns == 0)
 		err = tessai_agent_syncobj_fence_status(drm_fd, syncobj_handle,
@@ -254,25 +287,25 @@ int tessai_agent_syncobj_wait_complete(int drm_fd, uint32_t syncobj_handle,
 									 syncobj_handle,
 									 &st);
 				if (err)
-					return err;
+					TESSAI_TRACE_RET(wait_complete_exit, err);
 				if (st != 0)
 					*out_wait_status = st;
 				else
 					*out_wait_status = 0;
 				syncobj_destroy_if_terminal(drm_fd, syncobj_handle, st);
-				return -ETIMEDOUT;
+				TESSAI_TRACE_RET(wait_complete_exit, -ETIMEDOUT);
 			}
-			return err;
+			TESSAI_TRACE_RET(wait_complete_exit, err);
 		}
 		err = tessai_agent_syncobj_fence_status(drm_fd, syncobj_handle,
 							 &st);
 	}
 
 	if (err)
-		return err;
+		TESSAI_TRACE_RET(wait_complete_exit, err);
 	*out_wait_status = st;
 	syncobj_destroy_if_terminal(drm_fd, syncobj_handle, st);
-	return 0;
+	TESSAI_TRACE_RET(wait_complete_exit, 0);
 }
 
 static void tessai_rel_sleep_ns(uint64_t ns)
@@ -300,16 +333,17 @@ int tessai_agent_syncobj_to_fence_fd(int drm_fd, uint32_t syncobj_handle,
 {
 	struct drm_syncobj_handle arg;
 
+	TESSAI_TRACE1(to_fence_fd_enter, syncobj_handle);
 	if (!out_fence_fd)
-		return -EINVAL;
+		TESSAI_TRACE_RET(to_fence_fd_exit, -EINVAL);
 
 	memset(&arg, 0, sizeof(arg));
 	arg.handle = syncobj_handle;
 	arg.flags  = DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE;
 	if (ioctl(drm_fd, DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, &arg))
-		return -errno;
+		TESSAI_TRACE_RET(to_fence_fd_exit, -errno);
 	*out_fence_fd = arg.fd;
-	return 0;
+	TESSAI_TRACE_RET(to_fence_fd_exit, 0);
 }
 
 int tessai_agent_syncobj_fence_status(int drm_fd, uint32_t syncobj_handle,
@@ -318,22 +352,23 @@ int tessai_agent_syncobj_fence_status(int drm_fd, uint32_t syncobj_handle,
 	struct sync_file_info fi;
 	int sf, q;
 
+	TESSAI_TRACE1(fence_status_enter, syncobj_handle);
 	if (!out_fence_status)
-		return -EINVAL;
+		TESSAI_TRACE_RET(fence_status_exit, -EINVAL);
 
 	q = tessai_agent_syncobj_to_fence_fd(drm_fd, syncobj_handle, &sf);
 	if (q < 0)
-		return q;
+		TESSAI_TRACE_RET(fence_status_exit, q);
 
 	memset(&fi, 0, sizeof(fi));
 	if (ioctl(sf, SYNC_IOC_FILE_INFO, &fi)) {
 		q = -errno;
 		close(sf);
-		return q;
+		TESSAI_TRACE_RET(fence_status_exit, q);
 	}
 	close(sf);
 	*out_fence_status = fi.status;
-	return 0;
+	TESSAI_TRACE_RET(fence_status_exit, 0);
 }
 
 int tessai_agent_syncobj_wait_busy_poll(int drm_fd, uint32_t syncobj_handle,
@@ -344,13 +379,14 @@ int tessai_agent_syncobj_wait_busy_poll(int drm_fd, uint32_t syncobj_handle,
 	struct timespec t0;
 	bool use_deadline;
 
+	TESSAI_TRACE1(wait_busy_poll_enter, syncobj_handle);
 	if (!out_fence_status)
-		return -EINVAL;
+		TESSAI_TRACE_RET(wait_busy_poll_exit, -EINVAL);
 
 	use_deadline = max_wall_ns >= 0;
 
 	if (clock_gettime(CLOCK_MONOTONIC, &t0))
-		return -errno;
+		TESSAI_TRACE_RET(wait_busy_poll_exit, -errno);
 
 	for (;;) {
 		int err;
@@ -359,11 +395,11 @@ int tessai_agent_syncobj_wait_busy_poll(int drm_fd, uint32_t syncobj_handle,
 		err = tessai_agent_syncobj_fence_status(drm_fd, syncobj_handle,
 							 &st);
 		if (err)
-			return err;
+			TESSAI_TRACE_RET(wait_busy_poll_exit, err);
 		*out_fence_status = st;
 		if (st != 0) {
 			syncobj_destroy_if_terminal(drm_fd, syncobj_handle, st);
-			return 0;
+			TESSAI_TRACE_RET(wait_busy_poll_exit, 0);
 		}
 
 		if (use_deadline) {
@@ -371,10 +407,10 @@ int tessai_agent_syncobj_wait_busy_poll(int drm_fd, uint32_t syncobj_handle,
 			int64_t elapsed;
 
 			if (clock_gettime(CLOCK_MONOTONIC, &now))
-				return -errno;
+				TESSAI_TRACE_RET(wait_busy_poll_exit, -errno);
 			elapsed = tessai_mono_elapsed_ns(&t0, &now);
 			if (elapsed >= max_wall_ns)
-				return -ETIMEDOUT;
+				TESSAI_TRACE_RET(wait_busy_poll_exit, -ETIMEDOUT);
 		}
 
 		if (interval_ns > 0)

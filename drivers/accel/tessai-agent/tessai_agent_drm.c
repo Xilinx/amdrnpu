@@ -38,6 +38,7 @@
 #include <drm/drm_prime.h>
 
 #include "tessai_agent_internal.h"
+#include "tessai_agent_trace.h"
 
 /* --------------------------------------------------------------- */
 /* GEM object lifecycle                                            */
@@ -410,9 +411,11 @@ static long tessai_drm_ioctl(struct file *filp, unsigned int cmd,
 
 		if (copy_from_user(&args, uarg, sizeof(args)))
 			return -EFAULT;
+		trace_tessai_buf_alloc_enter(args.memory_type, args.size);
 		ret = tessai_buf_alloc(ddev, &args, file);
 		if (!ret && copy_to_user(uarg, &args, sizeof(args)))
 			ret = -EFAULT;
+		trace_tessai_buf_alloc_exit(ret ? 0 : args.drm_handle, ret);
 		return ret;
 	}
 	case TESSAI_BUF_SYNC: {
