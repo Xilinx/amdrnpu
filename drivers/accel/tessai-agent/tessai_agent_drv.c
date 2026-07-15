@@ -37,6 +37,7 @@
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
+#include <linux/version.h>
 
 #include <drm/drm_drv.h>
 
@@ -139,7 +140,7 @@ MODULE_DEVICE_TABLE(of, tessai_of_match);
 
 static struct platform_driver tessai_platform_driver = {
 	.probe	= tessai_platform_probe,
-	.remove_new = tessai_platform_remove,
+	.remove = tessai_platform_remove,
 	.driver	= {
 		.name		= TESSAI_DRV_NAME,
 		.of_match_table	= tessai_of_match,
@@ -187,5 +188,10 @@ MODULE_VERSION("0.1.0");
 /*
  * dma_buf_* helpers were moved into the DMA_BUF symbol namespace in
  * Linux 6.6; importing it here keeps modpost happy on 6.12 and newer.
+ * The namespace argument became a string literal in Linux 6.13.
  */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+MODULE_IMPORT_NS("DMA_BUF");
+#else
 MODULE_IMPORT_NS(DMA_BUF);
+#endif

@@ -481,7 +481,6 @@ const struct drm_driver tessai_drm_driver = {
 
 	.name			= TESSAI_DRV_NAME,
 	.desc			= "AMD tessai RPU management driver",
-	.date			= "20260430",
 	.major			= 1,
 	.minor			= 0,
 };

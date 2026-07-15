@@ -174,7 +174,7 @@ MODULE_DEVICE_TABLE(of, tessai_bank_of_match);
 
 static struct platform_driver tessai_bank_driver = {
 	.probe = tessai_bank_probe,
-	.remove_new = tessai_bank_remove,
+	.remove = tessai_bank_remove,
 	.driver = {
 		.name = "tessai-agent-bank",
 		.of_match_table = tessai_bank_of_match,
