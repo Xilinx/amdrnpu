@@ -6,45 +6,45 @@
 //
 // The happy path (BO alloc -> mmap -> TO_DEVICE sync -> submit ->
 // FROM_DEVICE sync -> readback) is covered end-to-end by
-// TessaiAgentCmd.FwEchoWriteback; here we split each step into its
+// AmdrnpuCmd.FwEchoWriteback; here we split each step into its
 // own TEST_F so a regression in (e.g.) MAP_DUMB shows up without
 // dragging the entire endpoint round-trip in. The partial-window
 // round trip (TO_DEVICE+FROM_DEVICE on a sub-page range, validated
 // via the RPU's fw_echo_region opcode) lives at the bottom in
-// TessaiAgentMemory.BufSyncPartialRoundTrip.
+// AmdrnpuMemory.BufSyncPartialRoundTrip.
 
 #include "common.h"
 
 #include <array>
 
-using namespace tessai_test;
+using namespace amdrnpu_test;
 
-class TessaiAgentMemory : public TessaiAgentTest {};
+class AmdrnpuMemory : public AmdrnpuTest {};
 
 // ---- alloc / close happy path -------------------------------------
 
-TEST_F(TessaiAgentMemory, BufAllocRpuBank)
+TEST_F(AmdrnpuMemory, BufAllocRpuBank)
 {
 	uint32_t bo = 0;
-	ASSERT_EQ(do_buf_alloc(fd_, TESSAI_MEMORY_RPU, kFwRspBoSize, &bo), 0);
+	ASSERT_EQ(do_buf_alloc(fd_, AMDRNPU_MEMORY_RPU, kFwRspBoSize, &bo), 0);
 	EXPECT_NE(bo, 0u);
 	EXPECT_EQ(do_gem_close(fd_, bo), 0);
 }
 
-TEST_F(TessaiAgentMemory, BufAllocDeviceBank)
+TEST_F(AmdrnpuMemory, BufAllocDeviceBank)
 {
 	uint32_t bo = 0;
-	ASSERT_EQ(do_buf_alloc(fd_, TESSAI_MEMORY_DEVICE, MB(1), &bo), 0);
+	ASSERT_EQ(do_buf_alloc(fd_, AMDRNPU_MEMORY_DEVICE, MB(1), &bo), 0);
 	EXPECT_NE(bo, 0u);
 	EXPECT_EQ(do_gem_close(fd_, bo), 0);
 }
 
 // ---- mmap + memset round-trip -------------------------------------
 
-TEST_F(TessaiAgentMemory, BufMmapAndMemsetRpuBank)
+TEST_F(AmdrnpuMemory, BufMmapAndMemsetRpuBank)
 {
 	uint32_t bo = 0;
-	ASSERT_EQ(do_buf_alloc(fd_, TESSAI_MEMORY_RPU, kFwRspBoSize, &bo), 0);
+	ASSERT_EQ(do_buf_alloc(fd_, AMDRNPU_MEMORY_RPU, kFwRspBoSize, &bo), 0);
 
 	uint64_t off = 0;
 	ASSERT_EQ(do_map_dumb(fd_, bo, &off), 0);
@@ -64,38 +64,38 @@ TEST_F(TessaiAgentMemory, BufMmapAndMemsetRpuBank)
 	EXPECT_EQ(do_gem_close(fd_, bo), 0);
 }
 
-// ---- TESSAI_BUF_SYNC ----------------------------------------------
+// ---- AMDRNPU_BUF_SYNC ----------------------------------------------
 
-TEST_F(TessaiAgentMemory, BufSyncBothDirectionsWholeBuffer)
+TEST_F(AmdrnpuMemory, BufSyncBothDirectionsWholeBuffer)
 {
 	// length=0 means "whole BO from @offset". Both directions must
 	// succeed against a freshly-allocated bank BO -- we're not
 	// validating any cache effect here, just the ioctl shape.
 	uint32_t bo = 0;
-	ASSERT_EQ(do_buf_alloc(fd_, TESSAI_MEMORY_RPU, kFwRspBoSize, &bo), 0);
+	ASSERT_EQ(do_buf_alloc(fd_, AMDRNPU_MEMORY_RPU, kFwRspBoSize, &bo), 0);
 
-	EXPECT_EQ(do_buf_sync(fd_, bo, TESSAI_BUF_SYNC_TO_DEVICE, 0, 0), 0);
-	EXPECT_EQ(do_buf_sync(fd_, bo, TESSAI_BUF_SYNC_FROM_DEVICE, 0, 0), 0);
+	EXPECT_EQ(do_buf_sync(fd_, bo, AMDRNPU_BUF_SYNC_TO_DEVICE, 0, 0), 0);
+	EXPECT_EQ(do_buf_sync(fd_, bo, AMDRNPU_BUF_SYNC_FROM_DEVICE, 0, 0), 0);
 
 	EXPECT_EQ(do_gem_close(fd_, bo), 0);
 }
 
-TEST_F(TessaiAgentMemory, BufSyncPartialRange)
+TEST_F(AmdrnpuMemory, BufSyncPartialRange)
 {
 	// Sync only the second page of a multi-page BO.
 	uint32_t bo = 0;
 	uint64_t bo_size = 2 * static_cast<uint64_t>(get_page_size());
-	ASSERT_EQ(do_buf_alloc(fd_, TESSAI_MEMORY_RPU, bo_size, &bo), 0);
+	ASSERT_EQ(do_buf_alloc(fd_, AMDRNPU_MEMORY_RPU, bo_size, &bo), 0);
 
 	uint64_t page = static_cast<uint64_t>(get_page_size());
-	EXPECT_EQ(do_buf_sync(fd_, bo, TESSAI_BUF_SYNC_TO_DEVICE,
+	EXPECT_EQ(do_buf_sync(fd_, bo, AMDRNPU_BUF_SYNC_TO_DEVICE,
 			      page, page),
 		  0);
 
 	EXPECT_EQ(do_gem_close(fd_, bo), 0);
 }
 
-// ---- TESSAI_BUF_SYNC partial-window FULL ROUND-TRIP ----------------
+// ---- AMDRNPU_BUF_SYNC partial-window FULL ROUND-TRIP ----------------
 //
 // The BufSyncPartialRange test above only validates the ioctl SHAPE
 // (driver accepts (offset, length) within the BO). It does NOT prove
@@ -104,9 +104,9 @@ TEST_F(TessaiAgentMemory, BufSyncPartialRange)
 // that silently truncates to page granularity, would still pass.
 //
 // This test closes that gap with an end-to-end exchange through the
-// RPU's TESSAI_FW_OP_ECHO_REGION ('RGNE') opcode, which on the
-// endpoint side (see RPURuntime tessai_agent_endpoint.c:
-// tessai_fw_echo_region) does two things in one round trip:
+// RPU's AMDRNPU_FW_OP_ECHO_REGION ('RGNE') opcode, which on the
+// endpoint side (see RPURuntime amdrnpu_endpoint.c:
+// amdrnpu_fw_echo_region) does two things in one round trip:
 //
 //   1. Reads 8 bytes at the window's start. Whatever userspace
 //      flushed via BUF_SYNC TO_DEVICE before submit ends up in the
@@ -139,7 +139,7 @@ TEST_F(TessaiAgentMemory, BufSyncPartialRange)
 // whether the window bytes still equal the pre-submit 0x33 fill
 // -- if they do, the endpoint never wrote anything (= unknown
 // opcode); if they're partially modified, it's a real bug.
-TEST_F(TessaiAgentMemory, BufSyncPartialRoundTrip)
+TEST_F(AmdrnpuMemory, BufSyncPartialRoundTrip)
 {
 	const uint64_t page    = static_cast<uint64_t>(get_page_size());
 	const uint64_t bo_size = 2 * page;
@@ -148,7 +148,7 @@ TEST_F(TessaiAgentMemory, BufSyncPartialRoundTrip)
 	ASSERT_LE(winoff + winlen, bo_size);
 
 	uint32_t bo = 0;
-	ASSERT_EQ(do_buf_alloc(fd_, TESSAI_MEMORY_RPU, bo_size, &bo), 0);
+	ASSERT_EQ(do_buf_alloc(fd_, AMDRNPU_MEMORY_RPU, bo_size, &bo), 0);
 
 	uint64_t mmap_off = 0;
 	ASSERT_EQ(do_map_dumb(fd_, bo, &mmap_off), 0);
@@ -181,11 +181,11 @@ TEST_F(TessaiAgentMemory, BufSyncPartialRoundTrip)
 	// window) so we can't detect promotion in the TO_DEVICE
 	// direction directly -- the kInputEcho echo via the banner is
 	// what proves the flush happened at all.
-	ASSERT_EQ(do_buf_sync(fd_, bo, TESSAI_BUF_SYNC_TO_DEVICE,
+	ASSERT_EQ(do_buf_sync(fd_, bo, AMDRNPU_BUF_SYNC_TO_DEVICE,
 			      winoff, winlen),
 		  0);
 
-	std::array<struct tessai_arg, 3> args{};
+	std::array<struct amdrnpu_arg, 3> args{};
 	args[0].size  = static_cast<uint32_t>(winlen);
 	args[0].bo.drm_buffer_handle = static_cast<int32_t>(bo);
 	args[0].bo.offset = 0;
@@ -216,15 +216,15 @@ TEST_F(TessaiAgentMemory, BufSyncPartialRoundTrip)
 	// RPU's writes visible", and the widening-into-CC sentinel
 	// further down catches the more dangerous "RPU wrote outside
 	// the window" failure mode.
-	ASSERT_EQ(do_buf_sync(fd_, bo, TESSAI_BUF_SYNC_FROM_DEVICE,
+	ASSERT_EQ(do_buf_sync(fd_, bo, AMDRNPU_BUF_SYNC_FROM_DEVICE,
 			      winoff, winlen),
 		  0);
 
 	// Parse the banner the RPU wrote. The format string MUST stay
 	// in lockstep with the snprintf in
-	// RPURuntime/.../tessai_agent_endpoint.c:tessai_fw_echo_region
+	// RPURuntime/.../amdrnpu_endpoint.c:amdrnpu_fw_echo_region
 	// AND with the mirror in
-	// tessai-agent/tests/rpu_app/.../tessai_agent_endpoint.c.
+	// tessai-agent/tests/rpu_app/.../amdrnpu_endpoint.c.
 	unsigned int  rpu_seq = 0;
 	unsigned long long rpu_off = 0, rpu_len = 0, rpu_in = 0;
 	int matched = std::sscanf(reinterpret_cast<const char *>(base + winoff),
@@ -247,7 +247,7 @@ TEST_F(TessaiAgentMemory, BufSyncPartialRoundTrip)
 		EXPECT_EQ(::munmap(map, bo_size), 0);
 		EXPECT_EQ(do_gem_close(fd_, bo), 0);
 		GTEST_SKIP() << "RPU endpoint does not recognize 'RGNE' "
-				"(TESSAI_FW_OP_ECHO_REGION) -- rebuild "
+				"(AMDRNPU_FW_OP_ECHO_REGION) -- rebuild "
 				"zephyr.elf from "
 				"tests/rpu_app/ to pick up the partial-"
 				"sync round-trip handler";
@@ -324,11 +324,11 @@ TEST_F(TessaiAgentMemory, BufSyncPartialRoundTrip)
 // pattern -> verify_buffer32. Doesn't involve the RPU; just exercises
 // the driver's mmap path and confirms userspace can both read and
 // write a BO with the expected byte pattern.
-TEST_F(TessaiAgentMemory, BufMmapFillVerifyPattern)
+TEST_F(AmdrnpuMemory, BufMmapFillVerifyPattern)
 {
 	uint32_t bo = 0;
 	const size_t size = KB(64);
-	ASSERT_EQ(do_buf_alloc(fd_, TESSAI_MEMORY_RPU, size, &bo), 0);
+	ASSERT_EQ(do_buf_alloc(fd_, AMDRNPU_MEMORY_RPU, size, &bo), 0);
 
 	uint64_t off = 0;
 	ASSERT_EQ(do_map_dumb(fd_, bo, &off), 0);
@@ -346,7 +346,7 @@ TEST_F(TessaiAgentMemory, BufMmapFillVerifyPattern)
 
 // ---- large allocation cap (sanity) --------------------------------
 
-TEST_F(TessaiAgentMemory, BufAllocLargeRequestEitherSucceedsOrEinval)
+TEST_F(AmdrnpuMemory, BufAllocLargeRequestEitherSucceedsOrEinval)
 {
 	// 1 GiB request from the DEVICE bank. On VEK385 bank@1 binds to
 	// buffer@50000000000 (4 GiB reusable shared-dma-pool), so this
@@ -355,7 +355,7 @@ TEST_F(TessaiAgentMemory, BufAllocLargeRequestEitherSucceedsOrEinval)
 	// asserts only "no kernel crash / no hang"; either return shape
 	// is acceptable.
 	uint32_t bo = 0;
-	int rc = do_buf_alloc(fd_, TESSAI_MEMORY_DEVICE, GB(1), &bo);
+	int rc = do_buf_alloc(fd_, AMDRNPU_MEMORY_DEVICE, GB(1), &bo);
 	if (rc == 0) {
 		EXPECT_NE(bo, 0u);
 		EXPECT_EQ(do_gem_close(fd_, bo), 0);

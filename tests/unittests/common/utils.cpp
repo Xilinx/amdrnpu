@@ -8,7 +8,7 @@
 #include <cstring>
 #include <unistd.h>
 
-namespace tessai_test {
+namespace amdrnpu_test {
 
 long get_page_size()
 {
@@ -53,4 +53,4 @@ bool verify_buffer32(const void *host_ptr, size_t size)
 	return true;
 }
 
-}  // namespace tessai_test
+}  // namespace amdrnpu_test

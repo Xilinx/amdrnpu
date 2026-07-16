@@ -7,17 +7,17 @@
  * SYS_INITs.
  */
 
-#ifndef TESSAI_METAL_INIT_ONCE_H_
-#define TESSAI_METAL_INIT_ONCE_H_
+#ifndef AMDRNPU_METAL_INIT_ONCE_H_
+#define AMDRNPU_METAL_INIT_ONCE_H_
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-int tessai_metal_init_once(void);
+int amdrnpu_metal_init_once(void);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* TESSAI_METAL_INIT_ONCE_H_ */
+#endif /* AMDRNPU_METAL_INIT_ONCE_H_ */

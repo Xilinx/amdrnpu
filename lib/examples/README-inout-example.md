@@ -1,7 +1,7 @@
-# tessai_agent_inout_example
+# amdrnpu_inout_example
 
 End-to-end Linux userspace test for **in buffer → RPU copy → out buffer** using
-`tessai-agent` and matching RPU firmware.
+`amdrnpu` and matching RPU firmware.
 
 ## Device tree (`system-top-rpu-enlarged.dtb`)
 
@@ -22,25 +22,25 @@ IPI for RPMsg doorbell: RPU `ipi_nobuf2` @ `0xeb3b1000` notifies Linux `ipi_nobu
 
 Build `rpu_fw` with `versal2_rpu` board; firmware must include:
 
-- `tessai_agent_ept.c` — RPMsg channel **`tessai-agent`**
-- `TESSAI_OP_COPY_IN_OUT` (`0x1`) — copies input GEM phys → output GEM phys
+- `amdrnpu_ept.c` — RPMsg channel **`amdrnpu`**
+- `AMDRNPU_OP_COPY_IN_OUT` (`0x1`) — copies input GEM phys → output GEM phys
 
 Rebuild and load via remoteproc after updating the ELF on the target.
 
 ## Linux
 
-- `tessai_agent.ko` loaded
-- DT node `amd,tessai-agent` with `bank@0` `memory-region` → numeric phandle `<0x500>` (= `rpu_gem_cma@20000000` in the official Versal-net layout; unlabeled, so referenced by explicit phandle)
-- Demo allocates **both buffers as RPU BOs** (`TESSAI_MEMORY_RPU`) so firmware can
+- `amdrnpu.ko` loaded
+- DT node `amd,amdrnpu` with `bank@0` `memory-region` → numeric phandle `<0x500>` (= `rpu_gem_cma@20000000` in the official Versal-net layout; unlabeled, so referenced by explicit phandle)
+- Demo allocates **both buffers as RPU BOs** (`AMDRNPU_MEMORY_RPU`) so firmware can
   access the resolved physical addresses in `rpu_gem_cma@20000000`.
 - Example opens **`/dev/dri/cardN`** (not `renderD*`) for mmap
 
 ## Run
 
 ```bash
-tessai_agent_inout_example
+amdrnpu_inout_example
 # or
-tessai_agent_inout_example --device /dev/dri/card1
+amdrnpu_inout_example --device /dev/dri/card1
 ```
 
 Success prints `verify OK: output matches input`.

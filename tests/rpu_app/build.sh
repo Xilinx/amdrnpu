@@ -3,7 +3,7 @@
 # Zephyr AMD Build Script
 # Usage: ./build.sh <test_case_name>
 #        ./build.sh clean
-# Example: ./build.sh tests/tessai_agent_test
+# Example: ./build.sh tests/amdrnpu
 
 # Ensure script runs in bash (re-execute with bash if not)
 if [ -z "$BASH_VERSION" ]; then
@@ -273,7 +273,7 @@ if [ $# -ne 1 ]; then
     echo "  $0 clean                         - Remove all build artifacts"
     echo ""
     echo "Examples:"
-    echo "  $0 tests/tessai_agent_test"
+    echo "  $0 tests/amdrnpu"
     echo "  $0 clean"
     exit 1
 fi

@@ -2,13 +2,13 @@
  * SPDX-License-Identifier: Apache-2.0
  * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  *
- * APU → RPU_APP command opcodes that bridge tessai-agent wire commands
+ * APU → RPU_APP command opcodes that bridge amdrnpu wire commands
  * into the XRT Lite stack (RPU_APP → RPU_FW via the existing VE2 mgmt
  * transport). Keep lockstep with the APU gtest harness when one exists.
  *
  * Wire layout for every opcode:
- *   struct tessai_wire_cmd { seq, command_op, flags, num_args, args[] }
- *   struct tessai_wire_rsp { seq, command_rsp_type }
+ *   struct amdrnpu_wire_cmd { seq, command_op, flags, num_args, args[] }
+ *   struct amdrnpu_wire_rsp { seq, command_rsp_type }
  */
 
 #ifndef APU_OPS_H_
@@ -20,10 +20,10 @@
 extern "C" {
 #endif
 
-/* fw_echo — same opcode as tessai-agent unittests (TESSAI_FW_ECHO_OP). */
+/* fw_echo — same opcode as amdrnpu unittests (AMDRNPU_FW_ECHO_OP). */
 #define APU_XRT_OP_ECHO              0x42424242u
 
-/* Local carveout memcpy (TESSAI_OP_COPY_IN_OUT). */
+/* Local carveout memcpy (AMDRNPU_OP_COPY_IN_OUT). */
 #define APU_XRT_OP_COPY_IN_OUT       0x00000001u
 
 /*

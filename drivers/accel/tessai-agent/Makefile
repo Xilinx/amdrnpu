@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
 #
-# Out-of-tree build wrapper for the tessai-agent kernel module.
+# Out-of-tree build wrapper for the amdrnpu kernel module.
 # Targets Linux 6.12 and newer (uses drm_syncobj, dma_fence, drm_gem
 # import helpers, and rpmsg APIs as they exist in 6.12+).
 #
@@ -11,7 +11,7 @@
 # writes into this source directory.
 #
 # This Makefile is still used by:
-#   - meta-tessai-agent/recipes-kernel/tessai-agent-mod_0.1.0.bb
+#   - meta-amdrnpu/recipes-kernel/amdrnpu-mod_0.1.0.bb
 #     (Yocto's module.bbclass invokes it via `make M=... modules`), and
 #   - anyone who wants the raw kbuild invocation directly.
 #
@@ -51,10 +51,10 @@ clean:
 	rm -rf .tmp_versions
 
 help:
-	@echo "tessai-agent kernel module - out-of-tree build"
+	@echo "amdrnpu kernel module - out-of-tree build"
 	@echo ""
 	@echo "Targets:"
-	@echo "  all / modules     build tessai_agent.ko"
+	@echo "  all / modules     build amdrnpu.ko"
 	@echo "  modules_install   install module to INSTALL_MOD_PATH (default /)"
 	@echo "  clean             remove build artifacts"
 	@echo ""

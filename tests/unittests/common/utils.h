@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 //
-// Generic test utilities shared across the tessai-agent gtest suites.
+// Generic test utilities shared across the amdrnpu gtest suites.
 // Modeled on testcases-v2/unittests/common/utils.h so contributors used
 // to that layout don't have to relearn anything.
 //
-// Anything tessai-specific (DRM card discovery, ioctl wrappers, fault
+// Anything amdrnpu-specific (DRM card discovery, ioctl wrappers, fault
 // opcodes) lives in tests/unittests/src/common.h, NOT here.
 
-#ifndef TESSAI_AGENT_TEST_UTILS_H_
-#define TESSAI_AGENT_TEST_UTILS_H_
+#ifndef AMDRNPU_TEST_UTILS_H_
+#define AMDRNPU_TEST_UTILS_H_
 
 #include <chrono>
 #include <cstdlib>
@@ -21,7 +21,7 @@
 #define MB(n) (KB(n) * 1024ULL)
 #define GB(n) (MB(n) * 1024ULL)
 
-namespace tessai_test {
+namespace amdrnpu_test {
 
 // Returns the OS page size (sysconf(_SC_PAGESIZE) on POSIX).
 long get_page_size();
@@ -53,6 +53,6 @@ uint64_t get_time_elapsed_usec(F &&f)
 	return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
 }
 
-}  // namespace tessai_test
+}  // namespace amdrnpu_test
 
-#endif  // TESSAI_AGENT_TEST_UTILS_H_
+#endif  // AMDRNPU_TEST_UTILS_H_

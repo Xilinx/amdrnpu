@@ -1,4 +1,4 @@
-# tessai_agent_xrt_bist_example
+# amdrnpu_xrt_bist_example
 
 APU-side end-to-end test for **`tests/xrt_apu_rpu_test`** on RPU_APP.
 
@@ -24,7 +24,7 @@ status and optional latency writeback.
 | `args[2]` | ELF size in bytes (scalar; 0 → RPU default 15376) |
 | `args[3]` | Optional RPU BO for `apu_xrt_bist_result` writeback |
 
-Response: `tessai_wire_rsp.command_rsp_type` → DRM syncobj fence status
+Response: `amdrnpu_wire_rsp.command_rsp_type` → DRM syncobj fence status
 (`1` = COMPLETE, negative = REMOTEIO / etc.).
 
 ## Target firmware
@@ -46,33 +46,33 @@ dow -data nop.elf 0x20100000
 
 ## Linux
 
-- `tessai_agent.ko` loaded
+- `amdrnpu.ko` loaded
 - Open **`/dev/dri/cardN`** (primary node for result BO mmap)
 
 ## Build
 
-Built with the tessai-agent lib when examples are enabled:
+Built with the amdrnpu lib when examples are enabled:
 
 ```bash
 cd tessai-agent/lib && cmake -B build && cmake --build build
 ```
 
-Binary: `build/tessai_agent_xrt_bist_example`
+Binary: `build/amdrnpu_xrt_bist_example`
 
 ## Run
 
 ```bash
 # Load ELF from file (recommended — no pre-loading step)
-tessai_agent_xrt_bist_example --elf-file /path/to/nop.elf
+amdrnpu_xrt_bist_example --elf-file /path/to/nop.elf
 
 # Pass pre-loaded ELF physical address directly
-tessai_agent_xrt_bist_example --elf-pa 0x20100000 --elf-size 15376
+amdrnpu_xrt_bist_example --elf-pa 0x20100000 --elf-size 15376
 
 # Use RPU_APP built-in defaults (nop.elf must already be at 0x20100000)
-tessai_agent_xrt_bist_example
+amdrnpu_xrt_bist_example
 
 # Full options
-tessai_agent_xrt_bist_example --device /dev/dri/card1 --elf-file /path/to/nop.elf --iterations 50
+amdrnpu_xrt_bist_example --device /dev/dri/card1 --elf-file /path/to/nop.elf --iterations 50
 ```
 
 Success prints `completion: fence_st=1 (COMPLETE)` and `PASS`.

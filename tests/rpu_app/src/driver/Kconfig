@@ -1,17 +1,17 @@
-config TESSAI
+config AMDRNPU
 	bool
 	default y
 
 # ---------------------------------------------------------------------------
-# Link A — APU (tessai-agent driver) <-> RPURuntime slave-side rpmsg.
+# Link A — APU (amdrnpu driver) <-> RPURuntime slave-side rpmsg.
 #
-# When enabled, apu_rpmsg_platform.c + tessai_agent_endpoint.c are
+# When enabled, apu_rpmsg_platform.c + amdrnpu_endpoint.c are
 # compiled and the standard CONFIG_OPENAMP_RSC_TABLE machinery is
 # pulled in so the kernel remoteproc framework can find the published
 # resource table at apu_rsctbl in the loaded ELF.
 # ---------------------------------------------------------------------------
 
-config TESSAI_APU_RPMSG_SLAVE
+config AMDRNPU_APU_RPMSG_SLAVE
 	bool "Enable link A (APU<->RPURuntime) OpenAMP slave transport"
 	default n
 	select OPENAMP
@@ -21,11 +21,11 @@ config TESSAI_APU_RPMSG_SLAVE
 	select OPENAMP_WITH_DCACHE
 	help
 	  Compile apu_rpmsg_platform.c so RPURuntime serves the
-	  "tessai-agent" rpmsg endpoint to the APU userspace driver via
+	  "amdrnpu" rpmsg endpoint to the APU userspace driver via
 	  the link A IPI mailbox (ipi_2_to_ipi_5) and the link A
 	  reserved-memory carveouts (apu_rsctbl, apu_rpmsg_shmem). Set
 	  this for any RPURuntime test that needs to be reachable from
-	  the tessai-agent kernel driver.
+	  the amdrnpu kernel driver.
 
 # Force a non-zero vring buffer count whenever link A is enabled.
 # The VDEV_ID / VRING0_ID / VRING1_ID macros and the
@@ -36,12 +36,12 @@ config TESSAI_APU_RPMSG_SLAVE
 # implicit-decl rsc_table_get_vring0/1). 8 matches the rpu-fw
 # slave-side openamp_platform.c pin in rpu-fw/rpu_fw/prj.conf.
 config OPENAMP_RSC_TABLE_NUM_RPMSG_BUFF
-	default 8 if TESSAI_APU_RPMSG_SLAVE
+	default 8 if AMDRNPU_APU_RPMSG_SLAVE
 
-config TESSAI_VERBOSE
-	bool "tessai driver debug output"
+config AMDRNPU_VERBOSE
+	bool "amdrnpu driver debug output"
 	default n
 	help
-	  Enable verbose debug printk output from the tessai driver
-	  (TESSAI_DBG macro in apu_rpmsg_platform.c). When disabled
-	  (default), only error messages (TESSAI_ERR) are printed.
+	  Enable verbose debug printk output from the amdrnpu driver
+	  (AMDRNPU_DBG macro in apu_rpmsg_platform.c). When disabled
+	  (default), only error messages (AMDRNPU_ERR) are printed.

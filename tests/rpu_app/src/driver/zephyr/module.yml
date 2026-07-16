@@ -1,4 +1,4 @@
-name: tessai_rpu_driver
+name: amdrnpu_rpu_driver
 build:
   cmake: .
   kconfig: Kconfig

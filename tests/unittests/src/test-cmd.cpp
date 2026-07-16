@@ -3,12 +3,12 @@
 //
 // End-to-end command submission tests that DO involve a BO in args[0]
 // or burst sequencing. Heavier than test-basic.cpp's submit-only flow
-// because each test pulls in alloc / mmap / TESSAI_BUF_SYNC.
+// because each test pulls in alloc / mmap / AMDRNPU_BUF_SYNC.
 //
 // Tests in this file:
-//   - TessaiAgentCmd.FwEchoWriteback           (whole-BO writeback round trip)
-//   - TessaiAgentCmd.BurstSequentialSubmit     (16 sequential submits)
-//   - TessaiAgentCmd.DeviceShmemAddrRoundTrip  (1 GB DEVICE-bank PA echoed
+//   - AmdrnpuCmd.FwEchoWriteback           (whole-BO writeback round trip)
+//   - AmdrnpuCmd.BurstSequentialSubmit     (16 sequential submits)
+//   - AmdrnpuCmd.DeviceShmemAddrRoundTrip  (1 GB DEVICE-bank PA echoed
 //                                               back via a small carveout
 //                                               response BO; proves the wire
 //                                               carries the kernel-patched
@@ -22,9 +22,9 @@
 #include <cstdio>
 #include <iostream>
 
-using namespace tessai_test;
+using namespace amdrnpu_test;
 
-class TessaiAgentCmd : public TessaiAgentTest {};
+class AmdrnpuCmd : public AmdrnpuTest {};
 
 // ---- fw_echo writeback round-trip ----------------------------------
 
@@ -36,10 +36,10 @@ class TessaiAgentCmd : public TessaiAgentTest {};
 // is mandatory: skipping FROM_DEVICE is the textbook reason for
 // "RPU said it wrote, but I still see the canary fill". The
 // historical sscanf-miss failure mode was a missing FROM_DEVICE.
-TEST_F(TessaiAgentCmd, FwEchoWriteback)
+TEST_F(AmdrnpuCmd, FwEchoWriteback)
 {
 	uint32_t bo = 0;
-	ASSERT_EQ(do_buf_alloc(fd_, TESSAI_MEMORY_RPU, kFwRspBoSize, &bo), 0);
+	ASSERT_EQ(do_buf_alloc(fd_, AMDRNPU_MEMORY_RPU, kFwRspBoSize, &bo), 0);
 
 	uint64_t off = 0;
 	ASSERT_EQ(do_map_dumb(fd_, bo, &off), 0);
@@ -49,9 +49,9 @@ TEST_F(TessaiAgentCmd, FwEchoWriteback)
 	ASSERT_NE(map, MAP_FAILED);
 	std::memset(map, 0x0a, kFwRspBoSize);  // canary fill
 
-	ASSERT_EQ(do_buf_sync(fd_, bo, TESSAI_BUF_SYNC_TO_DEVICE, 0, 0), 0);
+	ASSERT_EQ(do_buf_sync(fd_, bo, AMDRNPU_BUF_SYNC_TO_DEVICE, 0, 0), 0);
 
-	std::array<struct tessai_arg, 3> args{};
+	std::array<struct amdrnpu_arg, 3> args{};
 	args[0].size = kFwRspTextMax;
 	args[0].bo.drm_buffer_handle = static_cast<int32_t>(bo);
 	args[0].bo.offset = 0;
@@ -67,7 +67,7 @@ TEST_F(TessaiAgentCmd, FwEchoWriteback)
 	ASSERT_NE(syncobj, 0u);
 
 	ASSERT_EQ(do_syncobj_wait(fd_, syncobj, kSubmitTimeoutNs), 0);
-	ASSERT_EQ(do_buf_sync(fd_, bo, TESSAI_BUF_SYNC_FROM_DEVICE, 0, 0), 0);
+	ASSERT_EQ(do_buf_sync(fd_, bo, AMDRNPU_BUF_SYNC_FROM_DEVICE, 0, 0), 0);
 
 	unsigned int rpu_cid = 0;
 	unsigned int rpu_nargs = 0;
@@ -100,7 +100,7 @@ TEST_F(TessaiAgentCmd, FwEchoWriteback)
 // load and that the firmware can keep up. Latency printout helps spot
 // regressions in the RPMsg round-trip (a 10x slowdown means something
 // is competing for the mailbox).
-TEST_F(TessaiAgentCmd, BurstSequentialSubmit)
+TEST_F(AmdrnpuCmd, BurstSequentialSubmit)
 {
 	constexpr int kBurstCount = 16;
 	uint64_t t0 = now_ns();
@@ -123,7 +123,7 @@ TEST_F(TessaiAgentCmd, BurstSequentialSubmit)
 
 // ---- DEVICE-bank PA round trip (DAPP) -------------------------------
 
-// Allocates a large BO from TESSAI_MEMORY_DEVICE (1 GiB target, halving
+// Allocates a large BO from AMDRNPU_MEMORY_DEVICE (1 GiB target, halving
 // fallback down to 1 MiB), asks the RPU to acknowledge having received
 // the kernel-patched PA + size, and verifies the round-tripped value.
 // The point of this test is the asymmetry: device shmem (linux,cma-default
@@ -154,14 +154,14 @@ TEST_F(TessaiAgentCmd, BurstSequentialSubmit)
 //   - EVERY size from 1 GiB down to 1 MiB fails with -EINVAL/-ENOMEM
 //     -> almost certainly a bank-setup regression; SKIP with a
 //     diagnostic pointing at the dts + dmesg. (The companion test
-//     TessaiAgentMemory.BufAllocDeviceBank asks for only 1 MiB and
+//     AmdrnpuMemory.BufAllocDeviceBank asks for only 1 MiB and
 //     should also be failing in that case.)
 //   - Some non-1-GiB size succeeded -> we use it and proceed; the
 //     wire round-trip is identical at any size, only the "asked
 //     for 1 GiB" target is missed and that's logged to stdout.
 //   - Wait signals COMPLETE but the banner is absent -> firmware
 //     on the board pre-dates DAPP; print the bytes-dump and SKIP
-//     with a "rebuild tessai_agent_endpoint.c" pointer.
+//     with a "rebuild amdrnpu_endpoint.c" pointer.
 //
 // Strict assertions (these are the actual end-to-end contract):
 //   - sscanf matches all three fields of the canonical banner
@@ -171,8 +171,8 @@ TEST_F(TessaiAgentCmd, BurstSequentialSubmit)
 //   - size equals what userspace asked the kernel to allocate
 //   - the carveout BO outside the banner is untouched (we pre-fill
 //     0xCC and check the trailing bytes survived; sentinel that the
-//     RPU honored TESSAI_FW_DAPP_BANNER_MAX)
-TEST_F(TessaiAgentCmd, DeviceShmemAddrRoundTrip)
+//     RPU honored AMDRNPU_FW_DAPP_BANNER_MAX)
+TEST_F(AmdrnpuCmd, DeviceShmemAddrRoundTrip)
 {
 	// --- alloc the (potentially huge) device-shmem BO -----------
 	// Adaptive size: try 1 GiB first (the target the user named),
@@ -186,7 +186,7 @@ TEST_F(TessaiAgentCmd, DeviceShmemAddrRoundTrip)
 	//                                            and the dma_alloc path works.
 	//   - even 1 MiB fails with EINVAL/ENOMEM -> bank-setup regression
 	//                                            (buffer@50000000000 wasn't
-	//                                            wired to TESSAI_MEMORY_DEVICE,
+	//                                            wired to AMDRNPU_MEMORY_DEVICE,
 	//                                            or of_reserved_mem_device_init
 	//                                            silently failed). SKIP loudly.
 	//   - any other errno on any size         -> hard FAIL; that's a real bug
@@ -212,7 +212,7 @@ TEST_F(TessaiAgentCmd, DeviceShmemAddrRoundTrip)
 	const char *device_bo_label = nullptr;
 	int last_rc = -EINVAL;
 	for (const auto &a : kAttempts) {
-		int rc = do_buf_alloc(fd_, TESSAI_MEMORY_DEVICE,
+		int rc = do_buf_alloc(fd_, AMDRNPU_MEMORY_DEVICE,
 				      a.size, &dev_bo);
 		if (rc == 0) {
 			device_bo_size = a.size;
@@ -231,7 +231,7 @@ TEST_F(TessaiAgentCmd, DeviceShmemAddrRoundTrip)
 		// from of_reserved_mem missing). Surface immediately
 		// instead of marching down to 1 MiB and silently SKIPping.
 		ASSERT_TRUE(rc == -EINVAL || rc == -ENOMEM)
-			<< "TESSAI_MEMORY_DEVICE " << a.label
+			<< "AMDRNPU_MEMORY_DEVICE " << a.label
 			<< " alloc failed with unexpected errno " << rc
 			<< "; expected only -EINVAL/-ENOMEM (CMA-short).";
 	}
@@ -243,7 +243,7 @@ TEST_F(TessaiAgentCmd, DeviceShmemAddrRoundTrip)
 		// certainly a bank-setup regression. SKIP rather than FAIL
 		// so the suite stays green on broken-but-not-our-fault
 		// rootfs/dts combos, but make the diagnostic loud.
-		GTEST_SKIP() << "TESSAI_MEMORY_DEVICE alloc failed at EVERY "
+		GTEST_SKIP() << "AMDRNPU_MEMORY_DEVICE alloc failed at EVERY "
 				"size from 1 GiB down to 1 MiB (last errno="
 			     << last_rc << "). The DEVICE bank is probably "
 				"not registered correctly -- check (a) the "
@@ -253,8 +253,8 @@ TEST_F(TessaiAgentCmd, DeviceShmemAddrRoundTrip)
 				"on the board with 'hexdump -C /proc/device-"
 				"tree/reserved-memory/buffer@50000000000/"
 				"reg') AND carries the explicit phandle = "
-				"<0x01>; that the tessai-agent node binds to, "
-				"(b) that bank@1 in the tessai-agent node has "
+				"<0x01>; that the amdrnpu node binds to, "
+				"(b) that bank@1 in the amdrnpu node has "
 				"memory-region = <0x01> (the numeric phandle, "
 				"not a &label reference -- the official "
 				"Versal-net pool is unlabeled), and (c) dmesg "
@@ -284,7 +284,7 @@ TEST_F(TessaiAgentCmd, DeviceShmemAddrRoundTrip)
 
 	// --- alloc the small RPU-bank response carveout -------------
 	uint32_t ack_bo = 0;
-	ASSERT_EQ(do_buf_alloc(fd_, TESSAI_MEMORY_RPU, kFwRspBoSize,
+	ASSERT_EQ(do_buf_alloc(fd_, AMDRNPU_MEMORY_RPU, kFwRspBoSize,
 			       &ack_bo), 0);
 
 	uint64_t ack_off = 0;
@@ -301,14 +301,14 @@ TEST_F(TessaiAgentCmd, DeviceShmemAddrRoundTrip)
 	// obvious in the bytes dump below.
 	std::memset(ack_base, 0xCC, kFwRspBoSize);
 
-	ASSERT_EQ(do_buf_sync(fd_, ack_bo, TESSAI_BUF_SYNC_TO_DEVICE,
+	ASSERT_EQ(do_buf_sync(fd_, ack_bo, AMDRNPU_BUF_SYNC_TO_DEVICE,
 			      0, 0), 0);
 
 	// --- build wire args ----------------------------------------
 	// args[0] = ack carveout BO; .size=kFwDappBannerMax asserts
 	//           kernel-side that the BO is large enough to hold
 	//           the banner (cheap u64 compare in
-	//           tessai_resolve_args).
+	//           amdrnpu_resolve_args).
 	// args[1] = device-shmem BO; .size=device_bo_size asserts the
 	//           BO actually covers the full claimed region. Kernel
 	//           does NOT pin or scatterlist-walk on this -- it's a
@@ -324,9 +324,9 @@ TEST_F(TessaiAgentCmd, DeviceShmemAddrRoundTrip)
 	// largest table entry catches anyone who bumps kAttempts past
 	// 4 GiB - 1 without revisiting the u32 truncation here.
 	static_assert(kAttempts[0].size <= 0xFFFFFFFFull,
-		      "tessai_arg.size is u32; bump the kAttempts table "
+		      "amdrnpu_arg.size is u32; bump the kAttempts table "
 		      "logic if you ever raise the top entry past 4 GiB - 1");
-	std::array<struct tessai_arg, 3> args{};
+	std::array<struct amdrnpu_arg, 3> args{};
 	args[0].size = kFwDappBannerMax;
 	args[0].bo.drm_buffer_handle = static_cast<int32_t>(ack_bo);
 	args[0].bo.offset = 0;
@@ -349,7 +349,7 @@ TEST_F(TessaiAgentCmd, DeviceShmemAddrRoundTrip)
 	// --- pull the banner back ------------------------------------
 	// FROM_DEVICE on the carveout brings the RPU's writes into the
 	// APU's dcache view. Same discipline as FwEchoWriteback.
-	ASSERT_EQ(do_buf_sync(fd_, ack_bo, TESSAI_BUF_SYNC_FROM_DEVICE,
+	ASSERT_EQ(do_buf_sync(fd_, ack_bo, AMDRNPU_BUF_SYNC_FROM_DEVICE,
 			      0, 0), 0);
 
 	// --- parse + assert ------------------------------------------
@@ -376,10 +376,10 @@ TEST_F(TessaiAgentCmd, DeviceShmemAddrRoundTrip)
 		std::cerr << std::endl;
 		GTEST_SKIP() << "RPU did not write the DAPP banner; firmware "
 				"on the board likely pre-dates "
-				"TESSAI_FW_OP_DEVICE_ADDR_PING. Re-flash with "
+				"AMDRNPU_FW_OP_DEVICE_ADDR_PING. Re-flash with "
 				"a RPURuntime build that has "
-				"tessai_fw_device_addr_ping() in "
-				"src/driver/src/tessai_agent_endpoint.c.";
+				"amdrnpu_fw_device_addr_ping() in "
+				"src/driver/src/amdrnpu_endpoint.c.";
 	}
 
 	std::cout << "  DAPP echo: pa=0x" << std::hex << rpu_pa

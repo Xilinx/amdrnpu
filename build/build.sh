@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 #
-# tessai-agent unified build orchestrator.
+# amdrnpu unified build orchestrator.
 #
 # Builds all deliverables, out-of-source, into build/<TYPE>/:
-#   - drivers/accel/tessai-agent/ -> tessai_agent.ko        (kernel module)
-#   - lib/                        -> libtessai_agent.{so*,a}
-#   - lib/examples/               -> tessai_agent_test      (CLI)
-#                                    tessai_agent_inout_example (CLI;
+#   - drivers/accel/tessai-agent/ -> amdrnpu.ko        (kernel module)
+#   - lib/                        -> libamdrnpu.{so*,a}
+#   - lib/examples/               -> amdrnpu_test      (CLI)
+#                                    amdrnpu_inout_example (CLI;
 #                                    COPY_IN_OUT smoke test)
-#                                    tessai_agent_xrt_test_example (CLI;
+#                                    amdrnpu_xrt_test_example (CLI;
 #                                    APU_XRT_TEST full XRT end-to-end)
-#   - tests/unittests/            -> tessai_agent_unittest  (gtest-based
+#   - tests/unittests/            -> amdrnpu_unittest  (gtest-based
 #                                    Link A acceptance suite; skip the
 #                                    tests/ phase entirely with
 #                                    -no-tests; the gtest binary
@@ -41,12 +41,12 @@
 #
 # Output layout (per build):
 #   build/<TYPE>/driver/    final .ko
-#   build/<TYPE>/lib/       libtessai_agent.{so*,a}
-#   build/<TYPE>/bin/       tessai_agent_test
-#                           tessai_agent_inout_example
-#                           tessai_agent_xrt_test_example
-#                           tessai_agent_echo_latency_example
-#                           tessai_agent_unittest         (only with -unit_tests)
+#   build/<TYPE>/lib/       libamdrnpu.{so*,a}
+#   build/<TYPE>/bin/       amdrnpu_test
+#                           amdrnpu_inout_example
+#                           amdrnpu_xrt_test_example
+#                           amdrnpu_echo_latency_example
+#                           amdrnpu_unittest         (only with -unit_tests)
 #   build/<TYPE>/obj/       kbuild mirror: directories are real, source
 #                           files are symlinks back into the repo,
 #                           kbuild outputs (.o, .ko, .mod*, .cmd) are
@@ -83,7 +83,7 @@ SYSROOT=""           # -sysroot, used by -cross-vitis lib step
 YOCTO_BUILD=""       # -cross-yocto PATH
 YOCTO_MACHINE=""     # -yocto-machine override
 BUILD_TESTS=1        # build tests/ tree (-no-tests to skip)
-BUILD_UNITTESTS=0    # gtest tessai_agent_unittest (-unit_tests to opt in)
+BUILD_UNITTESTS=0    # gtest amdrnpu_unittest (-unit_tests to opt in)
 
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
 log()  { printf "${GREEN}[build]${NC} %s\n" "$*"; }
@@ -146,12 +146,12 @@ Options:
   -no-strip-dirty      Skip the post-build vermagic '-dirty' strip
                        (cross modes only).
   -no-tests            Skip the tests/ target entirely (the gtest
-                       tessai_agent_unittest Link A acceptance
+                       amdrnpu_unittest Link A acceptance
                        suite). On by default; this flag is mostly
                        for fast iteration when only the lib or kmod
                        changed.
   -unit_tests          Also build tests/unittests/ (gtest-based
-                       tessai_agent_unittest). OFF by default because
+                       amdrnpu_unittest). OFF by default because
                        it needs a C++17 cross toolchain + a sysroot
                        with libstdc++ + a complete bits/ tree
                        (some cross sysroots ship aarch64-only
@@ -163,13 +163,13 @@ Options:
                        to the matching cross g++.
 
 Outputs (per build):
-  build/<TYPE>/driver/tessai_agent.ko
-  build/<TYPE>/lib/libtessai_agent.{so*,a}
-  build/<TYPE>/bin/tessai_agent_test
-  build/<TYPE>/bin/tessai_agent_inout_example
-  build/<TYPE>/bin/tessai_agent_xrt_test_example
-  build/<TYPE>/bin/tessai_agent_echo_latency_example
-  build/<TYPE>/bin/tessai_agent_unittest (only with -unit_tests; needs C++17)
+  build/<TYPE>/driver/amdrnpu.ko
+  build/<TYPE>/lib/libamdrnpu.{so*,a}
+  build/<TYPE>/bin/amdrnpu_test
+  build/<TYPE>/bin/amdrnpu_inout_example
+  build/<TYPE>/bin/amdrnpu_xrt_test_example
+  build/<TYPE>/bin/amdrnpu_echo_latency_example
+  build/<TYPE>/bin/amdrnpu_unittest (only with -unit_tests; needs C++17)
 EOF
 }
 
@@ -293,7 +293,7 @@ elif [ "$CROSS_YOCTO" -eq 1 ]; then
     # because gcc looks for as/ld next to itself via a path that only
     # exists post-merge. Prefer recipes we know exist.
     NATIVE_SYSROOT=""
-    for recipe in tessai-agent-mod tessai-agent-lib amdxdna; do
+    for recipe in amdrnpu-mod amdrnpu-lib amdxdna; do
         cand="$YOCTO_BUILD/tmp/work/${M_USCORE}-amd-linux/$recipe"
         [ -d "$cand" ] || continue
         cand=$(ls -d "$cand"/*/recipe-sysroot-native 2>/dev/null | head -1) || true
@@ -359,7 +359,7 @@ else
 fi
 
 mkdir -p "$OUT/driver" "$OUT/lib" "$OUT/bin"
-log "tessai-agent build"
+log "amdrnpu build"
 if [ "$CROSS_VITIS" -eq 1 ]; then
     log "  Mode:         cross-vitis aarch64"
 elif [ "$CROSS_YOCTO" -eq 1 ]; then
@@ -387,7 +387,7 @@ echo
 
 # ---------- kernel module phase ----------
 build_kmod() {
-    log "Building tessai-agent kernel module"
+    log "Building amdrnpu kernel module"
 
     # cp -rs: directories real, files symlinked. kbuild writes its outputs
     # (.o, .ko, .mod*, .cmd, Module.symvers, modules.order) as real files
@@ -430,19 +430,19 @@ build_kmod() {
             | grep -E '^(  CC|  LD|  MODPOST|ERROR|make.*Error|WARNING)' \
             || true
 
-    [ -f "$MIRROR_M/tessai_agent.ko" ] \
-        || die "tessai_agent.ko was not produced (see $OUT/build-kmod.log)"
+    [ -f "$MIRROR_M/amdrnpu.ko" ] \
+        || die "amdrnpu.ko was not produced (see $OUT/build-kmod.log)"
 
-    cp -f "$MIRROR_M/tessai_agent.ko" "$OUT/driver/"
+    cp -f "$MIRROR_M/amdrnpu.ko" "$OUT/driver/"
 
     if [ "$CROSS" -eq 1 ] && [ "$STRIP_DIRTY" -eq 1 ]; then
         python3 "$STRIP_DIRTY_PY" \
-            "$OUT/driver/tessai_agent.ko" >"$OUT/strip-dirty.log" 2>&1 \
+            "$OUT/driver/amdrnpu.ko" >"$OUT/strip-dirty.log" 2>&1 \
             || { cat "$OUT/strip-dirty.log" >&2; die "vermagic strip failed"; }
     fi
 
-    log "  -> $OUT/driver/tessai_agent.ko"
-    /usr/sbin/modinfo "$OUT/driver/tessai_agent.ko" 2>/dev/null \
+    log "  -> $OUT/driver/amdrnpu.ko"
+    /usr/sbin/modinfo "$OUT/driver/amdrnpu.ko" 2>/dev/null \
         | grep -E '^(filename|version|description|vermagic|alias|depends):' \
         || true
     echo
@@ -456,7 +456,7 @@ build_lib() {
         -S "$REPO/lib"
         -B "$OUT/cmake-lib"
         -DCMAKE_BUILD_TYPE=Release
-        -DTESSAI_AGENT_LIB_BUILD_EXAMPLES=ON
+        -DAMDRNPU_LIB_BUILD_EXAMPLES=ON
     )
     local cmake_env=()
 
@@ -473,7 +473,7 @@ build_lib() {
             -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY
             -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY
             -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY
-            -DTESSAI_AGENT_LINK_EXAMPLES_STATIC=ON
+            -DAMDRNPU_LINK_EXAMPLES_STATIC=ON
         )
         [ -n "$CROSS_EXTRA_CFLAGS" ] && cmake_args+=(
             -DCMAKE_C_FLAGS="$CROSS_EXTRA_CFLAGS"
@@ -497,10 +497,10 @@ build_lib() {
         | grep -E '^\[|error:|Error|warning:' || true
 
     shopt -s nullglob
-    local libs=( "$OUT/cmake-lib"/libtessai_agent.so* "$OUT/cmake-lib"/libtessai_agent.a )
+    local libs=( "$OUT/cmake-lib"/libamdrnpu.so* "$OUT/cmake-lib"/libamdrnpu.a )
     shopt -u nullglob
     [ "${#libs[@]}" -gt 0 ] \
-        || die "no libtessai_agent.* produced (see $OUT/cmake-build.log)"
+        || die "no libamdrnpu.* produced (see $OUT/cmake-build.log)"
     cp -af "${libs[@]}" "$OUT/lib/"
 
     # Copy every example listed in lib/CMakeLists.txt _tess_examples into
@@ -510,10 +510,10 @@ build_lib() {
     # artifact set. Must stay in lockstep with _tess_examples in
     # lib/CMakeLists.txt.
     local examples=(
-        tessai_agent_test
-        tessai_agent_inout_example
-        tessai_agent_xrt_test_example
-        tessai_agent_echo_latency_example
+        amdrnpu_test
+        amdrnpu_inout_example
+        amdrnpu_xrt_test_example
+        amdrnpu_echo_latency_example
     )
     for _exe in "${examples[@]}"; do
         [ -f "$OUT/cmake-lib/$_exe" ] \
@@ -527,16 +527,16 @@ build_lib() {
 }
 
 # ---------- userspace tests phase ----------
-# Build tests/unittests/tessai_agent_unittest (Link A acceptance
+# Build tests/unittests/amdrnpu_unittest (Link A acceptance
 # suite). The parent tests/ CMake project itself only contains the
-# gate flag (TESSAI_AGENT_BUILD_UNITTESTS) and the add_subdirectory
+# gate flag (AMDRNPU_BUILD_UNITTESTS) and the add_subdirectory
 # call -- there is no longer a standalone C smoke binary, so without
 # -unit_tests the tests/ phase is effectively a no-op configure pass
 # kept solely for symmetry with -no-tests.
 #
 # The gtest binary itself is libdrm-free -- it only depends on the
 # kernel UAPI headers (drm/, linux/sync_file) and this repo's
-# include/uapi/tessai-agent/tessai_agent.h, plus a C++17 toolchain
+# include/uapi/amdrnpu/amdrnpu.h, plus a C++17 toolchain
 # (libstdc++ <chrono>/<thread>/<atomic>/<filesystem>). In cross
 # modes we still need a SYSROOT to find the kernel UAPI headers.
 build_tests() {
@@ -555,14 +555,14 @@ build_tests() {
         -S "$REPO/tests"
         -B "$OUT/cmake-tests"
         -DCMAKE_BUILD_TYPE=Release
-        -DTESSAI_AGENT_BUILD_UNITTESTS=ON
+        -DAMDRNPU_BUILD_UNITTESTS=ON
         # Auto-stage on every link so incremental rebuilds
         # (`make -C $OUT/cmake-tests/unittests`) keep $OUT/bin/
         # in sync without needing a full ./build/build.sh
         # re-run. boot_vek385.py reads $OUT/bin/, so a stale
         # staged copy is an easy way to chase a "but I just fixed
         # that!" ghost (the new binary builds, the OLD one runs).
-        -DTESSAI_AGENT_STAGE_BIN_DIR="$OUT/bin"
+        -DAMDRNPU_STAGE_BIN_DIR="$OUT/bin"
     )
     local cmake_env=()
 
@@ -595,11 +595,11 @@ build_tests() {
         | tee "$OUT/cmake-tests-build.log" \
         | grep -E '^\[|error:|Error|warning:' || true
 
-    if [ -f "$OUT/cmake-tests/unittests/tessai_agent_unittest" ]; then
-        cp -f "$OUT/cmake-tests/unittests/tessai_agent_unittest" "$OUT/bin/"
-        log "  -> $OUT/bin/tessai_agent_unittest"
+    if [ -f "$OUT/cmake-tests/unittests/amdrnpu_unittest" ]; then
+        cp -f "$OUT/cmake-tests/unittests/amdrnpu_unittest" "$OUT/bin/"
+        log "  -> $OUT/bin/amdrnpu_unittest"
     else
-        die "tessai_agent_unittest was not produced (see $OUT/cmake-tests-build.log). \
+        die "amdrnpu_unittest was not produced (see $OUT/cmake-tests-build.log). \
 Did you run: git submodule update --init --recursive ?"
     fi
 
@@ -609,7 +609,7 @@ Did you run: git submodule update --init --recursive ?"
         log "  Bundled RPU firmware: $REPO/tests/rpu_app/zephyr/build/zephyr/zephyr.elf"
     else
         warn "  tests/rpu_app/zephyr/build/zephyr/zephyr.elf is missing"
-        warn "  (rebuild it from tests/rpu_app/ via: cd tests/rpu_app && ./build.sh tests/tessai_agent_test)"
+        warn "  (rebuild it from tests/rpu_app/ via: cd tests/rpu_app && ./build.sh tests/amdrnpu)"
     fi
     echo
 }
@@ -620,6 +620,6 @@ build_lib
 build_tests
 
 log "Done. Artifacts under $OUT/:"
-log "  driver/tessai_agent.ko"
+log "  driver/amdrnpu.ko"
 for f in $(ls -1 "$OUT/lib/"); do log "  lib/$f"; done
 for f in $(ls -1 "$OUT/bin/"); do log "  bin/$f"; done

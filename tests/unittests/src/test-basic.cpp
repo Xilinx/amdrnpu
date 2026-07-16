@@ -5,12 +5,12 @@
 // a BO, a sync_file, or a fault opcode lives here.
 //
 // Tests in this file:
-//   - TessaiAgentBasic.DriverNameIsTessaiAgent  (drm_get_name probe)
-//   - TessaiAgentBasic.NoopSubmit               (num_args=0 round trip)
-//   - TessaiAgentBasic.ScalarArgsSubmit         (scalar __u64 args)
-//   - TessaiAgentBasic.FwEchoOpSubmitScalarOnly (0x42424242 dispatch)
+//   - AmdrnpuBasic.DriverNameIsAmdrnpu  (drm_get_name probe)
+//   - AmdrnpuBasic.NoopSubmit               (num_args=0 round trip)
+//   - AmdrnpuBasic.ScalarArgsSubmit         (scalar __u64 args)
+//   - AmdrnpuBasic.FwEchoOpSubmitScalarOnly (0x42424242 dispatch)
 // Plus the hip-style multi-threaded variant:
-//   - TessaiAgentBasicStandalone.NoopSubmitMultiThreaded
+//   - AmdrnpuBasicStandalone.NoopSubmitMultiThreaded
 
 #include "common.h"
 
@@ -18,29 +18,29 @@
 #include <atomic>
 #include <thread>
 
-using namespace tessai_test;
+using namespace amdrnpu_test;
 
 // Per-file fixture alias keeps the gtest suite name unique
-// (--gtest_filter=TessaiAgentBasic.*) while inheriting SetUp/TearDown
-// from TessaiAgentTest. Same idiom in every test-*.cpp here.
-class TessaiAgentBasic : public TessaiAgentTest {};
+// (--gtest_filter=AmdrnpuBasic.*) while inheriting SetUp/TearDown
+// from AmdrnpuTest. Same idiom in every test-*.cpp here.
+class AmdrnpuBasic : public AmdrnpuTest {};
 
-TEST_F(TessaiAgentBasic, DriverNameIsTessaiAgent)
+TEST_F(AmdrnpuBasic, DriverNameIsAmdrnpu)
 {
-	// Sanity check the fixture: open_tessai_card has already verified
-	// drm_get_name == TESSAI_AGENT_DRIVER_NAME, but re-probe here so a
+	// Sanity check the fixture: open_amdrnpu_card has already verified
+	// drm_get_name == AMDRNPU_DRIVER_NAME, but re-probe here so a
 	// regression in the discovery loop surfaces as a per-test failure
 	// instead of a fleet-wide GTEST_SKIP.
 	char name[64] = {};
 	ASSERT_EQ(drm_get_name(fd_, name, sizeof(name)), 0);
-	ASSERT_STREQ(name, TESSAI_AGENT_DRIVER_NAME);
+	ASSERT_STREQ(name, AMDRNPU_DRIVER_NAME);
 }
 
 // ---- smallest possible round-trip ---------------------------------
 
-TEST_F(TessaiAgentBasic, NoopSubmit)
+TEST_F(AmdrnpuBasic, NoopSubmit)
 {
-	// 16-byte tessai_wire_cmd request, 24-byte tessai_rsp_wire_hdr
+	// 16-byte amdrnpu_wire_cmd request, 24-byte amdrnpu_rsp_wire_hdr
 	// response. Validates channel-up + COMPLETE shape.
 	uint32_t syncobj = 0;
 	ASSERT_EQ(do_cmd_submit(fd_, 0xCAFEBABEu, nullptr, 0, &syncobj), 0);
@@ -51,11 +51,11 @@ TEST_F(TessaiAgentBasic, NoopSubmit)
 
 // ---- scalar args pass-through -------------------------------------
 
-TEST_F(TessaiAgentBasic, ScalarArgsSubmit)
+TEST_F(AmdrnpuBasic, ScalarArgsSubmit)
 {
-	// Validates tessai_resolve_args's "size==0 -> cpu_to_le64(value)"
+	// Validates amdrnpu_resolve_args's "size==0 -> cpu_to_le64(value)"
 	// path: scalar args traverse the driver without GEM lookups.
-	std::array<struct tessai_arg, 2> args{};
+	std::array<struct amdrnpu_arg, 2> args{};
 	args[0].size  = 0;
 	args[0].value = 0xC0FFEE0011223344ull;
 	args[1].size  = 0;
@@ -72,13 +72,13 @@ TEST_F(TessaiAgentBasic, ScalarArgsSubmit)
 
 // ---- fw_echo magic op without writeback ---------------------------
 
-TEST_F(TessaiAgentBasic, FwEchoOpSubmitScalarOnly)
+TEST_F(AmdrnpuBasic, FwEchoOpSubmitScalarOnly)
 {
 	// Firmware doesn't writeback when args[0] is scalar (no carveout
 	// dma_addr); only the COMPLETE path is exercised here. The
 	// full writeback round trip lives in test-cmd.cpp
-	// (TessaiAgentCmd.FwEchoWriteback).
-	std::array<struct tessai_arg, 2> args{};
+	// (AmdrnpuCmd.FwEchoWriteback).
+	std::array<struct amdrnpu_arg, 2> args{};
 	args[0].size  = 0;
 	args[0].value = 0xDEADBEEFCAFE0001ull;
 	args[1].size  = 0;
@@ -98,18 +98,18 @@ TEST_F(TessaiAgentBasic, FwEchoOpSubmitScalarOnly)
 // Mirrors HipXrtDevice.HipXrtDeviceInfoBasic's "spin N threads, each
 // runs the basic flow, join all" idiom. Each thread opens its OWN fd
 // so we exercise multi-client open/close in addition to multi-thread
-// submit. Lives in its own suite (TessaiAgentBasicStandalone) because
+// submit. Lives in its own suite (AmdrnpuBasicStandalone) because
 // gtest forbids mixing TEST_F and TEST within the same suite name.
 //
 // SKIP must be raised from the main test thread; child threads that
 // call GTEST_SKIP just exit the lambda silently and the parent test
 // reports PASS even though nothing ran. Probe the device once up
 // front, skip in main if absent, then launch workers.
-TEST(TessaiAgentBasicStandalone, NoopSubmitMultiThreaded)
+TEST(AmdrnpuBasicStandalone, NoopSubmitMultiThreaded)
 {
-	int probe_fd = open_tessai_card();
+	int probe_fd = open_amdrnpu_card();
 	if (probe_fd < 0)
-		GTEST_SKIP() << "tessai-agent DRM card not found";
+		GTEST_SKIP() << "amdrnpu DRM card not found";
 	::close(probe_fd);
 
 	constexpr int kNumThreads = 4;
@@ -117,7 +117,7 @@ TEST(TessaiAgentBasicStandalone, NoopSubmitMultiThreaded)
 	std::array<std::thread, kNumThreads> threads;
 	for (int i = 0; i < kNumThreads; ++i) {
 		threads[i] = std::thread([&] {
-			int fd = open_tessai_card();
+			int fd = open_amdrnpu_card();
 			if (fd < 0) { ++fails; return; }
 			uint32_t syncobj = 0;
 			if (do_cmd_submit(fd, 0xC0FFEE00u, nullptr, 0,

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 #
-# tessai-agent gtest-based unit testsuite.
+# amdrnpu gtest-based unit testsuite.
 #
 # Layout (mirrors testcases-v2/unittests/):
 #
@@ -9,8 +9,8 @@
 #   ├── CMakeLists.txt          # this file
 #   ├── common/                 # utest_common: KB/MB macros, page size,
 #   │                           # deterministic buffer fill/verify
-#   ├── src/                    # tessai-specific helpers + test-*.cpp
-#   │   ├── common.h            # ioctl wrappers + TessaiAgentTest fixture
+#   ├── src/                    # amdrnpu-specific helpers + test-*.cpp
+#   │   ├── common.h            # ioctl wrappers + AmdrnpuTest fixture
 #   │   ├── common.cpp
 #   │   ├── test-basic.cpp      # noop/scalar submit, channel-up smoke
 #   │   ├── test-device.cpp     # version probe, multi-fd open/close
@@ -27,7 +27,7 @@
 #   1. From the parent tests/ tree via build/build.sh (default ON):
 #        ./build/build.sh                          # native
 #        ./build/build.sh -cross-yocto YOCTO       # cross
-#      Disable with TESSAI_AGENT_BUILD_UNITTESTS=0 (env or -D).
+#      Disable with AMDRNPU_BUILD_UNITTESTS=0 (env or -D).
 #
 #   2. Standalone via cmake -S:
 #        cmake -S tests/unittests -B build/utest
@@ -37,12 +37,12 @@
 #   3. Added as add_subdirectory() from tests/CMakeLists.txt when the
 #      unittests/ subtree exists (parent script does this automatically).
 #
-# Test binary: tessai_agent_unittest. Uses gtest_discover_tests so each
+# Test binary: amdrnpu_unittest. Uses gtest_discover_tests so each
 # TEST() shows up as its own ctest case.
 
 cmake_minimum_required(VERSION 3.16)
 
-project(tessai_agent_unittests
+project(amdrnpu_unittests
 	VERSION 0.1.0
 	LANGUAGES CXX
 )
@@ -58,13 +58,13 @@ endif()
 
 # UAPI override -- defaults to the in-repo headers but lets a packager
 # (Yocto, distro) point at an installed include dir instead.
-set(TESSAI_AGENT_UAPI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../include/uapi"
-	CACHE PATH "tessai-agent UAPI directory")
+set(AMDRNPU_UAPI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../include/uapi"
+	CACHE PATH "amdrnpu UAPI directory")
 
-if(NOT EXISTS "${TESSAI_AGENT_UAPI_DIR}/tessai-agent/tessai_agent.h")
+if(NOT EXISTS "${AMDRNPU_UAPI_DIR}/amdrnpu/amdrnpu.h")
 	message(FATAL_ERROR
-		"TESSAI_AGENT_UAPI_DIR='${TESSAI_AGENT_UAPI_DIR}' is missing "
-		"tessai-agent/tessai_agent.h.")
+		"AMDRNPU_UAPI_DIR='${AMDRNPU_UAPI_DIR}' is missing "
+		"amdrnpu/amdrnpu.h.")
 endif()
 
 # ---- cross-toolchain libstdc++ header recovery ----------------------
@@ -104,20 +104,20 @@ endif()
 # either swapping sysroots or skipping -unit_tests for this build.
 if(CMAKE_SYSROOT)
 	execute_process(COMMAND "${CMAKE_CXX_COMPILER}" -print-sysroot
-		OUTPUT_VARIABLE _tessai_default_sysroot
+		OUTPUT_VARIABLE _amdrnpu_default_sysroot
 		OUTPUT_STRIP_TRAILING_WHITESPACE
 		ERROR_QUIET)
 	# Resolve symlinks before comparing -- toolchains often print
 	# `bin/../<target>` paths that don't text-match a user-passed
 	# absolute path even when they ultimately point at the same dir.
-	set(_tessai_default_sysroot_real "")
-	if(_tessai_default_sysroot)
-		get_filename_component(_tessai_default_sysroot_real
-			"${_tessai_default_sysroot}" REALPATH)
+	set(_amdrnpu_default_sysroot_real "")
+	if(_amdrnpu_default_sysroot)
+		get_filename_component(_amdrnpu_default_sysroot_real
+			"${_amdrnpu_default_sysroot}" REALPATH)
 	endif()
-	get_filename_component(_tessai_active_sysroot_real
+	get_filename_component(_amdrnpu_active_sysroot_real
 		"${CMAKE_SYSROOT}" REALPATH)
-	if(_tessai_default_sysroot_real STREQUAL _tessai_active_sysroot_real)
+	if(_amdrnpu_default_sysroot_real STREQUAL _amdrnpu_active_sysroot_real)
 		# No override -- compiler will find its own libstdc++ headers
 		# under the default sysroot. Nothing to do.
 	else()
@@ -127,27 +127,27 @@ if(CMAKE_SYSROOT)
 		# after the compiler's -dumpmachine output (e.g. aarch64-
 		# amd-linux, aarch64-linux-gnu).
 		execute_process(COMMAND "${CMAKE_CXX_COMPILER}" -dumpmachine
-			OUTPUT_VARIABLE _tessai_gcc_triple
+			OUTPUT_VARIABLE _amdrnpu_gcc_triple
 			OUTPUT_STRIP_TRAILING_WHITESPACE
 			ERROR_QUIET)
-		file(GLOB _tessai_sysroot_cxx_candidates
+		file(GLOB _amdrnpu_sysroot_cxx_candidates
 			"${CMAKE_SYSROOT}/usr/include/c++/[0-9]*"
-			"${CMAKE_SYSROOT}/usr/include/${_tessai_gcc_triple}/c++/[0-9]*")
-		set(_tessai_sysroot_cxx_inc_root "")
-		foreach(_c IN LISTS _tessai_sysroot_cxx_candidates)
+			"${CMAKE_SYSROOT}/usr/include/${_amdrnpu_gcc_triple}/c++/[0-9]*")
+		set(_amdrnpu_sysroot_cxx_inc_root "")
+		foreach(_c IN LISTS _amdrnpu_sysroot_cxx_candidates)
 			if(IS_DIRECTORY "${_c}"
-			    AND (NOT _tessai_sysroot_cxx_inc_root
-			         OR "${_c}" STRGREATER "${_tessai_sysroot_cxx_inc_root}"))
-				set(_tessai_sysroot_cxx_inc_root "${_c}")
+			    AND (NOT _amdrnpu_sysroot_cxx_inc_root
+			         OR "${_c}" STRGREATER "${_amdrnpu_sysroot_cxx_inc_root}"))
+				set(_amdrnpu_sysroot_cxx_inc_root "${_c}")
 			endif()
 		endforeach()
-		if(_tessai_sysroot_cxx_inc_root)
+		if(_amdrnpu_sysroot_cxx_inc_root)
 			message(STATUS
-				"tessai_agent_unittest: CMAKE_SYSROOT="
+				"amdrnpu_unittest: CMAKE_SYSROOT="
 				"${CMAKE_SYSROOT} differs from compiler default "
-				"(${_tessai_default_sysroot}); restoring libstdc++ "
+				"(${_amdrnpu_default_sysroot}); restoring libstdc++ "
 				"headers from override sysroot via -isystem "
-				"${_tessai_sysroot_cxx_inc_root}/ (and prepending "
+				"${_amdrnpu_sysroot_cxx_inc_root}/ (and prepending "
 				"the sysroot's /usr/include so the matching "
 				"pthread.h takes precedence over GCC's stale "
 				"include-fixed copy).")
@@ -162,19 +162,19 @@ if(CMAKE_SYSROOT)
 			# therefore shadows its stale pthread.h (the
 			# __pthread_cond_s ABI mismatch fix).
 			add_compile_options(
-				"-isystem${_tessai_sysroot_cxx_inc_root}"
-				"-isystem${_tessai_sysroot_cxx_inc_root}/${_tessai_gcc_triple}"
-				"-isystem${_tessai_sysroot_cxx_inc_root}/backward"
+				"-isystem${_amdrnpu_sysroot_cxx_inc_root}"
+				"-isystem${_amdrnpu_sysroot_cxx_inc_root}/${_amdrnpu_gcc_triple}"
+				"-isystem${_amdrnpu_sysroot_cxx_inc_root}/backward"
 				"-isystem${CMAKE_SYSROOT}/usr/include")
 		else()
 			message(FATAL_ERROR
-				"tessai_agent_unittest: -unit_tests + cross sysroot "
+				"amdrnpu_unittest: -unit_tests + cross sysroot "
 				"override (CMAKE_SYSROOT=${CMAKE_SYSROOT}) but the "
 				"sysroot has no C++ headers under usr/include/c++/. "
 				"Either rebuild the sysroot with libstdc++-dev "
 				"installed, drop -unit_tests for this cross build, "
 				"or remove -DCMAKE_SYSROOT and let the toolchain use "
-				"its default sysroot (${_tessai_default_sysroot}).")
+				"its default sysroot (${_amdrnpu_default_sysroot}).")
 		endif()
 	endif()
 endif()
@@ -200,26 +200,26 @@ endif()
 add_subdirectory(common)
 
 # ---- the test binary ------------------------------------------------
-file(GLOB TESSAI_UNITTEST_SRCS
+file(GLOB AMDRNPU_UNITTEST_SRCS
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/test-*.cpp"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/common.cpp"
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/common.h"
 )
 
-add_executable(tessai_agent_unittest ${TESSAI_UNITTEST_SRCS})
+add_executable(amdrnpu_unittest ${AMDRNPU_UNITTEST_SRCS})
 
-target_include_directories(tessai_agent_unittest
+target_include_directories(amdrnpu_unittest
 	PRIVATE
-		${TESSAI_AGENT_UAPI_DIR}
+		${AMDRNPU_UAPI_DIR}
 		${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
-target_compile_options(tessai_agent_unittest PRIVATE
+target_compile_options(amdrnpu_unittest PRIVATE
 	-Wall -Wextra -Wno-unused-parameter
 )
 
 find_package(Threads REQUIRED)
-target_link_libraries(tessai_agent_unittest
+target_link_libraries(amdrnpu_unittest
 	PRIVATE
 		utest_common
 		gtest
@@ -256,36 +256,36 @@ include(GoogleTest)
 # DISCOVERY_TIMEOUT default 5s is fine for a native run; bump for slow
 # cross sysroots that take longer to spin up the binary under qemu.
 if(CMAKE_SYSTEM_PROCESSOR STREQUAL CMAKE_HOST_SYSTEM_PROCESSOR)
-	set(_tessai_gtest_discovery_mode POST_BUILD)
+	set(_amdrnpu_gtest_discovery_mode POST_BUILD)
 else()
-	set(_tessai_gtest_discovery_mode PRE_TEST)
+	set(_amdrnpu_gtest_discovery_mode PRE_TEST)
 	message(STATUS
-		"tessai_agent_unittest: cross-compiling for "
+		"amdrnpu_unittest: cross-compiling for "
 		"${CMAKE_SYSTEM_PROCESSOR} on "
 		"${CMAKE_HOST_SYSTEM_PROCESSOR} -> using PRE_TEST gtest "
 		"discovery (deferred to ctest invocation; build step "
 		"never tries to exec() the target binary).")
 endif()
-gtest_discover_tests(tessai_agent_unittest
-	DISCOVERY_MODE ${_tessai_gtest_discovery_mode}
+gtest_discover_tests(amdrnpu_unittest
+	DISCOVERY_MODE ${_amdrnpu_gtest_discovery_mode}
 	PROPERTIES TIMEOUT 30
 	DISCOVERY_TIMEOUT 30
 )
 
 # ---- install ---------------------------------------------------------
 include(GNUInstallDirs)
-install(TARGETS tessai_agent_unittest
+install(TARGETS amdrnpu_unittest
 	RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
 # ---- auto-stage for build/build.sh ---------------------------------
 # build/build.sh does a one-shot `cp -f cmake-tests/unittests/
-# tessai_agent_unittest $OUT/bin/` at the END of build_tests(), so the
-# very first build wires up $OUT/bin/tessai_agent_unittest for
+# amdrnpu_unittest $OUT/bin/` at the END of build_tests(), so the
+# very first build wires up $OUT/bin/amdrnpu_unittest for
 # deployment to the board. But incremental rebuilds done straight
 # against the cmake-tests subtree (the common "edit a .cpp,
 # `make -C build/<TYPE>/cmake-tests/unittests`" dev loop) skip that
-# stage step, leaving $OUT/bin/tessai_agent_unittest stale.
+# stage step, leaving $OUT/bin/amdrnpu_unittest stale.
 #
 # That asymmetry caused a real bug we want to never see again: a
 # rebuild compiled clean, the dev deployed the staged binary to the
@@ -300,19 +300,19 @@ install(TARGETS tessai_agent_unittest
 # concatenation -- multi-string docstrings break the cache entry in a
 # way that's silent until POST_BUILD interpolation produces a garbled
 # path like "Auto-staging -> ;CACHE;PATH;Directory...".
-set(TESSAI_AGENT_STAGE_BIN_DIR "" CACHE PATH "Directory to auto-stage tessai_agent_unittest into after each link; set by build/build.sh to $OUT/bin so board deployment always sees the freshly-built binary. Empty -> stage skipped (standalone cmake -S tests/unittests case).")
-if(TESSAI_AGENT_STAGE_BIN_DIR)
+set(AMDRNPU_STAGE_BIN_DIR "" CACHE PATH "Directory to auto-stage amdrnpu_unittest into after each link; set by build/build.sh to $OUT/bin so board deployment always sees the freshly-built binary. Empty -> stage skipped (standalone cmake -S tests/unittests case).")
+if(AMDRNPU_STAGE_BIN_DIR)
 	# copy_if_different keeps mtime stable when the link did NOT
 	# actually change the binary (e.g. recompile of an unrelated .cpp
 	# that didn't affect the link's output), which keeps make-based
 	# downstream "is the binary newer than the board's copy?" checks
 	# working as expected.
-	add_custom_command(TARGET tessai_agent_unittest POST_BUILD
+	add_custom_command(TARGET amdrnpu_unittest POST_BUILD
 		COMMAND ${CMAKE_COMMAND} -E make_directory
-			"${TESSAI_AGENT_STAGE_BIN_DIR}"
+			"${AMDRNPU_STAGE_BIN_DIR}"
 		COMMAND ${CMAKE_COMMAND} -E copy_if_different
-			"$<TARGET_FILE:tessai_agent_unittest>"
-			"${TESSAI_AGENT_STAGE_BIN_DIR}/"
-		COMMENT "Auto-staging tessai_agent_unittest -> ${TESSAI_AGENT_STAGE_BIN_DIR}/"
+			"$<TARGET_FILE:amdrnpu_unittest>"
+			"${AMDRNPU_STAGE_BIN_DIR}/"
+		COMMENT "Auto-staging amdrnpu_unittest -> ${AMDRNPU_STAGE_BIN_DIR}/"
 		VERBATIM)
 endif()

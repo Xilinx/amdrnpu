@@ -16,82 +16,82 @@
 #include <atomic>
 #include <thread>
 
-using namespace tessai_test;
+using namespace amdrnpu_test;
 
-class TessaiAgentError : public TessaiAgentTest {};
+class AmdrnpuError : public AmdrnpuTest {};
 
-// ---- TESSAI_BUF_ALLOC negative cases ------------------------------
+// ---- AMDRNPU_BUF_ALLOC negative cases ------------------------------
 
-TEST_F(TessaiAgentError, BufAllocInvalidMemoryType)
+TEST_F(AmdrnpuError, BufAllocInvalidMemoryType)
 {
-	// Driver should reject memory_type values outside TESSAI_MEMORY_*.
-	struct tessai_buf_alloc a {};
+	// Driver should reject memory_type values outside AMDRNPU_MEMORY_*.
+	struct amdrnpu_buf_alloc a {};
 	a.memory_type = 0xDEADBEEFu;
 	a.size = 4096;
-	EXPECT_LT(::ioctl(fd_, TESSAI_BUF_ALLOC, &a), 0);
+	EXPECT_LT(::ioctl(fd_, AMDRNPU_BUF_ALLOC, &a), 0);
 	EXPECT_EQ(errno, EINVAL);
 }
 
-TEST_F(TessaiAgentError, BufAllocZeroSize)
+TEST_F(AmdrnpuError, BufAllocZeroSize)
 {
 	// size=0 has no defensible meaning; driver caps at >0.
-	struct tessai_buf_alloc a {};
-	a.memory_type = TESSAI_MEMORY_RPU;
+	struct amdrnpu_buf_alloc a {};
+	a.memory_type = AMDRNPU_MEMORY_RPU;
 	a.size = 0;
-	EXPECT_LT(::ioctl(fd_, TESSAI_BUF_ALLOC, &a), 0);
+	EXPECT_LT(::ioctl(fd_, AMDRNPU_BUF_ALLOC, &a), 0);
 	EXPECT_EQ(errno, EINVAL);
 }
 
-// ---- TESSAI_BUF_SYNC negative cases -------------------------------
+// ---- AMDRNPU_BUF_SYNC negative cases -------------------------------
 
-TEST_F(TessaiAgentError, BufSyncInvalidHandle)
+TEST_F(AmdrnpuError, BufSyncInvalidHandle)
 {
 	// Bogus GEM handle should produce ENOENT (or similar non-zero
 	// errno -- the assertion is just "fails cleanly, doesn't crash
 	// the kernel").
-	struct tessai_buf_sync s {};
+	struct amdrnpu_buf_sync s {};
 	s.drm_handle = 0xDEADu;
-	s.direction  = TESSAI_BUF_SYNC_TO_DEVICE;
+	s.direction  = AMDRNPU_BUF_SYNC_TO_DEVICE;
 	s.offset     = 0;
 	s.length     = 4096;
-	EXPECT_LT(::ioctl(fd_, TESSAI_BUF_SYNC, &s), 0);
+	EXPECT_LT(::ioctl(fd_, AMDRNPU_BUF_SYNC, &s), 0);
 }
 
-TEST_F(TessaiAgentError, BufSyncInvalidDirection)
+TEST_F(AmdrnpuError, BufSyncInvalidDirection)
 {
 	// Allocate a real BO, then pass an invalid direction.
 	uint32_t bo = 0;
-	ASSERT_EQ(do_buf_alloc(fd_, TESSAI_MEMORY_RPU, kFwRspBoSize, &bo), 0);
+	ASSERT_EQ(do_buf_alloc(fd_, AMDRNPU_MEMORY_RPU, kFwRspBoSize, &bo), 0);
 
-	struct tessai_buf_sync s {};
+	struct amdrnpu_buf_sync s {};
 	s.drm_handle = bo;
 	s.direction  = 0xFFu;  // not TO_DEVICE/FROM_DEVICE
 	s.offset     = 0;
 	s.length     = 0;
-	EXPECT_LT(::ioctl(fd_, TESSAI_BUF_SYNC, &s), 0);
+	EXPECT_LT(::ioctl(fd_, AMDRNPU_BUF_SYNC, &s), 0);
 	EXPECT_EQ(errno, EINVAL);
 
 	EXPECT_EQ(do_gem_close(fd_, bo), 0);
 }
 
-TEST_F(TessaiAgentError, BufSyncOffsetBeyondEnd)
+TEST_F(AmdrnpuError, BufSyncOffsetBeyondEnd)
 {
 	uint32_t bo = 0;
-	ASSERT_EQ(do_buf_alloc(fd_, TESSAI_MEMORY_RPU, kFwRspBoSize, &bo), 0);
+	ASSERT_EQ(do_buf_alloc(fd_, AMDRNPU_MEMORY_RPU, kFwRspBoSize, &bo), 0);
 
-	struct tessai_buf_sync s {};
+	struct amdrnpu_buf_sync s {};
 	s.drm_handle = bo;
-	s.direction  = TESSAI_BUF_SYNC_TO_DEVICE;
+	s.direction  = AMDRNPU_BUF_SYNC_TO_DEVICE;
 	s.offset     = kFwRspBoSize + 1;
 	s.length     = 1;
-	EXPECT_LT(::ioctl(fd_, TESSAI_BUF_SYNC, &s), 0);
+	EXPECT_LT(::ioctl(fd_, AMDRNPU_BUF_SYNC, &s), 0);
 
 	EXPECT_EQ(do_gem_close(fd_, bo), 0);
 }
 
 // ---- GEM_CLOSE negative case --------------------------------------
 
-TEST_F(TessaiAgentError, GemCloseInvalidHandle)
+TEST_F(AmdrnpuError, GemCloseInvalidHandle)
 {
 	struct drm_gem_close c {};
 	c.handle = 0xDEADu;
@@ -99,21 +99,21 @@ TEST_F(TessaiAgentError, GemCloseInvalidHandle)
 	EXPECT_EQ(errno, EINVAL);
 }
 
-// ---- TESSAI_CMD_SUBMIT negative case ------------------------------
+// ---- AMDRNPU_CMD_SUBMIT negative case ------------------------------
 
-// num_args claims 2 but we only allocate enough for 0. tessai_cmd's
+// num_args claims 2 but we only allocate enough for 0. amdrnpu_cmd's
 // copy_from_user should EFAULT out of bounds without dereferencing
 // the missing tail. This is the "userspace lies about size" canary.
-TEST_F(TessaiAgentError, CmdSubmitLiesAboutNumArgsTrailingBytes)
+TEST_F(AmdrnpuError, CmdSubmitLiesAboutNumArgsTrailingBytes)
 {
 	// Hand-rolled buffer: 1 struct + zero args, but num_args lies.
-	struct tessai_cmd_submit hdr {};
+	struct amdrnpu_cmd_submit hdr {};
 	hdr.command_op = 0xCAFEBABEu;
 	hdr.num_args   = 2;
 	// Don't allocate the trailing args. The driver's
 	// copy_from_user(args, user_ptr, num_args * sizeof(arg)) on a
 	// short userspace buffer should EFAULT cleanly.
-	int rc = ::ioctl(fd_, TESSAI_CMD_SUBMIT, &hdr);
+	int rc = ::ioctl(fd_, AMDRNPU_CMD_SUBMIT, &hdr);
 	// We don't assert which errno -- different kernels return
 	// EFAULT vs EINVAL -- only that the call fails.
 	EXPECT_LT(rc, 0);
@@ -121,7 +121,7 @@ TEST_F(TessaiAgentError, CmdSubmitLiesAboutNumArgsTrailingBytes)
 
 // ---- syncobj negative cases ---------------------------------------
 
-TEST_F(TessaiAgentError, SyncobjWaitOnInvalidHandle)
+TEST_F(AmdrnpuError, SyncobjWaitOnInvalidHandle)
 {
 	uint64_t handles64 = 0xDEADu;
 	struct drm_syncobj_wait w {};
@@ -132,7 +132,7 @@ TEST_F(TessaiAgentError, SyncobjWaitOnInvalidHandle)
 	EXPECT_LT(::ioctl(fd_, DRM_IOCTL_SYNCOBJ_WAIT, &w), 0);
 }
 
-TEST_F(TessaiAgentError, SyncobjDestroyTwiceFails)
+TEST_F(AmdrnpuError, SyncobjDestroyTwiceFails)
 {
 	// First submit -> get a real handle -> destroy it -> destroy
 	// again should fail. Validates the syncobj idr is actually
@@ -146,9 +146,9 @@ TEST_F(TessaiAgentError, SyncobjDestroyTwiceFails)
 
 // ---- open negative ------------------------------------------------
 
-TEST(TessaiAgentErrorNegative, OpenNonexistentDriPath)
+TEST(AmdrnpuErrorNegative, OpenNonexistentDriPath)
 {
-	// /dev/dri/card99 doesn't exist on any tessai-agent host.
+	// /dev/dri/card99 doesn't exist on any amdrnpu host.
 	int fd = ::open("/dev/dri/card99", O_RDWR | O_CLOEXEC);
 	EXPECT_LT(fd, 0);
 	if (fd >= 0)
@@ -160,7 +160,7 @@ TEST(TessaiAgentErrorNegative, OpenNonexistentDriPath)
 // Pound BUF_ALLOC + GEM_CLOSE in a tight loop across threads. Catches
 // races in the per-file xa allocation / freeing paths (we've seen
 // "BO leaked after GEM_CLOSE" regressions in this kind of stress).
-TEST_F(TessaiAgentError, BufAllocCloseStressMultiThreaded)
+TEST_F(AmdrnpuError, BufAllocCloseStressMultiThreaded)
 {
 	constexpr int kNumThreads = 4;
 	constexpr int kCyclesPerThread = 64;
@@ -170,7 +170,7 @@ TEST_F(TessaiAgentError, BufAllocCloseStressMultiThreaded)
 		threads[t] = std::thread([&] {
 			for (int i = 0; i < kCyclesPerThread; ++i) {
 				uint32_t bo = 0;
-				if (do_buf_alloc(fd_, TESSAI_MEMORY_RPU,
+				if (do_buf_alloc(fd_, AMDRNPU_MEMORY_RPU,
 						 kFwRspBoSize, &bo) != 0 ||
 				    bo == 0) {
 					++fails;

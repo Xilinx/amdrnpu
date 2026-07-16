@@ -15,7 +15,7 @@ static K_MUTEX_DEFINE(metal_init_lock);
 static bool metal_init_done;
 static int  metal_init_status;
 
-int tessai_metal_init_once(void)
+int amdrnpu_metal_init_once(void)
 {
 	int ret;
 	struct metal_init_params metal_params = METAL_INIT_DEFAULTS;

@@ -4,14 +4,14 @@
  *
  * Link A (APU<->RPURuntime) OpenAMP transport — RPURuntime SLAVE side.
  *
- *   APU (tessai-agent driver, kernel remoteproc framework) = VirtIO DRIVER.
+ *   APU (amdrnpu driver, kernel remoteproc framework) = VirtIO DRIVER.
  *   RPURuntime (this file, R52 cluster 0 core 1)            = VirtIO DEVICE.
  *
  * Mirrors rpu-fw/rpu_fw/app/src/transport/openamp_platform.c but uses the
  * link A reserved-memory carveouts (apu_rsctbl @ 0x0A000000,
  * apu_rpmsg_shmem @ 0x0A100000) and the link A IPI mailbox
  * (ipi_2_to_ipi_3) instead of the rpu-fw link B layout. Compiled when
- * CONFIG_TESSAI_APU_RPMSG_SLAVE=y. This is the only OpenAMP transport
+ * CONFIG_AMDRNPU_APU_RPMSG_SLAVE=y. This is the only OpenAMP transport
  * in the rpu_app snapshot: the historical Link B master-side
  * transport (rpmsg_platform.c) plus the shmem alternative
  * (shmem_platform.c) were both dropped because nothing in the Link A
@@ -19,7 +19,7 @@
  * CMakeLists.txt header for the full Link-A-only rationale).
  *
  * Init sequence:
- *   1. tessai_metal_init_once()  (shared with link B master, no double-init)
+ *   1. amdrnpu_metal_init_once()  (shared with link B master, no double-init)
  *   2. metal_io_init() for SHM (vrings + buffers) and rsctbl
  *   3. MBOX RX callback on the link A IPI
  *   4. rproc_virtio_create_vdev(VIRTIO_DEV_DEVICE, ...) using the
@@ -30,11 +30,11 @@
  *   6. rproc_virtio_init_vring() x2 (reading vring.da from the rsc table
  *      that the kernel just populated).
  *   7. rpmsg_init_vdev() with name-service callback that announces the
- *      "tessai-agent" endpoint (tessai_agent_endpoint.c registers a real
- *      handler in phase1_tessai_endpoint_port).
+ *      "amdrnpu" endpoint (amdrnpu_endpoint.c registers a real
+ *      handler in phase1_amdrnpu_endpoint_port).
  *   8. Spawn RX task on a coop priority.
  *
- * Exposes apu_openamp_get_rpmsg_device() so tessai_agent_endpoint.c can
+ * Exposes apu_openamp_get_rpmsg_device() so amdrnpu_endpoint.c can
  * register its endpoint (same pattern as the upstream rpu-fw
  * openamp_platform_get_rpmsg_device()).
  *
@@ -70,18 +70,18 @@
 
 LOG_MODULE_REGISTER(apu_rpmsg_platform, CONFIG_LOG_DEFAULT_LEVEL);
 
-/* Verbose/error printk wrappers (CONFIG_TESSAI_VERBOSE gates DBG). */
-#ifndef CONFIG_TESSAI_VERBOSE
-#define CONFIG_TESSAI_VERBOSE 0
+/* Verbose/error printk wrappers (CONFIG_AMDRNPU_VERBOSE gates DBG). */
+#ifndef CONFIG_AMDRNPU_VERBOSE
+#define CONFIG_AMDRNPU_VERBOSE 0
 #endif
 
-#define TESSAI_DBG(fmt, ...)                           \
+#define AMDRNPU_DBG(fmt, ...)                           \
 	do {                                           \
-		if (CONFIG_TESSAI_VERBOSE)             \
+		if (CONFIG_AMDRNPU_VERBOSE)             \
 			printk(fmt, ##__VA_ARGS__);    \
 	} while (0)
 
-#define TESSAI_ERR(fmt, ...) printk(fmt, ##__VA_ARGS__)
+#define AMDRNPU_ERR(fmt, ...) printk(fmt, ##__VA_ARGS__)
 
 /* ---------------------------------------------------------------------------
  * DT bindings (link A)
@@ -129,7 +129,7 @@ LOG_MODULE_REGISTER(apu_rpmsg_platform, CONFIG_LOG_DEFAULT_LEVEL);
  * Counterpart wiring on the Linux kernel-DT side: r52f@1.mboxes =
  * <0x17d 0x00 0x17d 0x01> (phandle 0x17d = /axi/mailbox@eb380000/
  * child@eb350000, target xlnx,ipi-id=4 = RPU-APP IPI_2 = us). See
- * apply_tessai_patch.py R52_CORE1_INJECT.
+ * apply_amdrnpu_patch.py R52_CORE1_INJECT.
  */
 #define MBOX_NODE    DT_NODELABEL(ipi_2_to_ipi_5)
 
@@ -153,10 +153,10 @@ LOG_MODULE_REGISTER(apu_rpmsg_platform, CONFIG_LOG_DEFAULT_LEVEL);
 #define MBOX_TX_CH      0U
 #define MBOX_RX_CH      1U
 
-/* tessai-agent endpoint advertised name. Kernel driver matches
- * rpmsg_device_id "tessai-agent" - see rpu-fw tessai_agent_endpoint.c.
+/* amdrnpu endpoint advertised name. Kernel driver matches
+ * rpmsg_device_id "amdrnpu" - see rpu-fw amdrnpu_endpoint.c.
  */
-#define TESSAI_AGENT_EPT_NAME  "tessai-agent"
+#define AMDRNPU_EPT_NAME  "amdrnpu"
 
 /* ---------------------------------------------------------------------------
  * Static state
@@ -188,7 +188,7 @@ static bool platform_initialized;
  * so the debug overlay sees current values without a memory barrier
  * dance, and so the compiler doesn't fold the increments out under -O2.
  * The verbose per-event LOG_INFs that came with these counters during
- * link-A bring-up have been downgraded to TESSAI_DBG (no spam in release).
+ * link-A bring-up have been downgraded to AMDRNPU_DBG (no spam in release).
  */
 static volatile uint32_t mbox_rx_irq_count;
 static volatile uint32_t mbox_rx_wake_count;
@@ -208,7 +208,7 @@ static void mbox_callback(const struct device *dev, mbox_channel_id_t channel_id
 	ARG_UNUSED(data);
 
 	mbox_rx_irq_count++;
-	TESSAI_DBG("[apu_rpmsg] RX IRQ #%u (link A)\n", mbox_rx_irq_count);
+	AMDRNPU_DBG("[apu_rpmsg] RX IRQ #%u (link A)\n", mbox_rx_irq_count);
 	k_sem_give(&virtio_kick_sem);
 }
 
@@ -221,7 +221,7 @@ static int mailbox_notify(void *priv, uint32_t id)
 
 	if (ret == 0) {
 		mbox_tx_count++;
-		TESSAI_DBG("[apu_rpmsg] TX kick #%u id=%u (link A)\n",
+		AMDRNPU_DBG("[apu_rpmsg] TX kick #%u id=%u (link A)\n",
 			mbox_tx_count, id);
 		return 0;
 	}
@@ -229,19 +229,19 @@ static int mailbox_notify(void *priv, uint32_t id)
 		mbox_tx_ebusy_count++;
 		return 0;
 	}
-	TESSAI_ERR("[apu_rpmsg] mbox_send failed: %d\n", ret);
+	AMDRNPU_ERR("[apu_rpmsg] mbox_send failed: %d\n", ret);
 	return ret;
 }
 
-/* Name-service callback — APU userspace creates the tessai-agent endpoint
+/* Name-service callback — APU userspace creates the amdrnpu endpoint
  * via the kernel driver; we just log it. The real endpoint is registered
- * locally by tessai_agent_endpoint.c (see phase1_tessai_endpoint_port).
+ * locally by amdrnpu_endpoint.c (see phase1_amdrnpu_endpoint_port).
  */
 static void ns_announce_cb(struct rpmsg_device *rdev, const char *name,
 			   uint32_t src)
 {
 	ARG_UNUSED(rdev);
-	TESSAI_DBG("[apu_rpmsg] NS announce: %s (src=%u)\n", name, src);
+	AMDRNPU_DBG("[apu_rpmsg] NS announce: %s (src=%u)\n", name, src);
 }
 
 /* ---------------------------------------------------------------------------
@@ -260,12 +260,12 @@ static void apu_rpmsg_task(void *arg1, void *arg2, void *arg3)
 	ARG_UNUSED(arg2);
 	ARG_UNUSED(arg3);
 
-	TESSAI_DBG("[apu_rpmsg] RX task started\n");
+	AMDRNPU_DBG("[apu_rpmsg] RX task started\n");
 
 	while (1) {
 		k_sem_take(&virtio_kick_sem, K_FOREVER);
 		mbox_rx_wake_count++;
-		TESSAI_DBG("[apu_rpmsg] RX wake #%u (irq=%u tx=%u busy=%u)\n",
+		AMDRNPU_DBG("[apu_rpmsg] RX wake #%u (irq=%u tx=%u busy=%u)\n",
 			mbox_rx_wake_count, mbox_rx_irq_count,
 			mbox_tx_count, mbox_tx_ebusy_count);
 		/* Tell OpenAMP "the master kicked us, walk every vring".
@@ -339,43 +339,43 @@ static int apu_rpmsg_platform_init(void)
 		return 0;
 	}
 
-	TESSAI_DBG("[apu_rpmsg] platform init start (link A slave)\n");
+	AMDRNPU_DBG("[apu_rpmsg] platform init start (link A slave)\n");
 
 	/* 1. Shared libmetal init (idempotent with link B master). */
-	ret = tessai_metal_init_once();
+	ret = amdrnpu_metal_init_once();
 	if (ret) {
-		TESSAI_ERR("[apu_rpmsg] metal_init_once failed: %d\n", ret);
+		AMDRNPU_ERR("[apu_rpmsg] metal_init_once failed: %d\n", ret);
 		return ret;
 	}
 
 	/* 2. Metal IO regions: SHM (vrings + buffers) and resource table. */
-	TESSAI_DBG("[apu_rpmsg] shm  IO: addr=0x%08x size=0x%x\n",
+	AMDRNPU_DBG("[apu_rpmsg] shm  IO: addr=0x%08x size=0x%x\n",
 		(uint32_t)SHM_START_ADDR, (uint32_t)SHM_SIZE);
 	metal_io_init(shm_io, (void *)SHM_START_ADDR, &shm_physmap,
 		      SHM_SIZE, -1, 0, NULL);
 
 	rsc_table_get(&rsc_table, &rsc_size);
 	rsc_physmap = (uintptr_t)rsc_table;
-	TESSAI_DBG("[apu_rpmsg] rsc IO: addr=0x%08x size=%d\n",
+	AMDRNPU_DBG("[apu_rpmsg] rsc IO: addr=0x%08x size=%d\n",
 		(uint32_t)rsc_physmap, rsc_size);
 	metal_io_init(rsc_io, rsc_table, &rsc_physmap, rsc_size, -1, 0, NULL);
 
 	/* 3. MBOX RX channel for link A IPI. */
 	if (!device_is_ready(mbox_dev)) {
-		TESSAI_ERR("[apu_rpmsg] MBOX device not ready\n");
+		AMDRNPU_ERR("[apu_rpmsg] MBOX device not ready\n");
 		return -ENODEV;
 	}
 	ret = mbox_register_callback(mbox_dev, MBOX_RX_CH, mbox_callback, NULL);
 	if (ret < 0) {
-		TESSAI_ERR("[apu_rpmsg] mbox_register_callback failed: %d\n", ret);
+		AMDRNPU_ERR("[apu_rpmsg] mbox_register_callback failed: %d\n", ret);
 		return ret;
 	}
 	ret = mbox_set_enabled(mbox_dev, MBOX_RX_CH, true);
 	if (ret < 0) {
-		TESSAI_ERR("[apu_rpmsg] mbox_set_enabled failed: %d\n", ret);
+		AMDRNPU_ERR("[apu_rpmsg] mbox_set_enabled failed: %d\n", ret);
 		return ret;
 	}
-	TESSAI_DBG("[apu_rpmsg] MBOX RX enabled (link A)\n");
+	AMDRNPU_DBG("[apu_rpmsg] MBOX RX enabled (link A)\n");
 
 	/* 4. Create DEVICE-side virtio. Resource table is what the standard
 	 *    Zephyr CONFIG_OPENAMP_RSC_TABLE machinery placed at apu_rsctbl
@@ -386,7 +386,7 @@ static int apu_rpmsg_platform_init(void)
 					rsc_table_to_vdev(rsc_table),
 					rsc_io, NULL, mailbox_notify, NULL);
 	if (!vdev) {
-		TESSAI_ERR("[apu_rpmsg] rproc_virtio_create_vdev failed\n");
+		AMDRNPU_ERR("[apu_rpmsg] rproc_virtio_create_vdev failed\n");
 		return -ENOMEM;
 	}
 
@@ -394,9 +394,9 @@ static int apu_rpmsg_platform_init(void)
 	 *    resource table and set vdev.status = VIRTIO_CONFIG_STATUS_DRIVER_OK.
 	 *    Same pattern as rpu-fw openamp_platform.c.
 	 */
-	TESSAI_DBG("[apu_rpmsg] waiting for APU DRIVER_OK...\n");
+	AMDRNPU_DBG("[apu_rpmsg] waiting for APU DRIVER_OK...\n");
 	rproc_virtio_wait_remote_ready(vdev);
-	TESSAI_DBG("[apu_rpmsg] APU DRIVER_OK observed\n");
+	AMDRNPU_DBG("[apu_rpmsg] APU DRIVER_OK observed\n");
 
 	/* 6. Init vrings from the (now-populated) resource table. */
 	vring_rsc = rsc_table_get_vring0(rsc_table);
@@ -404,7 +404,7 @@ static int apu_rpmsg_platform_init(void)
 				      (void *)(uintptr_t)vring_rsc->da, shm_io,
 				      vring_rsc->num, vring_rsc->align);
 	if (ret) {
-		TESSAI_ERR("[apu_rpmsg] init_vring 0 failed: %d\n", ret);
+		AMDRNPU_ERR("[apu_rpmsg] init_vring 0 failed: %d\n", ret);
 		goto fail;
 	}
 
@@ -413,7 +413,7 @@ static int apu_rpmsg_platform_init(void)
 				      (void *)(uintptr_t)vring_rsc->da, shm_io,
 				      vring_rsc->num, vring_rsc->align);
 	if (ret) {
-		TESSAI_ERR("[apu_rpmsg] init_vring 1 failed: %d\n", ret);
+		AMDRNPU_ERR("[apu_rpmsg] init_vring 1 failed: %d\n", ret);
 		goto fail;
 	}
 
@@ -422,12 +422,12 @@ static int apu_rpmsg_platform_init(void)
 	 */
 	ret = rpmsg_init_vdev(&rvdev, vdev, ns_announce_cb, shm_io, NULL);
 	if (ret) {
-		TESSAI_ERR("[apu_rpmsg] rpmsg_init_vdev failed: %d\n", ret);
+		AMDRNPU_ERR("[apu_rpmsg] rpmsg_init_vdev failed: %d\n", ret);
 		goto fail;
 	}
 
 	rpdev_slave = rpmsg_virtio_get_rpmsg_device(&rvdev);
-	TESSAI_DBG("[apu_rpmsg] rpmsg slave ready (rdev=%p)\n", rpdev_slave);
+	AMDRNPU_DBG("[apu_rpmsg] rpmsg slave ready (rdev=%p)\n", rpdev_slave);
 
 	/* 8. RX task. */
 	k_thread_create(&apu_rpmsg_task_data, apu_rpmsg_task_stack,
@@ -437,7 +437,7 @@ static int apu_rpmsg_platform_init(void)
 	k_thread_name_set(&apu_rpmsg_task_data, "apu_rpmsg_rx");
 
 	platform_initialized = true;
-	TESSAI_DBG("[apu_rpmsg] link A initialised\n");
+	AMDRNPU_DBG("[apu_rpmsg] link A initialised\n");
 	return 0;
 
 fail:
@@ -459,9 +459,9 @@ bool apu_openamp_platform_is_initialized(void)
 	return platform_initialized;
 }
 
-const char *apu_rpmsg_tessai_ept_name(void)
+const char *apu_rpmsg_amdrnpu_ept_name(void)
 {
-	return TESSAI_AGENT_EPT_NAME;
+	return AMDRNPU_EPT_NAME;
 }
 
 /* ---------------------------------------------------------------------------

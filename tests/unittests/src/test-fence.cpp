@@ -4,27 +4,27 @@
 // Tier A: async/poll completion + in-flight pin lifetime.
 //
 // Tests in this file (mapping kept for tests/README.md cross-ref):
-//   - TessaiAgentFence.PollOnSyncFile                  (sync_file fd poll)
-//   - TessaiAgentFence.FenceStatusBeforeAndAfter       (SYNC_IOC_FILE_INFO)
-//   - TessaiAgentFence.BusyPollSleepInterval           (10 ms busy poll)
-//   - TessaiAgentFence.InflightPinSurvivesGemClose     (early GEM_CLOSE)
-//   - TessaiAgentFence.UniqueFdClosesAtInnerScopeExit  (RAII teardown contract)
+//   - AmdrnpuFence.PollOnSyncFile                  (sync_file fd poll)
+//   - AmdrnpuFence.FenceStatusBeforeAndAfter       (SYNC_IOC_FILE_INFO)
+//   - AmdrnpuFence.BusyPollSleepInterval           (10 ms busy poll)
+//   - AmdrnpuFence.InflightPinSurvivesGemClose     (early GEM_CLOSE)
+//   - AmdrnpuFence.UniqueFdClosesAtInnerScopeExit  (RAII teardown contract)
 
 #include "common.h"
 
 #include <array>
 #include <cstdio>
 
-using namespace tessai_test;
+using namespace amdrnpu_test;
 
-class TessaiAgentFence : public TessaiAgentTest {};
+class AmdrnpuFence : public AmdrnpuTest {};
 
 // ---- completion observable via poll(2) on sync_file fd -------------
 
 // Export the syncobj as a one-shot sync_file fd, poll(POLLIN, 2s),
 // assert the fd becomes readable when the firmware signals. Documents
 // lib-userspace-flow.md §2.1.
-TEST_F(TessaiAgentFence, PollOnSyncFile)
+TEST_F(AmdrnpuFence, PollOnSyncFile)
 {
 	uint32_t syncobj = 0;
 	ASSERT_EQ(do_cmd_submit(fd_, 0xA0010001u, nullptr, 0, &syncobj), 0);
@@ -57,7 +57,7 @@ TEST_F(TessaiAgentFence, PollOnSyncFile)
 // already signaled by the time the second syscall lands. We accept
 // either 0 (pending) or 1 (already signaled). The "after" probe is
 // strict: MUST be signaled-ok.
-TEST_F(TessaiAgentFence, FenceStatusBeforeAndAfter)
+TEST_F(AmdrnpuFence, FenceStatusBeforeAndAfter)
 {
 	uint32_t syncobj = 0;
 	ASSERT_EQ(do_cmd_submit(fd_, 0xA0020002u, nullptr, 0, &syncobj), 0);
@@ -81,7 +81,7 @@ TEST_F(TessaiAgentFence, FenceStatusBeforeAndAfter)
 
 // ---- busy-poll with 10ms sleep ------------------------------------
 
-TEST_F(TessaiAgentFence, BusyPollSleepInterval)
+TEST_F(AmdrnpuFence, BusyPollSleepInterval)
 {
 	uint32_t syncobj = 0;
 	ASSERT_EQ(do_cmd_submit(fd_, 0xA0030003u, nullptr, 0, &syncobj), 0);
@@ -126,7 +126,7 @@ TEST_F(TessaiAgentFence, BusyPollSleepInterval)
 //     (mmap'd memory survives the file descriptor that minted it,
 //     by POSIX contract).
 //   - Post-wait we must invalidate userspace caches manually (the
-//     GEM handle is gone so TESSAI_BUF_SYNC is unreachable) -- arm64
+//     GEM handle is gone so AMDRNPU_BUF_SYNC is unreachable) -- arm64
 //     DC CIVAC over the mmap'd page, exactly what the kernel would
 //     have done on our behalf if we still had a handle.
 //
@@ -136,12 +136,12 @@ TEST_F(TessaiAgentFence, BusyPollSleepInterval)
 // guarantees munmap runs even on the wait-failure path, so a
 // regression that breaks the in-flight pin doesn't also leak a
 // mapping or starve subsequent tests of the per-fd xa slot.
-TEST_F(TessaiAgentFence, InflightPinSurvivesGemClose)
+TEST_F(AmdrnpuFence, InflightPinSurvivesGemClose)
 {
 	ASSERT_GE(fd_, 0) << "fixture invariant: fd_ must be open";
 
 	uint32_t bo = 0;
-	ASSERT_EQ(do_buf_alloc(fd_, TESSAI_MEMORY_RPU, kFwRspBoSize, &bo), 0);
+	ASSERT_EQ(do_buf_alloc(fd_, AMDRNPU_MEMORY_RPU, kFwRspBoSize, &bo), 0);
 
 	uint64_t off = 0;
 	ASSERT_EQ(do_map_dumb(fd_, bo, &off), 0);
@@ -151,9 +151,9 @@ TEST_F(TessaiAgentFence, InflightPinSurvivesGemClose)
 	ASSERT_NE(map, MAP_FAILED);
 	std::memset(map, 0x0a, kFwRspBoSize);
 
-	ASSERT_EQ(do_buf_sync(fd_, bo, TESSAI_BUF_SYNC_TO_DEVICE, 0, 0), 0);
+	ASSERT_EQ(do_buf_sync(fd_, bo, AMDRNPU_BUF_SYNC_TO_DEVICE, 0, 0), 0);
 
-	std::array<struct tessai_arg, 3> args{};
+	std::array<struct amdrnpu_arg, 3> args{};
 	args[0].size = kFwRspTextMax;
 	args[0].bo.drm_buffer_handle = static_cast<int32_t>(bo);
 	args[0].bo.offset = 0;
@@ -205,7 +205,7 @@ TEST_F(TessaiAgentFence, InflightPinSurvivesGemClose)
 	// Wait succeeded -> the RPU completed the writeback. Pull the
 	// freshly-written bytes into the dcache via DC CIVAC; without
 	// this the CPU may still see the pre-submit 0x0a fill from its
-	// L1 because TESSAI_BUF_SYNC is unreachable (no handle).
+	// L1 because AMDRNPU_BUF_SYNC is unreachable (no handle).
 	uspace_dcache_invalidate(map, kFwRspBoSize);
 
 	unsigned int rpu_cid = 0, rpu_nargs = 0;
@@ -230,7 +230,7 @@ TEST_F(TessaiAgentFence, InflightPinSurvivesGemClose)
 
 // RAII unique_fd must close the held fd at scope exit; a raw-int
 // copy leaked via get() is then unusable (-EBADF) past the brace.
-TEST_F(TessaiAgentFence, UniqueFdClosesAtInnerScopeExit)
+TEST_F(AmdrnpuFence, UniqueFdClosesAtInnerScopeExit)
 {
 	struct unique_fd {
 		int fd = -1;
@@ -248,7 +248,7 @@ TEST_F(TessaiAgentFence, UniqueFdClosesAtInnerScopeExit)
 	char name[64] = {};
 	{
 		char      path[PATH_MAX] = {};
-		unique_fd local{open_tessai_card(path, sizeof(path))};
+		unique_fd local{open_amdrnpu_card(path, sizeof(path))};
 		ASSERT_GE(local.get(), 0);
 		captured_fd = local.get();
 		// Should successfully get the name of card0

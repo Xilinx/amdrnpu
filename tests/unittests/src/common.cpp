@@ -8,7 +8,7 @@
 #include <cstring>
 #include <dirent.h>
 
-namespace tessai_test {
+namespace amdrnpu_test {
 
 int drm_get_name(int fd, char *out, size_t out_sz)
 {
@@ -22,7 +22,7 @@ int drm_get_name(int fd, char *out, size_t out_sz)
 	return 0;
 }
 
-int open_tessai_card(char *out_path, size_t out_sz)
+int open_amdrnpu_card(char *out_path, size_t out_sz)
 {
 	DIR *dir = ::opendir("/dev/dri");
 	if (!dir)
@@ -45,7 +45,7 @@ int open_tessai_card(char *out_path, size_t out_sz)
 
 		char name[64] = {};
 		if (drm_get_name(fd, name, sizeof(name)) == 0 &&
-		    std::strcmp(name, TESSAI_AGENT_DRIVER_NAME) == 0) {
+		    std::strcmp(name, AMDRNPU_DRIVER_NAME) == 0) {
 			if (out_path && out_sz)
 				std::snprintf(out_path, out_sz, "%s", path);
 			found = fd;
@@ -66,12 +66,12 @@ uint64_t now_ns()
 }
 
 int do_cmd_submit(int fd, uint32_t command_op,
-		  const struct tessai_arg *args, uint32_t num_args,
+		  const struct amdrnpu_arg *args, uint32_t num_args,
 		  uint32_t *out_handle)
 {
-	size_t bytes = sizeof(struct tessai_cmd_submit) +
-		       static_cast<size_t>(num_args) * sizeof(struct tessai_arg);
-	auto *hdr = static_cast<struct tessai_cmd_submit *>(std::calloc(1, bytes));
+	size_t bytes = sizeof(struct amdrnpu_cmd_submit) +
+		       static_cast<size_t>(num_args) * sizeof(struct amdrnpu_arg);
+	auto *hdr = static_cast<struct amdrnpu_cmd_submit *>(std::calloc(1, bytes));
 	if (!hdr)
 		return -ENOMEM;
 
@@ -81,7 +81,7 @@ int do_cmd_submit(int fd, uint32_t command_op,
 		std::memcpy(hdr->args, args, num_args * sizeof(*args));
 
 	int rc = 0;
-	if (::ioctl(fd, TESSAI_CMD_SUBMIT, hdr) < 0)
+	if (::ioctl(fd, AMDRNPU_CMD_SUBMIT, hdr) < 0)
 		rc = -errno;
 	else
 		*out_handle = static_cast<uint32_t>(hdr->drm_sync_obj_handle);
@@ -115,10 +115,10 @@ int do_syncobj_destroy(int fd, uint32_t handle)
 
 int do_buf_alloc(int fd, uint32_t mtype, uint64_t size, uint32_t *out_handle)
 {
-	struct tessai_buf_alloc a {};
+	struct amdrnpu_buf_alloc a {};
 	a.memory_type = mtype;
 	a.size        = size;
-	if (::ioctl(fd, TESSAI_BUF_ALLOC, &a) < 0)
+	if (::ioctl(fd, AMDRNPU_BUF_ALLOC, &a) < 0)
 		return -errno;
 	*out_handle = a.drm_handle;
 	return 0;
@@ -146,12 +146,12 @@ int do_map_dumb(int fd, uint32_t handle, uint64_t *out_offset)
 int do_buf_sync(int fd, uint32_t handle, uint32_t direction,
 		uint64_t offset, uint64_t length)
 {
-	struct tessai_buf_sync s {};
+	struct amdrnpu_buf_sync s {};
 	s.drm_handle = handle;
 	s.direction  = direction;
 	s.offset     = offset;
 	s.length     = length;
-	if (::ioctl(fd, TESSAI_BUF_SYNC, &s) < 0)
+	if (::ioctl(fd, AMDRNPU_BUF_SYNC, &s) < 0)
 		return -errno;
 	return 0;
 }
@@ -234,4 +234,4 @@ void uspace_dcache_invalidate(const void *vaddr, size_t length)
 void uspace_dcache_invalidate(const void *, size_t) {}
 #endif
 
-}  // namespace tessai_test
+}  // namespace amdrnpu_test

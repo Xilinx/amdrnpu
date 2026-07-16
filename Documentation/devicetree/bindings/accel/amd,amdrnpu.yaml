@@ -1,0 +1,301 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/misc/amd,amdrnpu.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: AMD amdrnpu - RPU management interface
+
+maintainers:
+  - AMD <linux-amd@amd.com>
+
+description: |
+  The amdrnpu node registers one logical APU-facing control path for an
+  on-chip real-time processor (RPU cluster member) driven by upstream remoteproc.
+
+  Typical integration (Versal Telluride class SoCs): place this node alongside
+  the Xilinx RPU remoteproc device on the platform bus—not nested under r5f@—and
+  use amd,remoteproc to point at that remoteproc node. The amdrnpu
+  platform driver is bound only to amd,amdrnpu; Xilinx remoteproc and
+  firmware lifecycles remain under the vendor RPU binding.
+
+  Kernel driver role (drivers/accel/tessai-agent, DRM accelerator subsystem):
+
+    - GEM-backed DMA-coherent buffers in two heaps: one window sized for firmware
+      and RPU-visible traffic (typically 32-bit DMA), and one for device-side /
+      accelerator traffic (typically 64-bit DMA). Firmware may dereference GEM
+      bus addresses communicated over the RPMsg command path.
+
+    - A render-node DRM façade (mmap, GEM handles, dma-buf, drm_syncobj) so
+      userspace can allocate and pin memory in either heap safely.
+
+    - Asynchronous firmware control: userspace submits opaque command buffers;
+      the kernel forwards operation + arguments over virtio RPMsg to RPU
+      firmware exposing the "amdrnpu" RPMsg endpoint. Responses complete
+      through the same DRM channel using sync objects / fences.
+
+  Each instance binds to exactly one remoteproc (one RPU) via amd,remoteproc.
+  The RPMsg probe matches advertised channels against that node's phandle.
+  Multiple SoC instances instantiate multiple amdrnpu nodes (one phandle
+  each).
+
+  Bank children share a single compatible "amd,amdrnpu-bank" and are
+  distinguished by the "reg" cell, which is a pure logical bank index (no
+  MMIO). The reg value is also the bank slot index used by the kernel driver
+  and by the AMDRNPU_MEMORY_* identifiers in UAPI:
+
+    bank@0   reg = <0>   RPU-facing bank (32-bit DMA, AMDRNPU_MEMORY_RPU)
+    bank@1   reg = <1>   device/accelerator bank (64-bit DMA, AMDRNPU_MEMORY_DEVICE)
+
+  Exactly one of each role is required today; the schema bounds reg to the
+  defined slots and may be extended later if more banks are introduced.
+
+properties:
+  compatible:
+    const: amd,amdrnpu
+
+  amd,remoteproc:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: |
+      DT node corresponding to this RPU's remoteproc (e.g. r5f@… under the
+      cluster). Firmware on that processor must advertise the "amdrnpu"
+      rpmsg channel.
+
+  "#address-cells":
+    const: 1
+
+  "#size-cells":
+    const: 0
+
+  "bank@0":
+    type: object
+    description: |
+      RPU-facing bank (matches AMDRNPU_MEMORY_RPU in driver UAPI). Buffers shared
+      with remoteproc firmware via 32-bit RPU DMA / carveouts carved from DDR.
+      Logical DMA heap backed by dma_alloc_coherent() on its own struct device,
+      instantiated via devm_of_platform_populate() in the amdrnpu parent
+      driver and probed by the bank platform_driver. The driver coerces a
+      32-bit coherent dma-mask after of_dma_configure().
+
+      The bank intentionally does NOT set dma-coherent: GEM allocations must be
+      non-cacheable normal memory so RPU DMA does not require CPU-side cache
+      maintenance.
+
+    properties:
+      compatible:
+        const: amd,amdrnpu-bank
+
+      reg:
+        maxItems: 1
+        items:
+          - const: 0
+        description: |
+          Logical bank index. Must be 0 for the RPU-facing bank; this value
+          is the kernel slot index and the AMDRNPU_MEMORY_RPU identifier.
+
+      memory-region:
+        $ref: /schemas/types.yaml#/definitions/phandle
+        description: |
+          Phandle to a reserved-memory node used as this bank's DMA heap.
+          For the RPU-facing bank, use a 32-bit-reachable pool declared as:
+
+            compatible = "shared-dma-pool";
+            reusable;
+
+          Do not use "no-map" on this pool: the kernel binds reusable
+          shared-dma-pool regions as a CMA area (dev->cma_area) and
+          amdrnpu allocates GEM backing via dma_alloc_noncoherent()
+          from that pool. The RPU firmware must be able to access the
+          physical addresses in this span (MPU / carveout agreement).
+
+          On Versal-net / VEK385 the official base DT places "linux,cma-
+          default" on this 32-bit-reachable pool (rpu_gem_cma@20000000,
+          phandle 0x500). That makes it the system-wide CMA fallback in
+          addition to being amdrnpu's RPU heap, so it is implicitly
+          shared with any other APU-side driver that does not declare its
+          own memory-region. Size accordingly.
+
+      iommus:
+        $ref: /schemas/types.yaml#/definitions/phandle-array
+        description: |
+          Optional; when present, of_iommu_configure() attaches the bank's
+          struct device to an SMMU domain so allocations are translated for
+          this master only.
+
+    required:
+      - compatible
+      - reg
+    additionalProperties: false
+
+  "bank@1":
+    type: object
+    description: |
+      Device/accelerator-facing bank (matches AMDRNPU_MEMORY_DEVICE in driver
+      UAPI; also AMDRNPU_MEMORY_DEFAULT). Same per-bank struct device model as
+      bank@0; the driver coerces a 64-bit coherent dma-mask after
+      of_dma_configure(), falling back to 32-bit if the platform rejects
+      coherent 64-bit allocations. Like bank@0, the node intentionally does
+      NOT set dma-coherent.
+
+    properties:
+      compatible:
+        const: amd,amdrnpu-bank
+
+      reg:
+        maxItems: 1
+        items:
+          - const: 1
+        description: |
+          Logical bank index. Must be 1 for the device-facing bank; this
+          value is the kernel slot index and the AMDRNPU_MEMORY_DEVICE
+          identifier.
+
+      memory-region:
+        $ref: /schemas/types.yaml#/definitions/phandle
+        description: |
+          Phandle to a reserved-memory node for the device/accelerator heap.
+          Typical high-DDR integration uses:
+
+            compatible = "shared-dma-pool";
+            reusable;
+
+          "no-map" is not required for this bank; reusable CMA pools are
+          sufficient when the platform exposes a 64-bit-reachable region.
+
+          On Versal-net / VEK385 the official base DT exposes this as an
+          unlabeled buffer@50000000000 (4 GiB at 0x500_0000_0000) carrying
+          an explicit phandle = <0x01>. Because there is no DT label, the
+          amdrnpu node references the pool by numeric phandle
+          (memory-region = <0x01>). The pool does NOT carry "linux,cma-
+          default" -- that flag is on rpu_gem_cma@20000000 (bank@0)
+          instead -- so this 4 GiB pool is effectively exclusive to
+          consumers that bind it by explicit memory-region phandle.
+
+      iommus:
+        $ref: /schemas/types.yaml#/definitions/phandle-array
+        description: |
+          Optional SMMU domain for this bank's master only.
+
+    required:
+      - compatible
+      - reg
+    additionalProperties: false
+
+required:
+  - compatible
+  - amd,remoteproc
+  - "#address-cells"
+  - "#size-cells"
+  - bank@0
+  - bank@1
+
+additionalProperties: false
+
+examples:
+  - |
+    /*
+     * Versal-net / VEK385: official Versal-net base DT layout. Both
+     * reserved-memory pools are declared with explicit phandle values
+     * and NO DT labels; amdrnpu's banks reference them by
+     * numeric phandle. linux,cma-default lives on the small RPU pool
+     * (system-wide CMA fallback), the 4 GiB pool is exclusive to
+     * consumers that bind it explicitly.
+     */
+    reserved-memory {
+        #address-cells = <2>;
+        #size-cells = <2>;
+        ranges;
+
+        rpu_gem_cma@20000000 {
+            phandle = <0x500>;
+            compatible = "shared-dma-pool";
+            reusable;
+            reg = <0x0 0x20000000 0x0 0x20000000>;
+            linux,cma-default;
+        };
+
+        buffer@50000000000 {
+            reg = <0x500 0x0 0x1 0x0>;
+            compatible = "shared-dma-pool";
+            reusable;
+            phandle = <0x01>;
+        };
+    };
+
+    r5f_0: r5f@0 {
+        compatible = "xlnx,zynqmp-r5f";
+        reg = <0x0 0xff9a0000 0x0 0x10000>;
+        /* clocks, resets, firmware-name, … */
+    };
+
+    amdrnpu {
+        compatible = "amd,amdrnpu";
+        amd,remoteproc = <&r5f_0>;
+
+        #address-cells = <1>;
+        #size-cells    = <0>;
+
+        bank@0 {
+            compatible    = "amd,amdrnpu-bank";
+            reg           = <0>;
+            memory-region = <0x500>; /* rpu_gem_cma@20000000 */
+        };
+
+        bank@1 {
+            compatible    = "amd,amdrnpu-bank";
+            reg           = <1>;
+            memory-region = <0x01>;  /* buffer@50000000000 */
+        };
+    };
+  - |
+    /*
+     * IOMMU-enabled variant: each bank attaches to its own SMMU stream.
+     * Same official Versal-net pool layout as the non-IOMMU example.
+     */
+    reserved-memory {
+        #address-cells = <2>;
+        #size-cells = <2>;
+        ranges;
+
+        rpu_gem_cma@20000000 {
+            phandle = <0x500>;
+            compatible = "shared-dma-pool";
+            reusable;
+            reg = <0x0 0x20000000 0x0 0x20000000>;
+            linux,cma-default;
+        };
+
+        buffer@50000000000 {
+            reg = <0x500 0x0 0x1 0x0>;
+            compatible = "shared-dma-pool";
+            reusable;
+            phandle = <0x01>;
+        };
+    };
+
+    r5f_0: r5f@0 {
+        compatible = "xlnx,zynqmp-r5f";
+        reg = <0x0 0xff9a0000 0x0 0x10000>;
+    };
+
+    amdrnpu {
+        compatible = "amd,amdrnpu";
+        amd,remoteproc = <&r5f_0>;
+
+        #address-cells = <1>;
+        #size-cells    = <0>;
+
+        bank@0 {
+            compatible    = "amd,amdrnpu-bank";
+            reg           = <0>;
+            memory-region = <0x500>; /* rpu_gem_cma@20000000 */
+            iommus        = <&smmu_rpu 0x42 0x0>;
+        };
+
+        bank@1 {
+            compatible    = "amd,amdrnpu-bank";
+            reg           = <1>;
+            memory-region = <0x01>;  /* buffer@50000000000 */
+            iommus        = <&smmu_dev 0x43 0x0>;
+        };
+    };

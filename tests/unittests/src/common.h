@@ -1,22 +1,22 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 //
-// tessai-agent gtest harness: shared helpers + the TessaiAgentTest
+// amdrnpu gtest harness: shared helpers + the AmdrnpuTest
 // fixture that opens /dev/dri/cardN once per test, closes in TearDown,
 // and skips cleanly (GTEST_SKIP) when the driver isn't loaded so we
 // don't hard-fail CI runs on dev hosts.
 //
-// Every helper here is libdrm-free: tessai_agent_lib already wraps
+// Every helper here is libdrm-free: amdrnpu_lib already wraps
 // these ioctls for production users, but the kernel UAPI surface
-// (drm.h, drm_mode.h, sync_file.h, tessai-agent/tessai_agent.h) is
+// (drm.h, drm_mode.h, sync_file.h, amdrnpu/amdrnpu.h) is
 // what we actually want to test. Calling raw ioctls also keeps the
 // unittest binary cross-buildable against any sysroot that ships
 // kernel UAPI headers -- the same constraint the retired
-// tests/src/tessai_lifecycle.c libdrm-free C smoke binary lived
+// tests/src/amdrnpu_lifecycle.c libdrm-free C smoke binary lived
 // under before this gtest tree took over its role.
 
-#ifndef TESSAI_AGENT_TEST_COMMON_H_
-#define TESSAI_AGENT_TEST_COMMON_H_
+#ifndef AMDRNPU_TEST_COMMON_H_
+#define AMDRNPU_TEST_COMMON_H_
 
 #include <gtest/gtest.h>
 
@@ -38,16 +38,16 @@
 #include <drm/drm_mode.h>
 #include <linux/sync_file.h>
 
-#include <tessai-agent/tessai_agent.h>
+#include <amdrnpu/amdrnpu.h>
 
 #include "utils.h"  // utest_common
 
-namespace tessai_test {
+namespace amdrnpu_test {
 
 // ---------------------------------------------------------------------
 // Magic firmware opcodes (kept in lockstep with the slave's
-// tessai_agent_endpoint.c -- mirror copy at
-// tests/rpu_app/src/driver/src/tessai_agent_endpoint.c).
+// amdrnpu_endpoint.c -- mirror copy at
+// tests/rpu_app/src/driver/src/amdrnpu_endpoint.c).
 // ---------------------------------------------------------------------
 
 // fw_echo writeback: firmware snprintfs "rsp: command id: %u,
@@ -74,7 +74,7 @@ constexpr uint32_t kFwEchoRegionMax = 400u;
 // VEK385 DEVICE-bank PA window -- the reservation that bank@1 in our
 // DT binds to via `memory-region = <0x01>` (numeric phandle, not a
 // label; the official Versal-net /reserved-memory layout doesn't
-// label these pools, so the tessai-agent node references the pool
+// label these pools, so the amdrnpu node references the pool
 // by its declared phandle value).
 //
 // Phandle 0x01 resolves to the high-DDR pool declared by the
@@ -91,7 +91,7 @@ constexpr uint32_t kFwEchoRegionMax = 400u;
 // SEPARATE 512 MiB RPU pool (`rpu_gem_cma@20000000`, phandle 0x500)
 // in the official layout -- NOT on this 4 GiB high-DDR pool. So this
 // device bank is, in practice, dedicated to consumers that bind it
-// by explicit memory-region phandle (today: tessai-agent's bank@1).
+// by explicit memory-region phandle (today: amdrnpu's bank@1).
 //
 // To verify the live layout matches these constants on the board:
 //   ssh root@vek385 'hexdump -e "\" 0x%08x\"\n" \
@@ -104,7 +104,7 @@ constexpr uint32_t kFwEchoRegionMax = 400u;
 // If the base DTB ever changes the pool size, bump kDeviceShmemSize
 // to match.
 //
-// Used by TessaiAgentCmd.DeviceShmemAddrRoundTrip to assert that the
+// Used by AmdrnpuCmd.DeviceShmemAddrRoundTrip to assert that the
 // PA the kernel patched into the wire (and that the RPU echoed back)
 // really landed inside the DEVICE bank.
 constexpr uint64_t kDeviceShmemBase = 0x50000000000ull;  // 0x500_0000_0000 = buffer@50000000000 base
@@ -123,20 +123,20 @@ constexpr uint64_t kDeviceShmemEnd  = kDeviceShmemBase + kDeviceShmemSize;
 // untouched. Userspace sscanf's the banner to verify the wire
 // round-trip carried the kernel-patched PA + size faithfully back.
 // Magic: 'D','A','P','P' so it's visible on rpmsg traces.
-// Used by TessaiAgentCmd.DeviceShmemAddrRoundTrip.
+// Used by AmdrnpuCmd.DeviceShmemAddrRoundTrip.
 constexpr uint32_t kFwOpDeviceAddrPing = 0x44415050u;
 constexpr uint32_t kFwDappBannerMax    = 128u;
 
 // Fault-injection opcodes -- firmware sets the matching
 // command_rsp_type on the wire so the kernel maps to a specific
-// dma_fence errno. Documented in tessai-agent docs/commands.md §3.
+// dma_fence errno. Documented in amdrnpu docs/commands.md §3.
 constexpr uint32_t kFwOpFaultRemoteIo  = 0x52454D49u;  // 'R','E','M','I'
 constexpr uint32_t kFwOpFaultNotSupp   = 0x4E4F5453u;  // 'N','O','T','S'
 constexpr uint32_t kFwOpFaultCancelled = 0x43414E43u;  // 'C','A','N','C'
 constexpr uint32_t kFwOpFaultBadRsp    = 0x42414443u;  // 'B','A','D','C'
 
 // Older kernel UAPI headers may not expose the EXPORT_SYNC_FILE flag
-// even though every kernel that ships the tessai-agent driver does
+// even though every kernel that ships the amdrnpu driver does
 // support it. Local fallback keeps the test compilable against the
 // Vitis sysroot's headers.
 #ifndef DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE
@@ -156,9 +156,9 @@ constexpr uint64_t kSubmitTimeoutNs = 2ull * 1'000'000'000ull;
 int drm_get_name(int fd, char *out, size_t out_sz);
 
 // Iterates /dev/dri/cardN entries, returns the first fd whose driver
-// name is TESSAI_AGENT_DRIVER_NAME. @out_path is populated on success.
+// name is AMDRNPU_DRIVER_NAME. @out_path is populated on success.
 // Returns -1 on failure (caller should GTEST_SKIP).
-int open_tessai_card(char *out_path = nullptr, size_t out_sz = 0);
+int open_amdrnpu_card(char *out_path = nullptr, size_t out_sz = 0);
 
 // ---------------------------------------------------------------------
 // Time helpers.
@@ -168,15 +168,15 @@ uint64_t now_ns();
 
 // ---------------------------------------------------------------------
 // Wire-protocol primitives. Each wraps one ioctl directly; the
-// raw-ioctl style (rather than going through libtessai_agent) is
+// raw-ioctl style (rather than going through libamdrnpu) is
 // what lets the suite probe negative paths and bound-checks that
-// libtessai_agent guards against on the userspace side.
+// libamdrnpu guards against on the userspace side.
 // ---------------------------------------------------------------------
 
-// TESSAI_CMD_SUBMIT. @args may be null when @num_args == 0. Returns 0
+// AMDRNPU_CMD_SUBMIT. @args may be null when @num_args == 0. Returns 0
 // on success and writes the kernel-allocated syncobj handle.
 int do_cmd_submit(int fd, uint32_t command_op,
-		  const struct tessai_arg *args, uint32_t num_args,
+		  const struct amdrnpu_arg *args, uint32_t num_args,
 		  uint32_t *out_handle);
 
 // DRM_IOCTL_SYNCOBJ_WAIT with @timeout_ns from now. Does NOT destroy
@@ -186,7 +186,7 @@ int do_syncobj_wait(int fd, uint32_t handle, uint64_t timeout_ns);
 // DRM_IOCTL_SYNCOBJ_DESTROY.
 int do_syncobj_destroy(int fd, uint32_t handle);
 
-// TESSAI_BUF_ALLOC.
+// AMDRNPU_BUF_ALLOC.
 int do_buf_alloc(int fd, uint32_t mtype, uint64_t size, uint32_t *out_handle);
 
 // DRM_IOCTL_GEM_CLOSE.
@@ -195,7 +195,7 @@ int do_gem_close(int fd, uint32_t handle);
 // DRM_IOCTL_MODE_MAP_DUMB -- gets the mmap offset for @handle.
 int do_map_dumb(int fd, uint32_t handle, uint64_t *out_offset);
 
-// TESSAI_BUF_SYNC. length=0 means "@offset..end".
+// AMDRNPU_BUF_SYNC. length=0 means "@offset..end".
 int do_buf_sync(int fd, uint32_t handle, uint32_t direction,
 		uint64_t offset, uint64_t length);
 
@@ -219,26 +219,26 @@ int do_syncobj_busy_poll(int fd, uint32_t handle,
 // ---------------------------------------------------------------------
 // EL0 userspace dcache invalidate -- only for the inflight-pin subtest
 // where the GEM handle was already GEM_CLOSE'd before the syncobj
-// signaled, so TESSAI_BUF_SYNC is unreachable. No-op on non-arm64.
+// signaled, so AMDRNPU_BUF_SYNC is unreachable. No-op on non-arm64.
 // ---------------------------------------------------------------------
 void uspace_dcache_invalidate(const void *vaddr, size_t length);
 
 // ---------------------------------------------------------------------
-// gtest fixture: opens the tessai-agent DRM card, skips if missing.
+// gtest fixture: opens the amdrnpu DRM card, skips if missing.
 //
 // Inherit from this fixture in any TEST_F that needs an open card fd.
 // Pure-discovery / negative tests that want to probe without a working
-// device can use raw TEST() + open_tessai_card() directly.
+// device can use raw TEST() + open_amdrnpu_card() directly.
 // ---------------------------------------------------------------------
-class TessaiAgentTest : public ::testing::Test {
+class AmdrnpuTest : public ::testing::Test {
 protected:
 	void SetUp() override
 	{
 		char path[PATH_MAX] = {};
-		fd_ = open_tessai_card(path, sizeof(path));
+		fd_ = open_amdrnpu_card(path, sizeof(path));
 		if (fd_ < 0)
-			GTEST_SKIP() << "tessai-agent DRM card not found; "
-				     << "is tessai_agent.ko loaded and the "
+			GTEST_SKIP() << "amdrnpu DRM card not found; "
+				     << "is amdrnpu.ko loaded and the "
 				     << "rpmsg channel bound?";
 		card_path_ = path;
 	}
@@ -255,6 +255,6 @@ protected:
 	std::string card_path_;
 };
 
-}  // namespace tessai_test
+}  // namespace amdrnpu_test
 
-#endif  // TESSAI_AGENT_TEST_COMMON_H_
+#endif  // AMDRNPU_TEST_COMMON_H_

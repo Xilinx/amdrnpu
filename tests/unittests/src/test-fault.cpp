@@ -2,22 +2,22 @@
 // Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Fault-class fence-errno mapping (Tier B). Requires an RPU endpoint
-// build with TESSAI_FW_OP_FAULT_* opcodes wired into the
-// tessai_agent endpoint (tests/rpu_app/.../tessai_agent_endpoint.c
+// build with AMDRNPU_FW_OP_FAULT_* opcodes wired into the
+// amdrnpu endpoint (tests/rpu_app/.../amdrnpu_endpoint.c
 // or RPURuntime's equivalent). The bundled
 // tests/rpu_app/ endpoint has these handlers compiled in.
 //
 // Tests in this file (mapping kept for tests/README.md cross-ref):
-//   - TessaiAgentFault.RemoteIo                ('REMI' -> -EREMOTEIO)
-//   - TessaiAgentFault.NotSupported            ('NOTS' -> -EOPNOTSUPP)
-//   - TessaiAgentFault.Cancelled               ('CANC' -> -ECANCELED)
-//   - TessaiAgentFault.InvalidRspTypeFallback  ('BADC' -> driver-side -EREMOTEIO)
+//   - AmdrnpuFault.RemoteIo                ('REMI' -> -EREMOTEIO)
+//   - AmdrnpuFault.NotSupported            ('NOTS' -> -EOPNOTSUPP)
+//   - AmdrnpuFault.Cancelled               ('CANC' -> -ECANCELED)
+//   - AmdrnpuFault.InvalidRspTypeFallback  ('BADC' -> driver-side -EREMOTEIO)
 //
-// Documented in tessai-agent docs/commands.md §3.
+// Documented in amdrnpu docs/commands.md §3.
 
 #include "common.h"
 
-using namespace tessai_test;
+using namespace amdrnpu_test;
 
 namespace {
 
@@ -54,21 +54,21 @@ void RunFaultClass(int fd, const char *name, uint32_t op,
 
 }  // anonymous namespace
 
-class TessaiAgentFault : public TessaiAgentTest {};
+class AmdrnpuFault : public AmdrnpuTest {};
 
-TEST_F(TessaiAgentFault, RemoteIo)
+TEST_F(AmdrnpuFault, RemoteIo)
 {
 	RunFaultClass(fd_, "REMI -> RSP_REMOTEIO",
 		      kFwOpFaultRemoteIo, -EREMOTEIO);
 }
 
-TEST_F(TessaiAgentFault, NotSupported)
+TEST_F(AmdrnpuFault, NotSupported)
 {
 	RunFaultClass(fd_, "NOTS -> RSP_NOTSUPPORTED",
 		      kFwOpFaultNotSupp, -EOPNOTSUPP);
 }
 
-TEST_F(TessaiAgentFault, Cancelled)
+TEST_F(AmdrnpuFault, Cancelled)
 {
 	RunFaultClass(fd_, "CANC -> RSP_CANCELLED",
 		      kFwOpFaultCancelled, -ECANCELED);
@@ -79,7 +79,7 @@ TEST_F(TessaiAgentFault, Cancelled)
 // range); the driver synthesizes -EREMOTEIO without trusting the
 // wire value. commands.md §3: "invalid rsp_type ... completes the
 // command with dma_fence error -EREMOTEIO".
-TEST_F(TessaiAgentFault, InvalidRspTypeFallback)
+TEST_F(AmdrnpuFault, InvalidRspTypeFallback)
 {
 	RunFaultClass(fd_, "BADC -> rsp_type=99 (driver fallback)",
 		      kFwOpFaultBadRsp, -EREMOTEIO);

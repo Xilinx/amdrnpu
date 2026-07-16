@@ -1,8 +1,8 @@
-# Device-tree binding: `amd,tessai-agent`
+# Device-tree binding: `amd,amdrnpu`
 
-This document describes how the `tessai-agent` driver is wired into a
+This document describes how the `amdrnpu` driver is wired into a
 SoC's device tree. The machine-checkable schema lives at
-[`Documentation/devicetree/bindings/accel/amd,tessai-agent.yaml`](../Documentation/devicetree/bindings/accel/amd,tessai-agent.yaml)
+[`Documentation/devicetree/bindings/accel/amd,amdrnpu.yaml`](../Documentation/devicetree/bindings/accel/amd,amdrnpu.yaml)
 and is the source of truth; this page is a friendlier
 prose-and-diagram reference.
 
@@ -12,15 +12,15 @@ prose-and-diagram reference.
 
 ```mermaid
 flowchart TB
-    subgraph TOP["Parent node (compatible = amd,tessai-agent)"]
-        P_COMPAT["compatible<br/>= amd,tessai-agent"]
+    subgraph TOP["Parent node (compatible = amd,amdrnpu)"]
+        P_COMPAT["compatible<br/>= amd,amdrnpu"]
         P_RPROC["amd,remoteproc<br/>= sibling rproc r5f@…"]
         P_AC["#address-cells = 1<br/>#size-cells = 0"]
     end
 
     subgraph CHILDREN["Memory bank children — bank@0, bank@1"]
-        B0["bank@0  (RPU bank)<br/>compatible = amd,tessai-agent-bank<br/>reg = 0  (TESSAI_BANK_RPU / TESSAI_MEMORY_RPU)<br/>32-bit coherent mask (driver)<br/>memory-region: 32-bit-reachable carveout"]
-        B1["bank@1  (device bank)<br/>compatible = amd,tessai-agent-bank<br/>reg = 1  (TESSAI_BANK_DEV / TESSAI_MEMORY_DEVICE)<br/>64-bit coherent mask (driver, 32-bit fallback)<br/>memory-region: device/CMA carveout"]
+        B0["bank@0  (RPU bank)<br/>compatible = amd,amdrnpu-bank<br/>reg = 0  (AMDRNPU_BANK_RPU / AMDRNPU_MEMORY_RPU)<br/>32-bit coherent mask (driver)<br/>memory-region: 32-bit-reachable carveout"]
+        B1["bank@1  (device bank)<br/>compatible = amd,amdrnpu-bank<br/>reg = 1  (AMDRNPU_BANK_DEV / AMDRNPU_MEMORY_DEVICE)<br/>64-bit coherent mask (driver, 32-bit fallback)<br/>memory-region: device/CMA carveout"]
     end
 
     TOP --> CHILDREN
@@ -30,28 +30,28 @@ flowchart TB
 ```
 
 Upstream-friendly placement (**Versal / Telluride** using Xilinx **`xlnx,zynqmp-r5f`**
-remoteproc): keep **`amd,tessai-agent` as a sibling** of the **`r5f@…`**
+remoteproc): keep **`amd,amdrnpu` as a sibling** of the **`r5f@…`**
 remoteproc node under the soc / platform bus, and tie them with **`amd,remoteproc`**.
 
 A binding instance always has:
 
-- **One** parent node with `compatible = "amd,tessai-agent"` and an
+- **One** parent node with `compatible = "amd,amdrnpu"` and an
   `amd,remoteproc` phandle pointing at the RPU's remoteproc DT node.
 
 - **Two** child nodes (**`bank@0`** and **`bank@1`**)—logical DMA heaps backing
   GEM allocation for (**a**) firmware-visible / RPU 32-bit memory and (**b**) a
   broader device-visible bank. Both carry the **same** compatible
-  **`amd,tessai-agent-bank`**; the role is encoded by the logical-index
+  **`amd,amdrnpu-bank`**; the role is encoded by the logical-index
   **`reg`** cell. The reg value is the kernel slot index
-  (`tdev->banks[reg]`) and is also the matching UAPI `TESSAI_MEMORY_*`
+  (`tdev->banks[reg]`) and is also the matching UAPI `AMDRNPU_MEMORY_*`
   identifier.
 
 The driver allocates buffers mapped for remote firmware DMA and accelerator-side DMA,
-and forwards opaque control payloads to firmware over the **`tessai-agent`** RPMsg
+and forwards opaque control payloads to firmware over the **`amdrnpu`** RPMsg
 virtio channel on that processor.
 
 Multiple SoC instances (**one remoteproc each**) instantiate multiple
-`tessai-agent` nodes (`amd,remoteproc` disambiguates). See [`architecture.md`](architecture.md).
+`amdrnpu` nodes (`amd,remoteproc` disambiguates). See [`architecture.md`](architecture.md).
 
 ---
 
@@ -59,8 +59,8 @@ Multiple SoC instances (**one remoteproc each**) instantiate multiple
 
 | Property | Type | Required | Description |
 |----------|------|:-------:|-------------|
-| `compatible` | string | yes | Must be `"amd,tessai-agent"`. |
-| `amd,remoteproc` | phandle | yes | Phandle of the remoteproc node whose firmware advertises the `tessai-agent` RPMsg endpoint. Used to pair each DRM instance with the correct channel in multi-core systems (see [`architecture.md` §3](architecture.md#3-multiple-instances-two-driver-halves-each)). |
+| `compatible` | string | yes | Must be `"amd,amdrnpu"`. |
+| `amd,remoteproc` | phandle | yes | Phandle of the remoteproc node whose firmware advertises the `amdrnpu` RPMsg endpoint. Used to pair each DRM instance with the correct channel in multi-core systems (see [`architecture.md` §3](architecture.md#3-multiple-instances-two-driver-halves-each)). |
 
 **Required on parent:**
 
@@ -71,22 +71,22 @@ Multiple SoC instances (**one remoteproc each**) instantiate multiple
 
 **`dma-ranges`** is omitted: memory placement comes from each bank's
 **`memory-region`**, and per-bank dma-mask width is enforced in the
-tessai-agent kernel driver (32 vs 64‑bit coherent) after
+amdrnpu kernel driver (32 vs 64‑bit coherent) after
 **`of_dma_configure()`**.
 
 **Per-bank `compatible`:** required. Each bank child carries the
-**single shared** compatible **`amd,tessai-agent-bank`**, so the parent
+**single shared** compatible **`amd,amdrnpu-bank`**, so the parent
 driver can use **`devm_of_platform_populate()`** (the upstream-preferred path)
 to bind both children against one bank `platform_driver`.
 
 **Per-bank `reg`:** required, **logical index only** (not MMIO). The reg
-value selects the bank role and matches the kernel `enum tessai_bank_index`
-and the UAPI `TESSAI_MEMORY_*` enum:
+value selects the bank role and matches the kernel `enum amdrnpu_bank_index`
+and the UAPI `AMDRNPU_MEMORY_*` enum:
 
 | `reg` | Role | Driver enum | UAPI enum |
 |:----:|------|-------------|-----------|
-| `0` | RPU-facing (32-bit) | `TESSAI_BANK_RPU` | `TESSAI_MEMORY_RPU` |
-| `1` | Device-facing (64-bit) | `TESSAI_BANK_DEV` | `TESSAI_MEMORY_DEVICE` |
+| `0` | RPU-facing (32-bit) | `AMDRNPU_BANK_RPU` | `AMDRNPU_MEMORY_RPU` |
+| `1` | Device-facing (64-bit) | `AMDRNPU_BANK_DEV` | `AMDRNPU_MEMORY_DEVICE` |
 
 Today the binding requires exactly one of each (`bank@0`, `bank@1`); the
 schema may be extended on future SoCs.
@@ -101,8 +101,8 @@ mandatory `reg` cell selects the role.
 
 | Subnode | Required `compatible` | Required `reg` | Driver slot | UAPI |
 |---------|----------------------|---|-------------|------|
-| `bank@0` | **`amd,tessai-agent-bank`** | `<0>` | `TESSAI_BANK_RPU` (32-bit mask) | `TESSAI_MEMORY_RPU` |
-| `bank@1` | **`amd,tessai-agent-bank`** | `<1>` | `TESSAI_BANK_DEV` (64-bit mask, fallback 32) | `TESSAI_MEMORY_DEVICE` |
+| `bank@0` | **`amd,amdrnpu-bank`** | `<0>` | `AMDRNPU_BANK_RPU` (32-bit mask) | `AMDRNPU_MEMORY_RPU` |
+| `bank@1` | **`amd,amdrnpu-bank`** | `<1>` | `AMDRNPU_BANK_DEV` (64-bit mask, fallback 32) | `AMDRNPU_MEMORY_DEVICE` |
 
 `reg` is a **logical bank index only** — it is not an MMIO base. Buffer
 placement is driven by **`memory-region`** (the reserved-memory node's own
@@ -110,29 +110,29 @@ placement is driven by **`memory-region`** (the reserved-memory node's own
 
 **`dma-coherent` is intentionally not used on the bank nodes.** Native GEM
 buffers use **`dma_alloc_noncoherent()`** (contiguous, cacheable CPU mappings). Userspace
-must **`TESSAI_BUF_SYNC`** around device DMA; the driver does not rely on
+must **`AMDRNPU_BUF_SYNC`** around device DMA; the driver does not rely on
 hardware cache snooping from the reserved pools.
 
 | Property | Type | Required | Description |
 |----------|------|:-------:|-------------|
-| `compatible` | string | yes | Must be `"amd,tessai-agent-bank"` for both children. |
+| `compatible` | string | yes | Must be `"amd,amdrnpu-bank"` for both children. |
 | `reg` | u32 | yes | Logical bank index. `0` for the RPU bank, `1` for the device bank. Range bounded by the schema and re-checked by the driver. |
 | `memory-region` | phandle | no | Reserved-memory **`shared-dma-pool`** with **`reusable`** (CMA binding on the bank device). **`bank@0` must not use `no-map`** on its pool. Omit to use ordinary default heaps. |
 | `iommus` | phandle-array | no | SMMU stream(s) for the bank's `struct device`. Present on platforms with IOMMU, omitted otherwise. The same driver code handles both configurations. |
 
 Probe sequence:
 
-1. The parent's `platform_driver` (matching `amd,tessai-agent`) calls
+1. The parent's `platform_driver` (matching `amd,amdrnpu`) calls
    **`platform_set_drvdata()`** then **`devm_of_platform_populate()`**.
 2. The OF core walks each child and creates a `platform_device`; because the
    bank `platform_driver` is **already registered** (init order in the module),
    each bank probes **synchronously** before populate returns.
 3. Bank probe reads `reg` (the bank index), validates it is in
-   `[0, TESSAI_NUM_BANKS - 1]`, calls
+   `[0, AMDRNPU_NUM_BANKS - 1]`, calls
    `of_reserved_mem_device_init_by_idx()` (reusable pools bind via
    **`dev->cma_area`**; dedicated `no-map` pools use **`dev->dma_mem`** —
-   tessai-agent treats either as a valid heap), then
-   `dma_coerce_mask_and_coherent()` (32-bit when `reg == TESSAI_BANK_RPU`,
+   amdrnpu treats either as a valid heap), then
+   `dma_coerce_mask_and_coherent()` (32-bit when `reg == AMDRNPU_BANK_RPU`,
    64-bit-with-fallback otherwise), and registers itself into
    `tdev->banks[reg]`.
 4. After populate returns, the parent verifies both bank slots are present and
@@ -146,7 +146,7 @@ Each bank's `memory-region` points at a **`shared-dma-pool`** reserved-memory
 node. On VEK385-class systems both banks use **reusable** CMA pools (not
 `no-map`). The official Versal-net base DT declares both pools with
 **explicit `phandle` values** and **no DT labels**, so the
-`tessai-agent` node references them by numeric phandle:
+`amdrnpu` node references them by numeric phandle:
 
 ```dts
 reserved-memory {
@@ -190,7 +190,7 @@ Notes:
 - **`linux,cma-default`** sits on **`bank@0`** (`rpu_gem_cma@20000000`),
   making the small 512 MiB RPU-reachable pool the system-wide CMA
   fallback. APU-side drivers without their own `memory-region` therefore
-  share this pool with `tessai-agent`'s RPU bank — size
+  share this pool with `amdrnpu`'s RPU bank — size
   `CONFIG_CMA_SIZE_MBYTES` and any contended-driver allocation budgets
   with that in mind.
 - **`bank@1`** intentionally does **not** carry `linux,cma-default` — the
@@ -198,7 +198,7 @@ Notes:
   explicit `memory-region` phandle.
 - Phandle values `0x500` (RPU pool) and `0x01` (device pool) are part of
   the Versal-net SoC-level DT contract: the Versal-net team owns the
-  pool definitions, `tessai-agent` owns the consumer references. Any
+  pool definitions, `amdrnpu` owns the consumer references. Any
   change to either side requires multi-team alignment.
 - Sizes and base addresses are SoC-specific; RPU firmware MPU must agree on
   the physical span referenced by **`bank@0`**.
@@ -241,9 +241,9 @@ Notes:
         /* clocks, resets, firmware-name, … */
     };
 
-    /* ---------------- tessai-agent sibling instance ---------------- */
-    tessai_agent_0: tessai-agent {
-        compatible = "amd,tessai-agent";
+    /* ---------------- amdrnpu sibling instance ---------------- */
+    amdrnpu_0: amdrnpu {
+        compatible = "amd,amdrnpu";
         amd,remoteproc = <&r5f_0>;
 
         #address-cells = <1>;
@@ -251,25 +251,25 @@ Notes:
 
         /*
          * RPU-visible heap — driver coerces 32-bit coherent dma-mask.
-         * reg = <0> matches TESSAI_BANK_RPU and TESSAI_MEMORY_RPU.
+         * reg = <0> matches AMDRNPU_BANK_RPU and AMDRNPU_MEMORY_RPU.
          * memory-region binds by numeric phandle 0x500
          * (rpu_gem_cma@20000000) -- the official Versal-net pool is
          * unlabeled, so symbolic &references aren't an option.
          */
         npu_bank_rpu: bank@0 {
-            compatible    = "amd,tessai-agent-bank";
+            compatible    = "amd,amdrnpu-bank";
             reg           = <0>;
             memory-region = <0x500>;
         };
 
         /*
          * Device-side accelerator heap — prefers 64-bit mask (falls back to 32).
-         * reg = <1> matches TESSAI_BANK_DEV and TESSAI_MEMORY_DEVICE.
+         * reg = <1> matches AMDRNPU_BANK_DEV and AMDRNPU_MEMORY_DEVICE.
          * memory-region binds by numeric phandle 0x01
          * (buffer@50000000000), same labelless contract.
          */
         npu_bank_dev: bank@1 {
-            compatible    = "amd,tessai-agent-bank";
+            compatible    = "amd,amdrnpu-bank";
             reg           = <1>;
             memory-region = <0x01>;
         };
@@ -287,39 +287,39 @@ For SoCs with two R5Fs each running distinct firmware payloads:
 r5f_0: r5f@ff9a0000 { compatible = "xlnx,zynqmp-r5f"; };
 r5f_1: r5f@ff9b0000 { compatible = "xlnx,zynqmp-r5f"; };
 
-tessai_agent_0: tessai-agent {
-    compatible = "amd,tessai-agent";
+amdrnpu_0: amdrnpu {
+    compatible = "amd,amdrnpu";
     amd,remoteproc = <&r5f_0>;
 
     #address-cells = <1>;
     #size-cells    = <0>;
 
     bank@0 {
-        compatible    = "amd,tessai-agent-bank";
+        compatible    = "amd,amdrnpu-bank";
         reg           = <0>;
         memory-region = <&pool_rpu_0>;
     };
     bank@1 {
-        compatible    = "amd,tessai-agent-bank";
+        compatible    = "amd,amdrnpu-bank";
         reg           = <1>;
         memory-region = <&pool_dev_0>;
     };
 };
 
-tessai_agent_1: tessai-agent {
-    compatible = "amd,tessai-agent";
+amdrnpu_1: amdrnpu {
+    compatible = "amd,amdrnpu";
     amd,remoteproc = <&r5f_1>;
 
     #address-cells = <1>;
     #size-cells    = <0>;
 
     bank@0 {
-        compatible    = "amd,tessai-agent-bank";
+        compatible    = "amd,amdrnpu-bank";
         reg           = <0>;
         memory-region = <&pool_rpu_1>;
     };
     bank@1 {
-        compatible    = "amd,tessai-agent-bank";
+        compatible    = "amd,amdrnpu-bank";
         reg           = <1>;
         memory-region = <&pool_dev_1>;
     };
@@ -327,7 +327,7 @@ tessai_agent_1: tessai-agent {
 ```
 
 Each instance shows up as its own DRM render node
-(`/dev/dri/renderD128`, `/dev/dri/renderD129`, …) bound to the **`amd,tessai-agent`**
+(`/dev/dri/renderD128`, `/dev/dri/renderD129`, …) bound to the **`amd,amdrnpu`**
 platform probe; **`amd,remoteproc`** routes RPMsg to the pairing selected above.
 
 [`architecture.md` §3](architecture.md#3-multiple-instances-two-driver-halves-each).
@@ -341,10 +341,10 @@ schema directly:
 
 ```bash
 # Check the schema itself parses cleanly
-dt-validate -m Documentation/devicetree/bindings/accel/amd,tessai-agent.yaml
+dt-validate -m Documentation/devicetree/bindings/accel/amd,amdrnpu.yaml
 
 # Validate a compiled DTB
-dt-validate -s Documentation/devicetree/bindings/accel/amd,tessai-agent.yaml \
+dt-validate -s Documentation/devicetree/bindings/accel/amd,amdrnpu.yaml \
     /path/to/your.dtb
 ```
 
@@ -356,9 +356,9 @@ automatically.
 
 ## 8. Common pitfalls
 
-- **`TESSAI_MEMORY_RPU` without an RPU-aligned carveout.** On VEK385, the RPU GEM CMA pool is `rpu_gem_cma@20000000` (a **`shared-dma-pool`** with **`reusable`** + **`linux,cma-default`** at PA **`0x20000000`**, **512 MiB** through **`0x3fffffff`**, exposed as phandle **`<0x500>`**). The **`bank@0`** subnode needs **`memory-region = <0x500>`** (numeric phandle — the official Versal-net pool is unlabeled, so symbolic `&references` won't resolve). RPU firmware MPU must map the same span via **`zephyr,tess-rpu-gem-shm`**. Otherwise GEM alloc fails (`-ENXIO`) or the RPU faults when it dereferences **`dma_addr`**.
+- **`AMDRNPU_MEMORY_RPU` without an RPU-aligned carveout.** On VEK385, the RPU GEM CMA pool is `rpu_gem_cma@20000000` (a **`shared-dma-pool`** with **`reusable`** + **`linux,cma-default`** at PA **`0x20000000`**, **512 MiB** through **`0x3fffffff`**, exposed as phandle **`<0x500>`**). The **`bank@0`** subnode needs **`memory-region = <0x500>`** (numeric phandle — the official Versal-net pool is unlabeled, so symbolic `&references` won't resolve). RPU firmware MPU must map the same span via **`zephyr,tess-rpu-gem-shm`**. Otherwise GEM alloc fails (`-ENXIO`) or the RPU faults when it dereferences **`dma_addr`**.
 - **Wrong `reg` for the role.** `bank@0` must have `reg = <0>` (RPU) and `bank@1` must have `reg = <1>` (device). Swapping them silently mis-routes 64-bit GEMs into the 32-bit heap (or vice versa). The schema pins `reg` per node name and the driver re-checks at probe.
-- **Stale DTS using two separate compatibles** (`amd,tessai-agent-rpu-bank` / `-dev-bank`) **or no `reg`/unit-address.** Older drafts are deprecated; the schema and driver no longer accept them. Use the single shared `amd,tessai-agent-bank` compatible plus `reg`.
+- **Stale DTS using two separate compatibles** (`amd,amdrnpu-rpu-bank` / `-dev-bank`) **or no `reg`/unit-address.** Older drafts are deprecated; the schema and driver no longer accept them. Use the single shared `amd,amdrnpu-bank` compatible plus `reg`.
 - **Sharing one reserved-memory pool between both banks.** The driver attaches each heap to separate `struct device`; sharing defeats per-bank `dma-mask`.
 - **`no-map` on `bank@0`.** Reusable **`shared-dma-pool`** (without **`no-map`**) is required for the RPU CMA heap; **`no-map`** pools bind via **`dev->dma_mem`** and are not what **`bank@0`** uses on VEK385.
 - **Wrong `amd,remoteproc` target.** Confirm runtime logs tying RPMsg bind to expected remoteproc **`%pOF`** path.
@@ -369,5 +369,5 @@ automatically.
 
 - [`architecture.md`](architecture.md) — runtime behaviour (`platform_driver`,
   `rpmsg_driver`, GEM banks).
-- [`buffer-management.md`](buffer-management.md) — userspace bank selection (`TESSAI_MEMORY_*`).
+- [`buffer-management.md`](buffer-management.md) — userspace bank selection (`AMDRNPU_MEMORY_*`).
 - Upstream **`shared-dma-pool`** binding.

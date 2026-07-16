@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: MIT
 cmake_minimum_required(VERSION 3.16)
 
-project(tessai_agent_lib
+project(amdrnpu_lib
     VERSION 0.1.0
     LANGUAGES C
 )
 
 include(GNUInstallDirs)
 
-option(TESSAI_AGENT_LIB_BUILD_SHARED   "Build shared library" ON)
-option(TESSAI_AGENT_LIB_BUILD_STATIC   "Build static library" ON)
-option(TESSAI_AGENT_LIB_BUILD_EXAMPLES "Build examples" ON)
-option(TESSAI_AGENT_LINK_EXAMPLES_STATIC
-	"Link examples against libtessai_agent.a (no libtessai_agent.so at runtime)" OFF)
+option(AMDRNPU_LIB_BUILD_SHARED   "Build shared library" ON)
+option(AMDRNPU_LIB_BUILD_STATIC   "Build static library" ON)
+option(AMDRNPU_LIB_BUILD_EXAMPLES "Build examples" ON)
+option(AMDRNPU_LINK_EXAMPLES_STATIC
+	"Link examples against libamdrnpu.a (no libamdrnpu.so at runtime)" OFF)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -26,86 +26,86 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBDRM REQUIRED libdrm)
 
 # USDT/SDT static trace markers (perf-consumable) require systemtap's
-# <sys/sdt.h>. Optional: without it the TESSAI_TRACE* macros compile to no-ops.
+# <sys/sdt.h>. Optional: without it the AMDRNPU_TRACE* macros compile to no-ops.
 include(CheckIncludeFile)
-check_include_file("sys/sdt.h" TESSAI_AGENT_HAVE_SDT)
+check_include_file("sys/sdt.h" AMDRNPU_HAVE_SDT)
 
-set(TESSAI_AGENT_UAPI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../include/uapi"
-    CACHE PATH "tessai-agent UAPI")
-set(TESSAI_AGENT_LIB_SOURCES
-    src/tessai_agent_lib.c
+set(AMDRNPU_UAPI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../include/uapi"
+    CACHE PATH "amdrnpu UAPI")
+set(AMDRNPU_LIB_SOURCES
+    src/amdrnpu_lib.c
 )
 
-set(TESSAI_AGENT_LIB_HEADERS
-    include/tessai_agent/tessai_agent_lib.h
+set(AMDRNPU_LIB_HEADERS
+    include/amdrnpu/amdrnpu_lib.h
 )
 
-function(_tessai_agent_lib_configure_target tgt)
+function(_amdrnpu_lib_configure_target tgt)
     target_include_directories(${tgt}
         PUBLIC
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-            $<BUILD_INTERFACE:${TESSAI_AGENT_UAPI_DIR}>
+            $<BUILD_INTERFACE:${AMDRNPU_UAPI_DIR}>
             $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
         PRIVATE
             ${LIBDRM_INCLUDE_DIRS}
     )
     target_link_libraries(${tgt} PRIVATE ${LIBDRM_LIBRARIES})
     target_compile_options(${tgt} PRIVATE ${LIBDRM_CFLAGS_OTHER} -Wall -Wextra)
-    if(TESSAI_AGENT_HAVE_SDT)
-        target_compile_definitions(${tgt} PRIVATE TESSAI_AGENT_HAVE_SDT)
+    if(AMDRNPU_HAVE_SDT)
+        target_compile_definitions(${tgt} PRIVATE AMDRNPU_HAVE_SDT)
     endif()
 endfunction()
 
 set(_installed_targets)
 
-if(TESSAI_AGENT_LIB_BUILD_SHARED)
-    add_library(tessai_agent SHARED ${TESSAI_AGENT_LIB_SOURCES})
-    add_library(tessai_agent::tessai_agent ALIAS tessai_agent)
-    _tessai_agent_lib_configure_target(tessai_agent)
-    set_target_properties(tessai_agent PROPERTIES
+if(AMDRNPU_LIB_BUILD_SHARED)
+    add_library(amdrnpu SHARED ${AMDRNPU_LIB_SOURCES})
+    add_library(amdrnpu::amdrnpu ALIAS amdrnpu)
+    _amdrnpu_lib_configure_target(amdrnpu)
+    set_target_properties(amdrnpu PROPERTIES
         VERSION   ${PROJECT_VERSION}
         SOVERSION ${PROJECT_VERSION_MAJOR}
-        OUTPUT_NAME tessai_agent
+        OUTPUT_NAME amdrnpu
     )
-    list(APPEND _installed_targets tessai_agent)
+    list(APPEND _installed_targets amdrnpu)
 endif()
 
-if(TESSAI_AGENT_LIB_BUILD_STATIC)
-    add_library(tessai_agent_static STATIC ${TESSAI_AGENT_LIB_SOURCES})
-    add_library(tessai_agent::tessai_agent_static ALIAS tessai_agent_static)
-    _tessai_agent_lib_configure_target(tessai_agent_static)
-    set_target_properties(tessai_agent_static PROPERTIES OUTPUT_NAME tessai_agent)
-    list(APPEND _installed_targets tessai_agent_static)
+if(AMDRNPU_LIB_BUILD_STATIC)
+    add_library(amdrnpu_static STATIC ${AMDRNPU_LIB_SOURCES})
+    add_library(amdrnpu::amdrnpu_static ALIAS amdrnpu_static)
+    _amdrnpu_lib_configure_target(amdrnpu_static)
+    set_target_properties(amdrnpu_static PROPERTIES OUTPUT_NAME amdrnpu)
+    list(APPEND _installed_targets amdrnpu_static)
 endif()
 
-if(TESSAI_AGENT_LIB_BUILD_EXAMPLES AND _installed_targets)
-	# tessai_agent_test:          fw_echo round-trip CLI.
-	# tessai_agent_inout_example: COPY_IN_OUT end-to-end through the
+if(AMDRNPU_LIB_BUILD_EXAMPLES AND _installed_targets)
+	# amdrnpu_test:          fw_echo round-trip CLI.
+	# amdrnpu_inout_example: COPY_IN_OUT end-to-end through the
 	#                             RPURuntime slave (see
 	#                             lib/examples/README-inout-example.md).
 	#                             Restored after the fac10e9 reference
 	#                             merge dropped it from this list;
 	#                             build/build.sh expects this binary
 	#                             at bin/.
-	# tessai_agent_xrt_test_example: APU_XRT_TEST ('XRTT') — full XRT
+	# amdrnpu_xrt_test_example: APU_XRT_TEST ('XRTT') — full XRT
 	#                                end-to-end with ELF + kernel arg BOs.
-	# tessai_agent_echo_latency_example: Link A echo (TESSAI_FW_ECHO_OP)
+	# amdrnpu_echo_latency_example: Link A echo (AMDRNPU_FW_ECHO_OP)
 	#                                round-trip latency benchmark.
 	set(_tess_examples
-		tessai_agent_test
-		tessai_agent_inout_example
-		tessai_agent_xrt_test_example
-		tessai_agent_echo_latency_example)
-	if(TESSAI_AGENT_LINK_EXAMPLES_STATIC)
-		if(NOT TARGET tessai_agent_static)
+		amdrnpu_test
+		amdrnpu_inout_example
+		amdrnpu_xrt_test_example
+		amdrnpu_echo_latency_example)
+	if(AMDRNPU_LINK_EXAMPLES_STATIC)
+		if(NOT TARGET amdrnpu_static)
 			message(FATAL_ERROR
-				"TESSAI_AGENT_LINK_EXAMPLES_STATIC requires TESSAI_AGENT_LIB_BUILD_STATIC=ON")
+				"AMDRNPU_LINK_EXAMPLES_STATIC requires AMDRNPU_LIB_BUILD_STATIC=ON")
 		endif()
-		set(_example_tess_lib tessai_agent::tessai_agent_static)
-	elseif(TARGET tessai_agent)
-		set(_example_tess_lib tessai_agent::tessai_agent)
+		set(_example_tess_lib amdrnpu::amdrnpu_static)
+	elseif(TARGET amdrnpu)
+		set(_example_tess_lib amdrnpu::amdrnpu)
 	else()
-		set(_example_tess_lib tessai_agent::tessai_agent_static)
+		set(_example_tess_lib amdrnpu::amdrnpu_static)
 	endif()
 	foreach(_exe IN LISTS _tess_examples)
 		add_executable(${_exe} examples/${_exe}.c)
@@ -113,13 +113,13 @@ if(TESSAI_AGENT_LIB_BUILD_EXAMPLES AND _installed_targets)
 		target_include_directories(${_exe} PRIVATE ${LIBDRM_INCLUDE_DIRS})
 		target_link_libraries(${_exe} PRIVATE ${LIBDRM_LIBRARIES})
 		target_compile_options(${_exe} PRIVATE ${LIBDRM_CFLAGS_OTHER})
-		if(NOT TESSAI_AGENT_LINK_EXAMPLES_STATIC AND TARGET tessai_agent)
-			target_link_options(${_exe} PRIVATE "-Wl,-rpath,\$ORIGIN/../tessai-lib")
+		if(NOT AMDRNPU_LINK_EXAMPLES_STATIC AND TARGET amdrnpu)
+			target_link_options(${_exe} PRIVATE "-Wl,-rpath,\$ORIGIN/../amdrnpu-lib")
 		endif()
 	endforeach()
 	# Echo-latency benchmark uses sqrt() for stddev -> needs libm.
-	if(TARGET tessai_agent_echo_latency_example)
-		target_link_libraries(tessai_agent_echo_latency_example PRIVATE m)
+	if(TARGET amdrnpu_echo_latency_example)
+		target_link_libraries(amdrnpu_echo_latency_example PRIVATE m)
 	endif()
 endif()
 
@@ -127,12 +127,12 @@ install(TARGETS ${_installed_targets}
     DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 
-install(DIRECTORY include/tessai_agent
+install(DIRECTORY include/amdrnpu
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
     FILES_MATCHING PATTERN "*.h"
 )
 
-install(DIRECTORY ${TESSAI_AGENT_UAPI_DIR}/tessai-agent
+install(DIRECTORY ${AMDRNPU_UAPI_DIR}/amdrnpu
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
     FILES_MATCHING PATTERN "*.h"
 )

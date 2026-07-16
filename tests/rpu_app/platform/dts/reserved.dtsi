@@ -104,7 +104,7 @@
  *
  * Counterpart kernel-DT wiring: r52f@1.mboxes = <0x17d 0x00 0x17d 0x01>
  * = /axi/mailbox@eb380000/child@eb350000 (target xlnx,ipi-id=4 = us).
- * See apply_tessai_patch.py R52_CORE1_INJECT.
+ * See apply_amdrnpu_patch.py R52_CORE1_INJECT.
  */
 &ipi_2_to_ipi_5 {
 	status = "okay";
@@ -112,7 +112,7 @@
 
 / {
 	/*
-	 * Section D — Link A (APU<->RPURuntime, "tessai-agent" rpmsg endpoint).
+	 * Section D — Link A (APU<->RPURuntime, "amdrnpu" rpmsg endpoint).
 	 *
 	 * apu_rsctbl uses zephyr,memory-region = "RSC_TABLE" so the standard
 	 * CONFIG_OPENAMP_RSC_TABLE linker fragment (resource_table.ld pattern)
@@ -134,7 +134,7 @@
 	 *
 	 * Keep the layout aligned with the kernel DT carveouts (rsctbl +
 	 * vdev0vring0/1 + vdev0buffer in OCM Bank 1, ddrboot@a000000 in DDR)
-	 * and the lopper apply_tessai_patch.py injection.
+	 * and the lopper apply_amdrnpu_patch.py injection.
 	 *
 	 * NB: The firmware-load carveout (apu_rpmsg_fw on the RPURuntime side)
 	 * MUST be exposed to Linux as a /reserved-memory node literally named
@@ -178,28 +178,28 @@
 	};
 
 	/*
-	 * Section E — tessai-agent RPU GEM carveout.
+	 * Section E — amdrnpu RPU GEM carveout.
 	 *
 	 * Address (PA 0x20000000) and size (512 MiB) are LOCKSTEP with
 	 * the Linux side rpu_gem_cma@20000000 reserved-memory node
 	 * (carrying phandle = <0x500> and linux,cma-default in the
 	 * official Versal-net layout) and with the BUILD_ASSERT in
-	 * src/driver/src/tessai_agent_endpoint.h
+	 * src/driver/src/amdrnpu_endpoint.h
 	 * (DT_NODELABEL(tess_rpu_gem_carveout) -- the Zephyr-side label
 	 * is internal to this DT; the Linux side leaves the matching
 	 * pool node unlabeled and references it by numeric phandle).
 	 *
-	 * This is the canonical tessai-agent RPU-bank layout shared
+	 * This is the canonical amdrnpu RPU-bank layout shared
 	 * across:
 	 *   - tessai-agent/Documentation/devicetree/bindings/accel/
-	 *     amd,tessai-agent.yaml (yaml example uses
+	 *     amd,amdrnpu.yaml (yaml example uses
 	 *     rpu_gem_cma@20000000 + memory-region = <0x500>)
-	 *   - tessai-agent/boards/vek385/dtbo/build_tessai_agent_dtbo.sh
+	 *   - tessai-agent/boards/vek385/dtbo/build_amdrnpu_dtbo.sh
 	 *     (in-tree dtbo generator: bank@0 memory-region = <0x500>)
 	 *   - tessai-agent/lib/examples/README-inout-example.md
 	 *     (userspace contract: 'RPU GEM carveout 0x20000000 512 MiB')
 	 *   - rpu-fw-platforms/platforms/siva-sentry-mode/dts/
-	 *     apply_tessai_patch.py (RPU_GEM_CMA_BLOCK injects the
+	 *     apply_amdrnpu_patch.py (RPU_GEM_CMA_BLOCK injects the
 	 *     same node with phandle <0x500> + linux,cma-default into
 	 *     the kernel DTS)
 	 *   - rpu-fw/rpu_fw/boards/<upstream RPU board>.overlay
@@ -208,22 +208,22 @@
 	 *      tess_rpu_gem_carveout label internally because it's
 	 *      its own Zephyr DT, same pattern as this file)
 	 *
-	 * When tessai-agent userspace TESSAI_BUF_ALLOC returns a
-	 * TESSAI_MEMORY_RPU dma_addr, the BO physically lives here
+	 * When amdrnpu userspace AMDRNPU_BUF_ALLOC returns a
+	 * AMDRNPU_MEMORY_RPU dma_addr, the BO physically lives here
 	 * and is reachable from the R52 via this MPU window.
 	 *
 	 * The kernel-side mirror is declared as
 	 *   compatible = "shared-dma-pool"; reusable; linux,cma-default;
 	 * (NOT no-map) so that of_reserved_mem_device_init_by_idx()
 	 * populates dev->cma_area on the bank@0 platform device. The
-	 * tessai-agent driver uses dma_alloc_noncoherent(), which on
+	 * amdrnpu driver uses dma_alloc_noncoherent(), which on
 	 * Linux 6.x only honors dev->cma_area; a no-map shared-dma-pool
 	 * would silently fall back to the generic CMA pool and produce
 	 * dma_addr values outside this 512 MiB window. linux,cma-default
 	 * is on THIS pool (the small RPU-reachable one), making it the
 	 * system-wide CMA fallback so other APU-side drivers without
 	 * their own memory-region also land here -- size accordingly.
-	 * See the long comment in apply_tessai_patch.py RPU_GEM_CMA_BLOCK
+	 * See the long comment in apply_amdrnpu_patch.py RPU_GEM_CMA_BLOCK
 	 * for the full dma_alloc_noncoherent -> dma_alloc_contiguous
 	 * trace.
 	 *
@@ -234,12 +234,12 @@
 	 * The AIE-staging anchors in RPURuntime/tests
 	 * /common/run.tcl (0x20000000/0x21000000/0x22000000) only run
 	 * under XSDB-driven test contexts; production AIE handover goes
-	 * through tessai-agent BO allocations in THIS pool, so there
+	 * through amdrnpu BO allocations in THIS pool, so there
 	 * is no aliasing concern at runtime.
 	 *
 	 * Contract doc lines 153-167 record the canonical owner of
 	 * this carveout. Any drift between this entry, the
-	 * apply_tessai_patch.py RPU_GEM_CMA_BLOCK, and (eventually)
+	 * apply_amdrnpu_patch.py RPU_GEM_CMA_BLOCK, and (eventually)
 	 * the in-tree VEK385 kernel DTS silently breaks fw_echo
 	 * writeback - so the BUILD_ASSERT and the comments above all
 	 * reference the same base/size.
@@ -252,13 +252,13 @@
 	};
 
 	/*
-	 * tessai-agent high-DDR bank (TESSAI_MEMORY_DEVICE / bank@1,
+	 * amdrnpu high-DDR bank (AMDRNPU_MEMORY_DEVICE / bank@1,
 	 * buffer@50000000000 @ 0x500_0000_0000 in the official Versal-
-	 * net layout; referenced from the Linux tessai-agent node by
+	 * net layout; referenced from the Linux amdrnpu node by
 	 * numeric phandle <0x01>) is intentionally NOT declared here.
 	 * R52 is 32-bit and cannot reach beyond 32 bits without a NoC
 	 * NMU remap; declaring it with truncated 32-bit reg cells would
-	 * be misleading. The tessai_agent_endpoint.c port references
+	 * be misleading. The amdrnpu_endpoint.c port references
 	 * only tess_rpu_gem_carveout, mirroring the rpu-fw original's
 	 * fw_echo writeback domain. The DAPP handler accepts a device-
 	 * shmem PA on the wire but never dereferences it -- the whole
