@@ -8,9 +8,9 @@
  *   RPURuntime (this file, R52 cluster 0 core 1)            = VirtIO DEVICE.
  *
  * Mirrors rpu-fw/rpu_fw/app/src/transport/openamp_platform.c but uses the
- * link A reserved-memory carveouts (apu_rsctbl @ 0x0A000000,
- * apu_rpmsg_shmem @ 0x0A100000) and the link A IPI mailbox
- * (ipi_2_to_ipi_3) instead of the rpu-fw link B layout. Compiled when
+ * link A reserved-memory carveouts (apu_rsctbl @ 0xBBF80000,
+ * apu_rpmsg_shmem @ 0xBBF81000, apu_rpmsg_fw ELF load @ 0x00800000)
+ * and the link A IPI mailbox instead of the rpu-fw link B layout. Compiled when
  * CONFIG_AMDRNPU_APU_RPMSG_SLAVE=y. This is the only OpenAMP transport
  * in the rpu_app snapshot: the historical Link B master-side
  * transport (rpmsg_platform.c) plus the shmem alternative

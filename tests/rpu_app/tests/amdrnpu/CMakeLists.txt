@@ -36,7 +36,7 @@ project(amdrnpu_test LANGUAGES C)
 
 # Place the zephyr/lib/open-amp/resource_table.c output's
 # .resource_table section into the RSC_TABLE memory-region
-# (apu_rsctbl @ 0x0A000000, see reserved.dtsi Section D).
+# (apu_rsctbl @ 0xBBF80000, see reserved.dtsi Section D).
 #
 # Zephyr 3.7 on cortex-r52 uses the preprocessor-based linker script
 # pipeline, NOT the CMake linker generator. The idiomatic path is

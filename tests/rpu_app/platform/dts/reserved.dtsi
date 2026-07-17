@@ -60,6 +60,28 @@
 };
 
 /*
+ * Section A — RPU-APP DDR node (matches upstream RPURuntime 2026.1)
+ *
+ * The lopper-generated board DTS places the DDR memory node at 0x100000
+ * which overlaps RPU-FW's ddr_firmware carveout (0x30000–0x430000).
+ *
+ * Resize to cover only the RPU-APP allocation per SV design:
+ *   base = 0x00800000  (right after the 8 MB RPU-FW window)
+ *   size = 0x11318000  (end = 0x11B17FFF, ~275 MB)
+ *
+ * Regions beyond this node are owned by other domains and Zephyr
+ * will not touch them (no reserved-memory carve-out needed):
+ *   0x00000000–0x007FFFFF  RPU-FW       (8 MB)
+ *   0x11B18000–0x1FFFFFFF  RPU-ISP      (~229 MB)
+ *   0x20000000–0x3FFFFFFF  Linux CMA    (512 MB)
+ *
+ * Old: base=0x100000  size=0x3FF00000  (lopper default, 1 GB - 1 MB)
+ */
+&NoC_C0_ddr_memory {
+	reg = <0x0 0x800000 0x0 0x11318000>;
+};
+
+/*
  * OCM Bank 1 (0xBBF8_0000, 512 KiB) hosts the Link A OpenAMP comms
  * region (resource table + vrings + buffer pool) per the official
  * Ryzen+T20 layout. The firmware ELF load region (apu_rpmsg_fw) stays
@@ -124,16 +146,16 @@
 	 * the resource table + vrings + buffer pool now live in
 	 * OCM Bank 1 (0xBBF8_0000, 512 KiB) per the Ryzen+T20 architecture
 	 * doc. The firmware ELF load region (apu_rpmsg_fw) deliberately STAYS
-	 * in DDR -- at ~1 MiB it does not fit alongside the rings in the
-	 * 512 KiB bank. The OpenAMP/RPMSG transport itself is unchanged; this
+	 * in DDR -- the ~275 MiB RPU-APP window does not fit alongside the
+	 * rings in the 512 KiB bank. The OpenAMP/RPMSG transport itself is unchanged; this
 	 * is purely a memory relocation (node names + sizes are identical).
 	 *
-	 *   apu_rsctbl       0xBBF8_0000  0x1000   rsctbl (zephyr places .resource_table here; 256 B used)
-	 *   apu_rpmsg_shmem  0xBBF8_1000  0x48000  vrings + buffer pool (288 KiB), OCM Bank 1
-	 *   apu_rpmsg_fw     0x0A00_0000  0x100000 RPURuntime ELF load region (1 MiB), DDR
+	 *   apu_rsctbl       0xBBF8_0000  0x1000     rsctbl (zephyr places .resource_table here; 256 B used)
+	 *   apu_rpmsg_shmem  0xBBF8_1000  0x48000    vrings + buffer pool (288 KiB), OCM Bank 1
+	 *   apu_rpmsg_fw     0x0080_0000  0x11318000 RPURuntime ELF load region (~275 MiB), DDR
 	 *
 	 * Keep the layout aligned with the kernel DT carveouts (rsctbl +
-	 * vdev0vring0/1 + vdev0buffer in OCM Bank 1, ddrboot@a000000 in DDR)
+	 * vdev0vring0/1 + vdev0buffer in OCM Bank 1, ddrboot@800000 in DDR)
 	 * and the lopper apply_amdrnpu_patch.py injection.
 	 *
 	 * NB: The firmware-load carveout (apu_rpmsg_fw on the RPURuntime side)
@@ -164,9 +186,19 @@
 		zephyr,memory-attr = <(DT_MEM_ARM(ATTR_MPU_RAM_NOCACHE))>;
 	};
 
-	apu_rpmsg_fw: memory@a000000 {
+	/*
+	 * apu_rpmsg_fw — RPU-APP ELF load + code/data region.
+	 * Covers the full RPU-APP allocation per SV design (matches
+	 * upstream RPURuntime 2026.1):
+	 *   base = 0x00800000  (right after the 8 MB RPU-FW window)
+	 *   size = 0x11318000  (end = 0x11B17FFF, ~275 MB)
+	 * Linux remoteproc loads the ELF here (ddrboot@800000 carveout).
+	 * zephyr,sram (rpu.overlay) points here so Zephyr links text/data
+	 * into this region.
+	 */
+	apu_rpmsg_fw: memory@800000 {
 		compatible = "zephyr,memory-region", "mmio-sram";
-		reg = <0x0 0x0a000000 0x0 0x100000>;
+		reg = <0x0 0x00800000 0x0 0x11318000>;
 		zephyr,memory-region = "APU_RPMSG_FW";
 		zephyr,memory-attr = <(DT_MEM_ARM(ATTR_MPU_RAM))>;
 	};
@@ -265,4 +297,35 @@
 	 * point of the test is to prove the wire carries the PA back
 	 * faithfully even though the RPU has no MPU window for it.
 	 */
+};
+
+/*
+ * Section D — Disable PS peripherals RPU-APP does not drive (2026.1 SDT)
+ *
+ * The 2026.1 SDT exposes several PS controllers to the RPU-APP domain as
+ * status = "okay" even though Zephyr has no driver for them. Disable each so
+ * it is not probed (and so its binding is not validated).
+ *
+ * UFS: keep the SDT's clocks/clock-names as-is — sdtgen already emits a
+ * matching pair (2 each); overriding them risks a clocks/clock-names length
+ * mismatch in edtlib. The ufsdisk0 child (zephyr,ufs-disk) references &ufshc
+ * via DEVICE_DT_GET, so disable it too — otherwise the UFS-disk driver is
+ * built against a disabled controller (undefined __device_dts_ord for ufshc).
+ */
+&ufshc {
+	status = "disabled";
+	ufsdisk0 {
+		status = "disabled";
+	};
+};
+
+/*
+ * GEM: lopper emits the MAC as a child node (ethernet_mac, compatible
+ * "xlnx,gem") with no reg, which fails Zephyr's xlnx,gem.yaml ('reg' is
+ * required). Disable the controller and delete the MAC child so the gem
+ * binding is never validated.
+ */
+&gem0 {
+	status = "disabled";
+	/delete-node/ ethernet_mac;
 };

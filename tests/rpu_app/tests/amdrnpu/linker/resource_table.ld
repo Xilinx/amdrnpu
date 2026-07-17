@@ -9,7 +9,7 @@
  *
  * Places the .resource_table section emitted by
  * zephyr/lib/open-amp/resource_table.c into the RSC_TABLE memory-
- * region (apu_rsctbl @ 0x0A000000 per reserved.dtsi Section D), so
+ * region (apu_rsctbl @ 0xBBF80000 per reserved.dtsi Section D), so
  * kernel-side remoteproc parsing of our loaded ELF finds the table
  * at the address it expects from the matching kernel-DT
  * rsc_tbl_carveout_1 entry.
