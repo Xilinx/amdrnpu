@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Copyright (C) 2026, Advanced Micro Devices, Inc.
+
+ccflags-y += -I$(src)/../../../include/uapi
+ccflags-y += -I$(src)
+
+obj-m += amdrnpu.o
+
+amdrnpu-y := \
+	amdrnpu_drv.o   \
+	amdrnpu_rpmsg.o \
+	amdrnpu_cmd.o
