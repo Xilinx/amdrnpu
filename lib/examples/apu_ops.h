@@ -47,15 +47,15 @@ extern "C" {
  *   args[3]  = kernel arg[0] PA  (e.g. IFM; 0 = omit set_arg)
  *   args[4]  = kernel arg[1] PA  (e.g. OFM; 0 = omit set_arg)
  *   args[5]  = kernel arg[2] PA  (e.g. WTS; 0 = omit set_arg)
- *   ...      (up to 8 kernel args total, args[3..10])
- *   args[11] = result writeback PA  (0 = no writeback)
+ *   ...      (up to 24 kernel args total, args[3..26])
+ *   args[27] = result writeback PA  (0 = no writeback)
  *
- * When args[11] is non-zero, RPU writes apu_xrt_test_result there.
+ * When args[27] is non-zero, RPU writes apu_xrt_test_result there.
  */
 #define APU_XRT_TEST                 0x58525454u  /* 'XRTT' */
 
-#define APU_XRT_TEST_MAX_KARGS       8u
-#define APU_XRT_TEST_RESULT_ARG_IDX  (3u + APU_XRT_TEST_MAX_KARGS)  /* 11 */
+#define APU_XRT_TEST_MAX_KARGS       24u
+#define APU_XRT_TEST_RESULT_ARG_IDX  (3u + APU_XRT_TEST_MAX_KARGS)  /* 27 */
 
 struct __attribute__((__packed__)) apu_xrt_test_result {
 	uint32_t passed;           /* 1 = all iterations completed, 0 = fail */
