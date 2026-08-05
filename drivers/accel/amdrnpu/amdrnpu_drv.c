@@ -19,7 +19,8 @@ static void amdrnpu_dev_release(struct kref *ref)
 	struct amdrnpu_dev *dev =
 		container_of(ref, struct amdrnpu_dev, refcount);
 
-	mutex_destroy(&dev->lock);
+	amdrnpu_dev_cmd_fini(dev);
+	mutex_destroy(&dev->rpmsg_lock);
 	kfree(dev);
 }
 

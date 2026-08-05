@@ -3,95 +3,247 @@
  * Copyright (C) 2026, Advanced Micro Devices, Inc.
  */
 
+#include <linux/array_size.h>
+#include <linux/atomic.h>
+#include <linux/device.h>
+#include <linux/dma-fence.h>
+#include <linux/err.h>
+#include <linux/fcntl.h>
+#include <linux/file.h>
 #include <linux/fs.h>
-#include <linux/kfifo.h>
-#include <linux/mutex.h>
-#include <linux/rcupdate.h>
 #include <linux/slab.h>
+#include <linux/spinlock.h>
+#include <linux/stddef.h>
+#include <linux/string.h>
+#include <linux/sync_file.h>
 #include <linux/uaccess.h>
-#include <linux/wait.h>
 
 #include "amdrnpu_internal.h"
 
-static long amdrnpu_ioctl_get_info(struct amdrnpu_dev *dev, unsigned long arg)
-{
-	struct amdrnpu_info info = {
-		.abi_version = AMDRNPU_ABI_VERSION,
-		.max_payload = AMDRNPU_MAX_PAYLOAD,
-	};
+struct amdrnpu_cmd {
+	struct dma_fence	base;
+	spinlock_t		lock;	/* dma_fence lock */
+};
 
-	if (copy_to_user((void __user *)arg, &info, sizeof(info)))
-		return -EFAULT;
+static const char *amdrnpu_fence_get_driver_name(struct dma_fence *fence)
+{
+	return AMDRNPU_DRV_NAME;
+}
+
+static const char *amdrnpu_fence_get_timeline_name(struct dma_fence *fence)
+{
+	return "amdrnpu-event";
+}
+
+static const struct dma_fence_ops amdrnpu_fence_ops = {
+	.get_driver_name	= amdrnpu_fence_get_driver_name,
+	.get_timeline_name	= amdrnpu_fence_get_timeline_name,
+};
+
+static struct amdrnpu_cmd *amdrnpu_cmd_create(struct amdrnpu_dev *dev)
+{
+	struct amdrnpu_cmd *cmd;
+
+	cmd = kzalloc(sizeof(*cmd), GFP_KERNEL);
+	if (!cmd)
+		return NULL;
+
+	spin_lock_init(&cmd->lock);
+	dma_fence_init(&cmd->base, &amdrnpu_fence_ops, &cmd->lock,
+		       dev->fence_context,
+		       atomic_inc_return(&dev->fence_seqno));
+	return cmd;
+}
+
+void amdrnpu_dev_cmd_init(struct amdrnpu_dev *dev)
+{
+	spin_lock_init(&dev->cmd_lock);
+	dev->pending_cmd = NULL;
+	dev->fence_context = dma_fence_context_alloc(1);
+	atomic_set(&dev->fence_seqno, 0);
+}
+
+static struct amdrnpu_cmd *amdrnpu_dev_cmd_take(struct amdrnpu_dev *dev)
+{
+	struct amdrnpu_cmd *cmd;
+	unsigned long flags;
+
+	spin_lock_irqsave(&dev->cmd_lock, flags);
+	cmd = dev->pending_cmd;
+	dev->pending_cmd = NULL;
+	spin_unlock_irqrestore(&dev->cmd_lock, flags);
+	return cmd;
+}
+
+static void amdrnpu_cmd_signal(struct amdrnpu_cmd *cmd, int err)
+{
+	if (!cmd)
+		return;
+	if (err)
+		dma_fence_set_error(&cmd->base, err);
+	dma_fence_signal(&cmd->base);
+	dma_fence_put(&cmd->base);
+}
+
+/* Complete the in-flight command (if any) with @err (0 = success). */
+static void amdrnpu_dev_cmd_complete(struct amdrnpu_dev *dev, int err)
+{
+	amdrnpu_cmd_signal(amdrnpu_dev_cmd_take(dev), err);
+}
+
+void amdrnpu_dev_cmd_abort(struct amdrnpu_dev *dev, int err)
+{
+	if (!err)
+		err = -ENOTCONN;
+	amdrnpu_dev_cmd_complete(dev, err);
+}
+
+void amdrnpu_dev_cmd_fini(struct amdrnpu_dev *dev)
+{
+	amdrnpu_dev_cmd_complete(dev, -ENODEV);
+}
+
+void amdrnpu_dev_cmd_dispatch_response(struct amdrnpu_dev *dev, const void *payload,
+				   size_t len)
+{
+	struct amdrnpu_wire_rsp wr;
+	u32 rsp_type;
+	int err;
+
+	if (len < sizeof(wr))
+		return;
+
+	memcpy(&wr, payload, sizeof(wr));
+	rsp_type = le32_to_cpu(wr.command_rsp_type);
+	err = amdrnpu_rsp_err(rsp_type);
+	amdrnpu_dev_cmd_complete(dev, err);
+}
+
+static int amdrnpu_resolve_args(struct amdrnpu_dev *dev, struct amdrnpu_arg *args,
+				u32 num_args, __le64 *out_words)
+{
+	u32 i;
+
+	for (i = 0; i < num_args; i++) {
+		struct amdrnpu_arg *a = &args[i];
+
+		/* Buffer args (size != 0) are not implemented */
+		if (a->size != 0) {
+			dev_dbg(dev->dev,
+				"arg %u: buffer args not supported yet (size=%llu)\n",
+				i, (unsigned long long)a->size);
+			return -EINVAL;
+		}
+		out_words[i] = cpu_to_le64(a->value);
+	}
 	return 0;
 }
 
-static long amdrnpu_ioctl_send(struct amdrnpu_dev *dev, unsigned long arg)
+static long amdrnpu_ioctl_cmd_submit(struct amdrnpu_dev *dev, void __user *uarg)
 {
-	struct amdrnpu_msg *msg;
-	long ret = 0;
+	struct sync_file *sync_file = NULL;
+	struct amdrnpu_arg *args = NULL;
+	struct amdrnpu_cmd_submit uhdr;
+	struct amdrnpu_cmd *cmd = NULL;
+	bool published = false;
+	__le64 *words = NULL;
+	unsigned long flags;
+	size_t args_bytes;
+	int fd = -1;
+	long ret;
 
-	msg = kmalloc(sizeof(*msg), GFP_KERNEL);
-	if (!msg)
-		return -ENOMEM;
+	if (copy_from_user(&uhdr, uarg, AMDRNPU_SUBMIT_HDR_SZ))
+		return -EFAULT;
+	if (uhdr.sync_handle)
+		return -EINVAL;
+	if (uhdr.num_args > AMDRNPU_MAX_ARGS)
+		return -E2BIG;
 
-	if (copy_from_user(msg, (void __user *)arg, sizeof(*msg))) {
+	args_bytes = (size_t)uhdr.num_args * sizeof(*args);
+	if (uhdr.num_args) {
+		args = kvzalloc(args_bytes, GFP_KERNEL);
+		if (!args)
+			return -ENOMEM;
+		if (copy_from_user(args,
+				   (u8 __user *)uarg + AMDRNPU_SUBMIT_HDR_SZ,
+				   args_bytes)) {
+			ret = -EFAULT;
+			goto out_free_args;
+		}
+		words = kvcalloc(uhdr.num_args, sizeof(*words), GFP_KERNEL);
+		if (!words) {
+			ret = -ENOMEM;
+			goto out_free_args;
+		}
+		ret = amdrnpu_resolve_args(dev, args, uhdr.num_args, words);
+		if (ret)
+			goto out_free_words;
+	}
+
+	/* Local reference keeps @cmd alive for the whole call. */
+	cmd = amdrnpu_cmd_create(dev);
+	if (!cmd) {
+		ret = -ENOMEM;
+		goto out_free_words;
+	}
+
+	fd = get_unused_fd_flags(O_CLOEXEC);
+	if (fd < 0) {
+		ret = fd;
+		goto out_unpublish;
+	}
+
+	sync_file = sync_file_create(&cmd->base);
+	if (!sync_file) {
+		ret = -ENOMEM;
+		goto out_unpublish;
+	}
+
+	uhdr.sync_handle = fd;
+	if (copy_to_user(uarg, &uhdr, AMDRNPU_SUBMIT_HDR_SZ)) {
 		ret = -EFAULT;
-		goto out;
+		goto out_unpublish;
 	}
 
-	if (msg->flags || msg->len == 0 || msg->len > AMDRNPU_MAX_PAYLOAD) {
-		ret = -EINVAL;
-		goto out;
+	/* Reserve the single in-flight slot; multiple in-flight comes next commit. */
+	spin_lock_irqsave(&dev->cmd_lock, flags);
+	if (dev->pending_cmd) {
+		spin_unlock_irqrestore(&dev->cmd_lock, flags);
+		ret = -EBUSY;
+		goto out_unpublish;
 	}
+	dev->pending_cmd = cmd;
+	spin_unlock_irqrestore(&dev->cmd_lock, flags);	/* unlock right after publish */
+	published = true;
 
-	ret = amdrnpu_rpmsg_send(dev, msg->data, msg->len);
+	ret = amdrnpu_rpmsg_send_cmd(dev, uhdr.command_op, 0, words,
+				     uhdr.num_args);
+	if (ret)
+		goto out_unpublish;
 
-out:
-	kfree(msg);
-	return ret;
-}
+	fd_install(fd, sync_file->file);
+	kvfree(words);
+	kvfree(args);
+	return 0;
 
-static long amdrnpu_ioctl_recv(struct amdrnpu_dev *dev, struct file *filp,
-			       unsigned long arg)
-{
-	struct amdrnpu_msg *msg;
-	long ret = 0;
-
-	msg = kmalloc(sizeof(*msg), GFP_KERNEL);
-	if (!msg)
-		return -ENOMEM;
-
-	for (;;) {
-		mutex_lock(&dev->lock);
-		if (kfifo_out(&dev->rxfifo, msg, 1) == 1) {
-			mutex_unlock(&dev->lock);
-			break;
-		}
-		mutex_unlock(&dev->lock);
-
-		if (!rcu_access_pointer(dev->rpdev)) {
-			ret = -ENODEV;
-			goto out;
-		}
-
-		if (filp->f_flags & O_NONBLOCK) {
-			ret = -EAGAIN;
-			goto out;
-		}
-
-		if (wait_event_interruptible(dev->rxwq,
-					     !kfifo_is_empty(&dev->rxfifo) ||
-					     !rcu_access_pointer(dev->rpdev))) {
-			ret = -ERESTARTSYS;
-			goto out;
-		}
+out_unpublish:
+	spin_lock_irqsave(&dev->cmd_lock, flags);
+	if (dev->pending_cmd == cmd) {
+		dev->pending_cmd = NULL;
+		published = false;
 	}
+	spin_unlock_irqrestore(&dev->cmd_lock, flags);
+	if (!published)
+		dma_fence_put(&cmd->base);
 
-	if (copy_to_user((void __user *)arg, msg, sizeof(*msg)))
-		ret = -EFAULT;
-
-out:
-	kfree(msg);
+	if (sync_file)
+		fput(sync_file->file);
+	if (fd >= 0)
+		put_unused_fd(fd);
+out_free_words:
+	kvfree(words);
+out_free_args:
+	kvfree(args);
 	return ret;
 }
 
@@ -103,17 +255,8 @@ long amdrnpu_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		return -ENODEV;
 
 	switch (cmd) {
-	case AMDRNPU_IOC_GET_INFO:
-		return amdrnpu_ioctl_get_info(dev, arg);
-	case AMDRNPU_IOC_SEND:
-		return amdrnpu_ioctl_send(dev, arg);
-	case AMDRNPU_IOC_RECV:
-		return amdrnpu_ioctl_recv(dev, filp, arg);
-	case AMDRNPU_IOC_RESET:
-		mutex_lock(&dev->lock);
-		kfifo_reset(&dev->rxfifo);
-		mutex_unlock(&dev->lock);
-		return 0;
+	case AMDRNPU_CMD_SUBMIT:
+		return amdrnpu_ioctl_cmd_submit(dev, (void __user *)arg);
 	default:
 		return -ENOTTY;
 	}
