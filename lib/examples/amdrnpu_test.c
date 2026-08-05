@@ -324,7 +324,7 @@ static int do_cmd_submit(int fd, int argc, char **argv)
 				     &hdr, sizeof(hdr));
 	if (rc)
 		return report("cmd_submit", rc);
-	printf("  -> syncobj_handle=%d\n", hdr.drm_sync_obj_handle);
+	printf("  -> syncobj_handle=%d\n", hdr.sync_handle);
 	printf("  (handle valid only within this process; chain via fw_echo or lifecycle)\n");
 	return 0;
 }
@@ -463,12 +463,12 @@ static int do_fw_echo(int fd, int argc, char **argv)
 	rc = amdrnpu_cmd_submit(fd, AMDRNPU_FW_ECHO_OP, args, 4,
 				     &hdr, sizeof(hdr));
 	if (rc) { ret = report("cmd_submit", rc); goto out; }
-	printf("      -> syncobj_handle=%d\n", hdr.drm_sync_obj_handle);
+	printf("      -> syncobj_handle=%d\n", hdr.sync_handle);
 
 	printf("[6/8] syncobj_wait (timeout=%" PRId64 "ns)\n",
 	       AMDRNPU_DEFAULT_WAIT_NS);
 	rc = amdrnpu_syncobj_wait_complete(
-		fd, (uint32_t)hdr.drm_sync_obj_handle,
+		fd, (uint32_t)hdr.sync_handle,
 		AMDRNPU_DEFAULT_WAIT_NS, &fence_st);
 	if (rc) { ret = report("syncobj_wait", rc); goto out; }
 	printf("      -> fence_status=%" PRId32 "\n", fence_st);
@@ -554,12 +554,12 @@ static int do_lifecycle(int fd)
 	printf("[2/4] cmd_submit op=0 num_args=0 (no-op)\n");
 	rc = amdrnpu_cmd_submit(fd, 0, NULL, 0, &hdr, sizeof(hdr));
 	if (rc) { ret = report("cmd_submit", rc); goto out; }
-	printf("      -> syncobj_handle=%d\n", hdr.drm_sync_obj_handle);
+	printf("      -> syncobj_handle=%d\n", hdr.sync_handle);
 
 	printf("[3/4] syncobj_wait (timeout=%" PRId64 "ns)\n",
 	       AMDRNPU_DEFAULT_WAIT_NS);
 	rc = amdrnpu_syncobj_wait_complete(
-		fd, (uint32_t)hdr.drm_sync_obj_handle,
+		fd, (uint32_t)hdr.sync_handle,
 		AMDRNPU_DEFAULT_WAIT_NS, &fence_st);
 	if (rc) {
 		/* A no-op submit may not be honored by every firmware build;

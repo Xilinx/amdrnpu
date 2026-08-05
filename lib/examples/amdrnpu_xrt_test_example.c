@@ -529,11 +529,11 @@ int main(int argc, char **argv)
 				     &hdr, sizeof(hdr));
 	if (rc) { fail("cmd_submit", rc); goto out; }
 
-	printf("syncobj_handle=%d\n", hdr.drm_sync_obj_handle);
+	printf("syncobj_handle=%d\n", hdr.sync_handle);
 
 	/* Wait for completion */
 	rc = amdrnpu_syncobj_wait_complete(
-		fd, (uint32_t)hdr.drm_sync_obj_handle,
+		fd, (uint32_t)hdr.sync_handle,
 		timeout_ns, &fence_st);
 	if (rc) { fail("syncobj_wait", rc); goto out; }
 

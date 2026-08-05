@@ -295,7 +295,7 @@ The driver presents itself as a DRM render node
 - **dma-buf interop.** Standard `DRM_IOCTL_PRIME_HANDLE_TO_FD` and
   `DRM_IOCTL_PRIME_FD_TO_HANDLE` on the render node; imports attach to
   the dev bank.
-- **Sync waits.** `AMDRNPU_CMD_SUBMIT` returns a `drm_sync_obj_handle` in
+- **Sync waits.** `AMDRNPU_CMD_SUBMIT` returns a `sync_handle` in
   `struct amdrnpu_cmd_submit`; userspace waits with
   `DRM_IOCTL_SYNCOBJ_WAIT` (or `HANDLE_TO_FD` + `poll()`/`epoll()`) and
   uses `DRM_IOCTL_SYNCOBJ_QUERY` / sync_file probes for fence status.

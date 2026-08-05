@@ -188,7 +188,7 @@ sequenceDiagram
     SUB->>CORE: drm_gem_object_lookup on handle h
     CORE-->>SUB: obj refcount incremented
     SUB->>CMD: store obj in bo_refs array
-    SUB-->>U: drm_sync_obj_handle
+    SUB-->>U: sync_handle
 
     Note over U,CORE: GEM close may run after submit returns, pin keeps object alive
     U->>CORE: amdrnpu_buf_close or GEM_CLOSE on h

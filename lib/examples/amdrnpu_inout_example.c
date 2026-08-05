@@ -224,10 +224,10 @@ int main(int argc, char **argv)
 		fail("cmd_submit", rc);
 		goto out;
 	}
-	printf("submitted COPY op, syncobj=%d\n", hdr.drm_sync_obj_handle);
+	printf("submitted COPY op, syncobj=%d\n", hdr.sync_handle);
 
 	rc = amdrnpu_syncobj_wait_complete(fd,
-						(uint32_t)hdr.drm_sync_obj_handle,
+						(uint32_t)hdr.sync_handle,
 						DEFAULT_WAIT_NS, &fence_st);
 	if (rc) {
 		fail("syncobj_wait", rc);

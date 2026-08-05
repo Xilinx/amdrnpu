@@ -65,8 +65,8 @@ sequenceDiagram
 ## 2. Command flow (submit → wait → status)
 
 Submit with **`amdrnpu_cmd_submit()`**, which builds a **`struct amdrnpu_cmd_submit`**
-(header + `args[]`), zeroes **`drm_sync_obj_handle`** on entry, and issues
-**`AMDRNPU_CMD_SUBMIT`**. On success **`hdr_out->drm_sync_obj_handle`** is the binary
+(header + `args[]`), zeroes **`sync_handle`** on entry, and issues
+**`AMDRNPU_CMD_SUBMIT`**. On success **`hdr_out->sync_handle`** is the binary
 syncobj handle for that submission.
 
 **Waiting and completion** — public surface (blocking **`DRM_IOCTL_SYNCOBJ_WAIT`**
@@ -110,7 +110,7 @@ sequenceDiagram
     App->>Lib: amdrnpu_cmd_submit(drm_fd, op, args, n, &hdr, sizeof(hdr))
     Lib->>K: ioctl(AMDRNPU_CMD_SUBMIT, flex amdrnpu_cmd_submit)
     K->>RPU: rpmsg amdrnpu_wire_cmd (seq = driver command id from cmd_xa)
-    K-->>Lib: hdr.drm_sync_obj_handle set
+    K-->>Lib: hdr.sync_handle set
     Lib-->>App: 0
 
     App->>Lib: amdrnpu_syncobj_wait_complete(drm_fd, syncobj, timeout, out st)
@@ -148,7 +148,7 @@ struct amdrnpu_cmd_submit hdr;
 memset(&hdr, 0, sizeof(hdr));
 if (amdrnpu_cmd_submit(drm_fd, OP_CODE_CMD0, args, 6, &hdr, sizeof(hdr)))
 	...;
-amdrnpu_syncobj_wait_complete(drm_fd, hdr.drm_sync_obj_handle, timeout_ns, &st);
+amdrnpu_syncobj_wait_complete(drm_fd, hdr.sync_handle, timeout_ns, &st);
 ```
 
 ```mermaid

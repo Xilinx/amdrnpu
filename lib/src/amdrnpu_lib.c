@@ -242,7 +242,7 @@ int amdrnpu_cmd_submit(int drm_fd, uint32_t command_op,
 		AMDRNPU_TRACE_RET(cmd_submit_exit, -ENOMEM);
 
 	cmd = (struct amdrnpu_cmd_submit *)buf;
-	cmd->drm_sync_obj_handle = 0;
+	cmd->sync_handle = 0;
 	cmd->command_op = command_op;
 	cmd->num_args = num_args;
 	if (num_args)

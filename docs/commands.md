@@ -13,7 +13,7 @@ The model is minimal:
   failed submit cleanup, or process `close()` on the DRM fd). There is
   no separate `INIT` / `PENDING` exposed to userspace.
 - **Identity.** Userspace identifies in-flight work only through the
-  **`drm_sync_obj_handle`** returned in `struct amdrnpu_cmd_submit`. **Command ids
+  **`sync_handle`** returned in `struct amdrnpu_cmd_submit`. **Command ids
   are allocated and managed solely by the `amdrnpu` driver** via
   `xa_alloc_cyclic()` on `cmd_xa` (ids **0..`UINT_MAX`** via `xa_limit_32b`, reused when the slot is
   free). Userspace never chooses or stores the id. On RPMsg the id is sent as
@@ -55,12 +55,12 @@ sequenceDiagram
     participant RPU as RPU firmware
 
     U->>K: ioctl(AMDRNPU_CMD_SUBMIT, hdr + args[])
-    Note over K: hdr.drm_sync_obj_handle = 0 on entry
+    Note over K: hdr.sync_handle = 0 on entry
     K->>K: amdrnpu_cmd_alloc, xa_alloc_cyclic id (xa_limit_32b)
     K->>SO: drm_syncobj_create(unsignalled fence)
     K->>K: amdrnpu_resolve_args, rpmsg send amdrnpu_wire_cmd
-    K->>SO: drm_syncobj_get_handle() -> drm_sync_obj_handle
-    K-->>U: hdr updated (drm_sync_obj_handle set)
+    K->>SO: drm_syncobj_get_handle() -> sync_handle
+    K-->>U: hdr updated (sync_handle set)
 
     U->>SO: DRM_IOCTL_SYNCOBJ_WAIT or HANDLE_TO_FD + poll
 
@@ -131,7 +131,7 @@ Variable-length ioctl payload: the **UAPI** type is `struct amdrnpu_cmd_submit`
 
 | Field | Direction | Meaning |
 |-------|-----------|---------|
-| `drm_sync_obj_handle` | in/out | **In:** `0` for a new command. **Out:** DRM syncobj handle (binary) for waits. |
+| `sync_handle` | in/out | **In:** `0` for a new command. **Out:** DRM syncobj handle (binary) for waits. |
 | `command_op` | in | Firmware opcode selector |
 | `num_args` | in | Number of trailing `amdrnpu_arg`; ≤ `AMDRNPU_MAX_ARGS` |
 | `args[]` | in | Scalar and buffer GEM slices |
@@ -166,7 +166,7 @@ args[5] = (struct amdrnpu_arg){
 };
 
 struct amdrnpu_cmd_submit hdr = {
-	.drm_sync_obj_handle = 0,
+	.sync_handle = 0,
 	.command_op = OP_CODE_CMD0,
 	.num_args = 6,
 };
@@ -242,7 +242,7 @@ Release GEMs with **`amdrnpu_buf_close()`** when appropriate (see
 
 Raw ioctl callers must allocate a contiguous blob:
 `offsetof(struct amdrnpu_cmd_submit, args) + num_args*sizeof(struct amdrnpu_arg)`,
-clear **`drm_sync_obj_handle`** on entry, and pass **`AMDRNPU_CMD_SUBMIT`**. For SYNCOBJ
+clear **`sync_handle`** on entry, and pass **`AMDRNPU_CMD_SUBMIT`**. For SYNCOBJ
 timeouts, populate absolute monotonic **`timeout_nsec`** (see kernel
 `drm_syncobj_wait`/your header); **`-1` is not a portable “infinity” sentinel**
 on newer DRM — use **`INT64_MAX`** as the relative nanoseconds argument to

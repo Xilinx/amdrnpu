@@ -212,7 +212,7 @@ static int echo_roundtrip(int fd, uint32_t op, int64_t timeout_ns,
 			return rc;
 		}
 
-		rc = wait_fn(fd, (uint32_t)hdr.drm_sync_obj_handle,
+		rc = wait_fn(fd, (uint32_t)hdr.sync_handle,
 			     timeout_ns, &status);
 		clock_gettime(CLOCK_MONOTONIC, &samples[i].t1);
 		if (rc < 0) {

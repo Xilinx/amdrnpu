@@ -4,7 +4,7 @@ A small Linux **DRM render-node driver** + **userspace runtime library** that
 brokers buffer allocation and command submission between application code on
 the APU and firmware running on a remote Cortex-R52 (RPU) over RPMsg. The
 driver exposes the standard DRM ioctl surface (GEM, dumb buffers, syncobj,
-PRIME) plus two custom ioctls under the `'T'` magic; the library is a thin
+PRIME) plus two custom ioctls under the `'R'` magic; the library is a thin
 wrapper around them.
 
 Designed to be built either standalone (out-of-tree against any kernel
@@ -24,7 +24,7 @@ tessai-agent/
 │   ├── Kbuild
 │   └── Makefile
 ├── include/uapi/amdrnpu/
-│   └── amdrnpu.h               # SoT for the kernel/user ABI (magic 'T')
+│   └── amdrnpu.h               # SoT for the kernel/user ABI (magic 'R')
 ├── lib/                              # user-space runtime library (CMake)
 │   ├── CMakeLists.txt
 │   ├── include/amdrnpu/amdrnpu_lib.h
@@ -51,12 +51,12 @@ tessai-agent/
 
 The single source of truth for the user/kernel ABI is
 [`include/uapi/amdrnpu/amdrnpu.h`](include/uapi/amdrnpu/amdrnpu.h)
-(magic `'T'`, ABI version `1` at time of writing); both the kernel module
+(magic `'R'`, ABI version `1` at time of writing); both the kernel module
 and the user-space library include it directly.
 
 ## UAPI at a glance
 
-Two custom ioctls under magic `'T'`:
+Two custom ioctls under magic `'R'`:
 
 | Ioctl | Purpose |
 |---|---|
@@ -209,7 +209,7 @@ args[5] = (struct amdrnpu_arg){
 };
 
 amdrnpu_cmd_submit(fd, OP_CODE_CMD0, args, 6, &hdr, sizeof(hdr));
-amdrnpu_syncobj_wait_complete(fd, hdr.drm_sync_obj_handle,
+amdrnpu_syncobj_wait_complete(fd, hdr.sync_handle,
 				   2000000000LL, &status);
 
 amdrnpu_buf_close(fd, bo0_hd);

@@ -84,7 +84,7 @@ int do_cmd_submit(int fd, uint32_t command_op,
 	if (::ioctl(fd, AMDRNPU_CMD_SUBMIT, hdr) < 0)
 		rc = -errno;
 	else
-		*out_handle = static_cast<uint32_t>(hdr->drm_sync_obj_handle);
+		*out_handle = static_cast<uint32_t>(hdr->sync_handle);
 
 	std::free(hdr);
 	return rc;

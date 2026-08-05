@@ -2,7 +2,7 @@ SUMMARY = "AMD amdrnpu out-of-tree DRM/RPMsg kernel module"
 DESCRIPTION = "Platform driver that registers a DRM render node \
 (driver name 'amdrnpu') and an RPMsg endpoint per amd,amdrnpu \
 device-tree node, exposing AMDRNPU_BUF_ALLOC and AMDRNPU_CMD_SUBMIT (magic \
-'T') plus standard DRM syncobj/PRIME/GEM ioctls. Source lives under \
+'R') plus standard DRM syncobj/PRIME/GEM ioctls. Source lives under \
 drivers/accel/tessai-agent in the amdrnpu repository."
 HOMEPAGE = "https://gitenterprise.xilinx.com/PhysicalAI/tessai-agent"
 SECTION = "kernel/modules"

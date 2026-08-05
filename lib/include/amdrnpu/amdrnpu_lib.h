@@ -109,7 +109,7 @@ static inline int amdrnpu_buf_sync_from_device(int drm_fd, uint32_t handle,
 }
 
 /**
- * amdrnpu_cmd_submit - AMDRNPU_CMD_SUBMIT; syncobj handle in @hdr_out->drm_sync_obj_handle on success.
+ * amdrnpu_cmd_submit - AMDRNPU_CMD_SUBMIT; syncobj handle in @hdr_out->sync_handle on success.
  *
  * Builds a variable-length ioctl buffer from @command_op and @args[0 .. @num_args-1].
  * See include/uapi/amdrnpu/amdrnpu.h for a full example (e.g. OP_CODE_CMD0
