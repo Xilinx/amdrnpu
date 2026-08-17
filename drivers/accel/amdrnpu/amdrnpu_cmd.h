@@ -14,15 +14,14 @@
  * struct amdrnpu_wire_cmd - host -> RPU command; layout matches firmware
  * `prc_cmd` on the wire.
  *
+ * @seq: driver-assigned command id from xa_alloc_cyclic.
  * @command_op: firmware opcode selecting the RPU handler.
  * @flags: per-command flags (e.g. abort); 0 for a normal submit.
  * @num_args: number of trailing @args entries.
  * @args: flexible array of little-endian argument words.
- *
- * A per-command sequence id is added here later, alongside the driver-side
- * command lifecycle that lets multiple commands be in flight and correlated.
  */
 struct __packed amdrnpu_wire_cmd {
+	__le32 seq;
 	__le32 command_op;
 	__le32 flags;
 	__le32 num_args;
@@ -64,6 +63,7 @@ static inline int amdrnpu_rsp_err(u32 rsp_type)
 }
 
 struct __packed amdrnpu_wire_rsp {
+	__le32 seq;
 	__le32 command_rsp_type;
 };
 

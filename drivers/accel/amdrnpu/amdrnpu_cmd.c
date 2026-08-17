@@ -11,12 +11,16 @@
 #include <linux/fcntl.h>
 #include <linux/file.h>
 #include <linux/fs.h>
+#include <linux/kref.h>
+#include <linux/mutex.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/stddef.h>
 #include <linux/string.h>
 #include <linux/sync_file.h>
+#include <linux/types.h>
 #include <linux/uaccess.h>
+#include <linux/xarray.h>
 
 #include "amdrnpu_internal.h"
 
@@ -55,68 +59,214 @@ static struct dma_fence *amdrnpu_fence_create(struct amdrnpu_dev *dev)
 	return &f->base;
 }
 
+static void amdrnpu_cmd_release(struct kref *ref)
+{
+	struct amdrnpu_cmd *cmd = container_of(ref, struct amdrnpu_cmd, ref);
+	struct dma_fence *f;
+	unsigned long flags;
+
+	spin_lock_irqsave(&cmd->fence_lock, flags);
+	f = cmd->pending_fence;
+	cmd->pending_fence = NULL;
+	spin_unlock_irqrestore(&cmd->fence_lock, flags);
+	if (f) {
+		dma_fence_set_error(f, -ECONNRESET);
+		dma_fence_signal(f);
+		dma_fence_put(f);
+	}
+	kfree(cmd);
+}
+
+static void amdrnpu_cmd_put(struct amdrnpu_cmd *cmd)
+{
+	kref_put(&cmd->ref, amdrnpu_cmd_release);
+}
+
+/* Remove @seq from cmd_xa; NULL if unknown or already completed. */
+static struct amdrnpu_cmd *amdrnpu_cmd_xa_take(struct amdrnpu_dev *dev, u32 seq)
+{
+	struct amdrnpu_cmd *cmd;
+
+	mutex_lock(&dev->cmd_lock);
+	cmd = xa_erase(&dev->cmd_xa, seq);
+	mutex_unlock(&dev->cmd_lock);
+	return cmd;
+}
+
+/*
+ * Remove @cmd from cmd_xa only if it is still the entry at its seq (identity
+ * check via cmpxchg guards against the id having been reused).  Returns true if
+ * this caller removed it.
+ */
+static bool amdrnpu_cmd_xa_remove(struct amdrnpu_dev *dev, struct amdrnpu_cmd *cmd)
+{
+	bool removed;
+
+	mutex_lock(&dev->cmd_lock);
+	removed = xa_cmpxchg(&dev->cmd_xa, cmd->seq, cmd, NULL, GFP_KERNEL) == cmd;
+	mutex_unlock(&dev->cmd_lock);
+	return removed;
+}
+
+/*
+ * Allocate a wire command id with xa_alloc_cyclic (xa_limit_32b, reused when
+ * free).  Returns 0 on success (both the no-wrap and wrap-around cases).
+ */
+static int amdrnpu_cmd_xa_alloc_id(struct amdrnpu_dev *dev, struct amdrnpu_cmd *cmd)
+{
+	u32 id;
+	int err;
+
+	mutex_lock(&dev->cmd_lock);
+	err = xa_alloc_cyclic(&dev->cmd_xa, &id, cmd, xa_limit_32b,
+			      &dev->cmd_xa_next, GFP_KERNEL);
+	mutex_unlock(&dev->cmd_lock);
+	if (err < 0)
+		return err;
+	cmd->seq = id;
+	return 0;
+}
+
+static struct amdrnpu_cmd *amdrnpu_cmd_create(struct amdrnpu_dev *dev, u32 op)
+{
+	struct amdrnpu_cmd *cmd;
+	struct dma_fence *fence;
+	int ret;
+
+	cmd = kzalloc(sizeof(*cmd), GFP_KERNEL);
+	if (!cmd)
+		return ERR_PTR(-ENOMEM);
+
+	cmd->dev	= dev;
+	cmd->command_op	= op;
+	cmd->seq	= AMDRNPU_CMD_SEQ_NONE;
+	spin_lock_init(&cmd->fence_lock);
+	kref_init(&cmd->ref);
+
+	fence = amdrnpu_fence_create(dev);
+	if (!fence) {
+		ret = -ENOMEM;
+		goto err_free;
+	}
+	cmd->pending_fence = fence;
+
+	ret = amdrnpu_cmd_xa_alloc_id(dev, cmd);
+	if (ret)
+		goto err_fence;
+	return cmd;
+
+err_fence:
+	dma_fence_put(fence);
+err_free:
+	kfree(cmd);
+	return ERR_PTR(ret);
+}
+
+/* Terminal completion: record status, signal and drop the lone pending fence. */
+static void amdrnpu_cmd_signal(struct amdrnpu_cmd *cmd, int status)
+{
+	struct dma_fence *old;
+	unsigned long flags;
+
+	spin_lock_irqsave(&cmd->fence_lock, flags);
+	old = cmd->pending_fence;
+	cmd->pending_fence = NULL;
+	spin_unlock_irqrestore(&cmd->fence_lock, flags);
+
+	if (!old)
+		return;
+
+	if (status)
+		dma_fence_set_error(old, status);
+	dma_fence_signal(old);
+	dma_fence_put(old);
+}
+
+/*
+ * Terminal completion, called by whoever removed @cmd from cmd_xa: signal the
+ * fence (idempotent) and drop the reference the cmd_xa entry owned.
+ */
+static void amdrnpu_cmd_complete(struct amdrnpu_cmd *cmd, int status)
+{
+	amdrnpu_cmd_signal(cmd, status);
+	amdrnpu_cmd_put(cmd);
+}
+
 void amdrnpu_dev_cmd_init(struct amdrnpu_dev *dev)
 {
-	spin_lock_init(&dev->cmd_lock);
-	dev->pending_fence = NULL;
+	mutex_init(&dev->cmd_lock);
+	xa_init_flags(&dev->cmd_xa, XA_FLAGS_ALLOC);
+	dev->cmd_xa_next = 0;
 	dev->fence_context = dma_fence_context_alloc(1);
 	atomic_set(&dev->fence_seqno, 0);
 }
 
-static struct dma_fence *amdrnpu_dev_cmd_take(struct amdrnpu_dev *dev)
+/* Forcibly complete every in-flight command with @err. */
+static void amdrnpu_cmd_drain_xa(struct amdrnpu_dev *dev, int err)
 {
-	struct dma_fence *f;
-	unsigned long flags;
+	struct amdrnpu_cmd *cmd;
+	unsigned long index;
 
-	spin_lock_irqsave(&dev->cmd_lock, flags);
-	f = dev->pending_fence;
-	dev->pending_fence = NULL;
-	spin_unlock_irqrestore(&dev->cmd_lock, flags);
-	return f;
+	for (;;) {
+		cmd = NULL;
+		mutex_lock(&dev->cmd_lock);
+		xa_for_each(&dev->cmd_xa, index, cmd) {
+			xa_erase(&dev->cmd_xa, index);
+			break;
+		}
+		mutex_unlock(&dev->cmd_lock);
+		if (!cmd)
+			break;
+
+		amdrnpu_cmd_complete(cmd, err);
+	}
 }
 
-static void amdrnpu_cmd_signal(struct dma_fence *fence, int err)
-{
-	if (!fence)
-		return;
-	if (err)
-		dma_fence_set_error(fence, err);
-	dma_fence_signal(fence);
-	dma_fence_put(fence);
-}
-
-/* Complete the in-flight command (if any) with @err (0 = success). */
-static void amdrnpu_dev_cmd_complete(struct amdrnpu_dev *dev, int err)
-{
-	amdrnpu_cmd_signal(amdrnpu_dev_cmd_take(dev), err);
-}
-
-void amdrnpu_dev_cmd_abort(struct amdrnpu_dev *dev, int err)
+void amdrnpu_dev_cmd_drain(struct amdrnpu_dev *dev, int err)
 {
 	if (!err)
 		err = -ENOTCONN;
-	amdrnpu_dev_cmd_complete(dev, err);
+	amdrnpu_cmd_drain_xa(dev, err);
 }
 
 void amdrnpu_dev_cmd_fini(struct amdrnpu_dev *dev)
 {
-	amdrnpu_dev_cmd_complete(dev, -ENODEV);
+	amdrnpu_cmd_drain_xa(dev, -ENODEV);
+	xa_destroy(&dev->cmd_xa);
+	mutex_destroy(&dev->cmd_lock);
 }
 
 void amdrnpu_dev_cmd_dispatch_response(struct amdrnpu_dev *dev, const void *payload,
-				   size_t len)
+				       size_t len)
 {
 	struct amdrnpu_wire_rsp wr;
+	struct amdrnpu_cmd *cmd;
+	u32 rsp_seq;
 	u32 rsp_type;
-	int err;
+	int status;
 
 	if (len < sizeof(wr))
 		return;
 
 	memcpy(&wr, payload, sizeof(wr));
+	rsp_seq = le32_to_cpu(wr.seq);
 	rsp_type = le32_to_cpu(wr.command_rsp_type);
-	err = amdrnpu_rsp_err(rsp_type);
-	amdrnpu_dev_cmd_complete(dev, err);
+
+	if (rsp_type >= ARRAY_SIZE(amdrnpu_rsp_to_err))
+		dev_err_ratelimited(dev->dev,
+				    "amdrnpu: unexpected response type %u (seq %u); completing -EREMOTEIO\n",
+				    rsp_type, rsp_seq);
+	status = amdrnpu_rsp_err(rsp_type);
+
+	cmd = amdrnpu_cmd_xa_take(dev, rsp_seq);
+	if (!cmd) {
+		dev_notice_ratelimited(dev->dev,
+				       "amdrnpu: response for unknown seq %u dropped\n",
+				       rsp_seq);
+		return;
+	}
+
+	amdrnpu_cmd_complete(cmd, status);
 }
 
 static int amdrnpu_resolve_args(struct amdrnpu_dev *dev, struct amdrnpu_arg *args,
@@ -127,12 +277,12 @@ static int amdrnpu_resolve_args(struct amdrnpu_dev *dev, struct amdrnpu_arg *arg
 	for (i = 0; i < num_args; i++) {
 		struct amdrnpu_arg *a = &args[i];
 
-		/* Buffer args (size != 0) are not implemented */
+		/* Buffer args (size != 0) are not implemented yet. */
 		if (a->size != 0) {
 			dev_dbg(dev->dev,
 				"arg %u: buffer args not supported yet (size=%llu)\n",
 				i, (unsigned long long)a->size);
-			return -EINVAL;
+			return -EOPNOTSUPP;
 		}
 		out_words[i] = cpu_to_le64(a->value);
 	}
@@ -145,9 +295,8 @@ static long amdrnpu_ioctl_cmd_submit(struct amdrnpu_dev *dev, void __user *uarg)
 	struct amdrnpu_arg *args = NULL;
 	struct amdrnpu_cmd_submit uhdr;
 	struct dma_fence *fence = NULL;
-	bool published = false;
+	struct amdrnpu_cmd *cmd;
 	__le64 *words = NULL;
-	unsigned long flags;
 	size_t args_bytes;
 	int fd = -1;
 	long ret;
@@ -170,77 +319,74 @@ static long amdrnpu_ioctl_cmd_submit(struct amdrnpu_dev *dev, void __user *uarg)
 			ret = -EFAULT;
 			goto out_free_args;
 		}
+	}
+
+	cmd = amdrnpu_cmd_create(dev, uhdr.command_op);
+	if (IS_ERR(cmd)) {
+		ret = PTR_ERR(cmd);
+		goto out_free_args;
+	}
+	/*
+	 * Hold call-scoped references so a response that completes @cmd via
+	 * cmd_xa cannot free the command or its fence while we still use them.
+	 */
+	kref_get(&cmd->ref);
+	fence = dma_fence_get(cmd->pending_fence);
+
+	if (uhdr.num_args) {
 		words = kvcalloc(uhdr.num_args, sizeof(*words), GFP_KERNEL);
 		if (!words) {
 			ret = -ENOMEM;
-			goto out_free_args;
+			goto out_cancel_cmd;
 		}
 		ret = amdrnpu_resolve_args(dev, args, uhdr.num_args, words);
 		if (ret)
-			goto out_free_words;
+			goto out_cancel_cmd;
 	}
 
-	/* Local reference keeps @fence alive for the whole call. */
-	fence = amdrnpu_fence_create(dev);
-	if (!fence) {
-		ret = -ENOMEM;
-		goto out_free_words;
-	}
+	ret = amdrnpu_rpmsg_send_cmd(dev, cmd->seq, uhdr.command_op, 0, words,
+				     uhdr.num_args);
+	if (ret)
+		goto out_cancel_cmd;
 
 	fd = get_unused_fd_flags(O_CLOEXEC);
 	if (fd < 0) {
 		ret = fd;
-		goto out_unpublish;
+		goto out_cancel_cmd;
 	}
 
 	sync_file = sync_file_create(fence);
 	if (!sync_file) {
 		ret = -ENOMEM;
-		goto out_unpublish;
+		goto out_put_fd;
 	}
 
 	uhdr.sync_handle = fd;
 	if (copy_to_user(uarg, &uhdr, AMDRNPU_SUBMIT_HDR_SZ)) {
 		ret = -EFAULT;
-		goto out_unpublish;
+		goto out_put_sync_file;
 	}
-
-	/* Reserve the single in-flight slot; multiple in-flight comes next commit. */
-	spin_lock_irqsave(&dev->cmd_lock, flags);
-	if (dev->pending_fence) {
-		spin_unlock_irqrestore(&dev->cmd_lock, flags);
-		ret = -EBUSY;
-		goto out_unpublish;
-	}
-	dev->pending_fence = fence;
-	spin_unlock_irqrestore(&dev->cmd_lock, flags);	/* unlock right after publish */
-	published = true;
-
-	ret = amdrnpu_rpmsg_send_cmd(dev, uhdr.command_op, 0, words,
-				     uhdr.num_args);
-	if (ret)
-		goto out_unpublish;
 
 	fd_install(fd, sync_file->file);
+	dma_fence_put(fence);
+	amdrnpu_cmd_put(cmd);
 	kvfree(words);
 	kvfree(args);
 	return 0;
 
-out_unpublish:
-	spin_lock_irqsave(&dev->cmd_lock, flags);
-	if (dev->pending_fence == fence) {
-		dev->pending_fence = NULL;
-		published = false;
-	}
-	spin_unlock_irqrestore(&dev->cmd_lock, flags);
-	if (!published)
-		dma_fence_put(fence);
-
-	if (sync_file)
-		fput(sync_file->file);
-	if (fd >= 0)
-		put_unused_fd(fd);
-out_free_words:
+out_put_sync_file:
+	fput(sync_file->file);
+out_put_fd:
+	put_unused_fd(fd);
+out_cancel_cmd:
+	/*
+	 * If @cmd is still in cmd_xa we won the race and own its completion;
+	 * otherwise a response already took it and will complete it.
+	 */
+	if (amdrnpu_cmd_xa_remove(dev, cmd))
+		amdrnpu_cmd_complete(cmd, ret < 0 ? (int)ret : -EIO);
+	dma_fence_put(fence);
+	amdrnpu_cmd_put(cmd);
 	kvfree(words);
 out_free_args:
 	kvfree(args);

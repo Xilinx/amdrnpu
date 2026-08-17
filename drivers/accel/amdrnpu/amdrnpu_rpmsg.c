@@ -17,8 +17,8 @@
 
 static atomic_t amdrnpu_instance_counter = ATOMIC_INIT(0);
 
-int amdrnpu_rpmsg_send_cmd(struct amdrnpu_dev *dev, u32 command_op, u32 flags,
-			   const void *args, u32 num_args)
+int amdrnpu_rpmsg_send_cmd(struct amdrnpu_dev *dev, u32 seq, u32 command_op,
+			   u32 flags, const void *args, u32 num_args)
 {
 	struct amdrnpu_wire_cmd *msg;
 	size_t hdr_off;
@@ -35,6 +35,7 @@ int amdrnpu_rpmsg_send_cmd(struct amdrnpu_dev *dev, u32 command_op, u32 flags,
 	if (!msg)
 		return -ENOMEM;
 
+	msg->seq         = cpu_to_le32(seq);
 	msg->command_op  = cpu_to_le32(command_op);
 	msg->flags       = cpu_to_le32(flags);
 	msg->num_args    = cpu_to_le32(num_args);
@@ -129,7 +130,7 @@ static void amdrnpu_rpmsg_remove(struct rpmsg_device *rpdev)
 	dev->rpdev = NULL;
 	mutex_unlock(&dev->rpmsg_lock);
 
-	amdrnpu_dev_cmd_abort(dev, -ENOTCONN);
+	amdrnpu_dev_cmd_drain(dev, -ENOTCONN);
 
 	dev_set_drvdata(&rpdev->dev, NULL);
 	amdrnpu_dev_put(dev);
