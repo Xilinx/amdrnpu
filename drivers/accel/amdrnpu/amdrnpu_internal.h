@@ -27,7 +27,6 @@
 #define AMDRNPU_SUBMIT_HDR_SZ	offsetof(struct amdrnpu_cmd_submit, args)
 
 struct amdrnpu_dev;
-struct amdrnpu_cmd;
 
 /*
  * Per-channel device state.  One of these is allocated for each bound rpmsg
@@ -35,8 +34,9 @@ struct amdrnpu_cmd;
  * each open fd holds an additional ref.
  *
  * Completion is asynchronous but single-outstanding: only one command may be
- * in flight per device, referenced by @pending_cmd.  The command owns its own
- * fence; the device merely tracks which one is in flight.  @fence_context and
+ * in flight per device, whose dma_fence is referenced by @pending_fence.  The
+ * fence is independently reference-counted (also held by the exported
+ * sync_file), so it can outlive the device's tracking.  @fence_context and
  * @fence_seqno are dma_fence timeline bookkeeping, which is device-scoped.
  */
 struct amdrnpu_dev {
@@ -47,8 +47,8 @@ struct amdrnpu_dev {
 	struct rpmsg_device	*rpdev;
 	struct mutex		rpmsg_lock;	/* rpmsg send path */
 
-	spinlock_t		cmd_lock;	/* pending_cmd */
-	struct amdrnpu_cmd	*pending_cmd;	/* in-flight command, or NULL */
+	spinlock_t		cmd_lock;	/* pending_fence */
+	struct dma_fence	*pending_fence;	/* in-flight cmd's fence, or NULL */
 	atomic_t		fence_seqno;
 	u64			fence_context;
 

@@ -20,7 +20,7 @@
 
 #include "amdrnpu_internal.h"
 
-struct amdrnpu_cmd {
+struct amdrnpu_fence {
 	struct dma_fence	base;
 	spinlock_t		lock;	/* dma_fence lock */
 };
@@ -40,49 +40,49 @@ static const struct dma_fence_ops amdrnpu_fence_ops = {
 	.get_timeline_name	= amdrnpu_fence_get_timeline_name,
 };
 
-static struct amdrnpu_cmd *amdrnpu_cmd_create(struct amdrnpu_dev *dev)
+static struct dma_fence *amdrnpu_fence_create(struct amdrnpu_dev *dev)
 {
-	struct amdrnpu_cmd *cmd;
+	struct amdrnpu_fence *f;
 
-	cmd = kzalloc(sizeof(*cmd), GFP_KERNEL);
-	if (!cmd)
+	f = kzalloc(sizeof(*f), GFP_KERNEL);
+	if (!f)
 		return NULL;
 
-	spin_lock_init(&cmd->lock);
-	dma_fence_init(&cmd->base, &amdrnpu_fence_ops, &cmd->lock,
+	spin_lock_init(&f->lock);
+	dma_fence_init(&f->base, &amdrnpu_fence_ops, &f->lock,
 		       dev->fence_context,
 		       atomic_inc_return(&dev->fence_seqno));
-	return cmd;
+	return &f->base;
 }
 
 void amdrnpu_dev_cmd_init(struct amdrnpu_dev *dev)
 {
 	spin_lock_init(&dev->cmd_lock);
-	dev->pending_cmd = NULL;
+	dev->pending_fence = NULL;
 	dev->fence_context = dma_fence_context_alloc(1);
 	atomic_set(&dev->fence_seqno, 0);
 }
 
-static struct amdrnpu_cmd *amdrnpu_dev_cmd_take(struct amdrnpu_dev *dev)
+static struct dma_fence *amdrnpu_dev_cmd_take(struct amdrnpu_dev *dev)
 {
-	struct amdrnpu_cmd *cmd;
+	struct dma_fence *f;
 	unsigned long flags;
 
 	spin_lock_irqsave(&dev->cmd_lock, flags);
-	cmd = dev->pending_cmd;
-	dev->pending_cmd = NULL;
+	f = dev->pending_fence;
+	dev->pending_fence = NULL;
 	spin_unlock_irqrestore(&dev->cmd_lock, flags);
-	return cmd;
+	return f;
 }
 
-static void amdrnpu_cmd_signal(struct amdrnpu_cmd *cmd, int err)
+static void amdrnpu_cmd_signal(struct dma_fence *fence, int err)
 {
-	if (!cmd)
+	if (!fence)
 		return;
 	if (err)
-		dma_fence_set_error(&cmd->base, err);
-	dma_fence_signal(&cmd->base);
-	dma_fence_put(&cmd->base);
+		dma_fence_set_error(fence, err);
+	dma_fence_signal(fence);
+	dma_fence_put(fence);
 }
 
 /* Complete the in-flight command (if any) with @err (0 = success). */
@@ -144,7 +144,7 @@ static long amdrnpu_ioctl_cmd_submit(struct amdrnpu_dev *dev, void __user *uarg)
 	struct sync_file *sync_file = NULL;
 	struct amdrnpu_arg *args = NULL;
 	struct amdrnpu_cmd_submit uhdr;
-	struct amdrnpu_cmd *cmd = NULL;
+	struct dma_fence *fence = NULL;
 	bool published = false;
 	__le64 *words = NULL;
 	unsigned long flags;
@@ -180,9 +180,9 @@ static long amdrnpu_ioctl_cmd_submit(struct amdrnpu_dev *dev, void __user *uarg)
 			goto out_free_words;
 	}
 
-	/* Local reference keeps @cmd alive for the whole call. */
-	cmd = amdrnpu_cmd_create(dev);
-	if (!cmd) {
+	/* Local reference keeps @fence alive for the whole call. */
+	fence = amdrnpu_fence_create(dev);
+	if (!fence) {
 		ret = -ENOMEM;
 		goto out_free_words;
 	}
@@ -193,7 +193,7 @@ static long amdrnpu_ioctl_cmd_submit(struct amdrnpu_dev *dev, void __user *uarg)
 		goto out_unpublish;
 	}
 
-	sync_file = sync_file_create(&cmd->base);
+	sync_file = sync_file_create(fence);
 	if (!sync_file) {
 		ret = -ENOMEM;
 		goto out_unpublish;
@@ -207,12 +207,12 @@ static long amdrnpu_ioctl_cmd_submit(struct amdrnpu_dev *dev, void __user *uarg)
 
 	/* Reserve the single in-flight slot; multiple in-flight comes next commit. */
 	spin_lock_irqsave(&dev->cmd_lock, flags);
-	if (dev->pending_cmd) {
+	if (dev->pending_fence) {
 		spin_unlock_irqrestore(&dev->cmd_lock, flags);
 		ret = -EBUSY;
 		goto out_unpublish;
 	}
-	dev->pending_cmd = cmd;
+	dev->pending_fence = fence;
 	spin_unlock_irqrestore(&dev->cmd_lock, flags);	/* unlock right after publish */
 	published = true;
 
@@ -228,13 +228,13 @@ static long amdrnpu_ioctl_cmd_submit(struct amdrnpu_dev *dev, void __user *uarg)
 
 out_unpublish:
 	spin_lock_irqsave(&dev->cmd_lock, flags);
-	if (dev->pending_cmd == cmd) {
-		dev->pending_cmd = NULL;
+	if (dev->pending_fence == fence) {
+		dev->pending_fence = NULL;
 		published = false;
 	}
 	spin_unlock_irqrestore(&dev->cmd_lock, flags);
 	if (!published)
-		dma_fence_put(&cmd->base);
+		dma_fence_put(fence);
 
 	if (sync_file)
 		fput(sync_file->file);
