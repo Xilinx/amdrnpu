@@ -26,8 +26,6 @@
 
 #define AMDRNPU_SUBMIT_HDR_SZ	offsetof(struct amdrnpu_cmd_submit, args)
 
-struct amdrnpu_dev;
-
 /*
  * Per-channel device state.  One of these is allocated for each bound rpmsg
  * endpoint.  Reference counted: the rpmsg binding owns one ref while bound;
