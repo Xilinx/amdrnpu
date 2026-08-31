@@ -9,13 +9,19 @@
 #include <linux/atomic.h>
 #include <linux/dma-fence.h>
 #include <linux/kref.h>
-#include <linux/miscdevice.h>
 #include <linux/mutex.h>
+#include <linux/of.h>
+#include <linux/platform_device.h>
 #include <linux/rpmsg.h>
 #include <linux/spinlock.h>
 #include <linux/stddef.h>
 #include <linux/types.h>
 #include <linux/xarray.h>
+
+#include <drm/drm_device.h>
+#include <drm/drm_drv.h>
+#include <drm/drm_file.h>
+#include <drm/drm_syncobj.h>
 
 #include <amdrnpu/amdrnpu.h>
 
@@ -31,9 +37,9 @@
 #define AMDRNPU_CMD_SEQ_NONE	((u32)~0U)
 
 /*
- * Per-channel device state.  One of these is allocated for each bound rpmsg
- * endpoint.  Reference counted: the rpmsg binding owns one ref while bound;
- * each open fd holds an additional ref.
+ * Driver-wide state.  One per "amd,amdrnpu" DT node; the struct embeds the
+ * drm_device and is allocated by devm_drm_dev_alloc() in the platform probe, so
+ * its lifetime is managed by DRM/devm.
  *
  * Completion is asynchronous and many-in-flight: submitted commands live in
  * @cmd_xa keyed by a driver-assigned wire seq, and are correlated back to the
@@ -41,9 +47,9 @@
  * and @fence_seqno are device-scoped dma_fence timeline bookkeeping.
  */
 struct amdrnpu_dev {
-	struct kref		refcount;
-	struct miscdevice	mdev;
-	struct device		*dev;		/* mdev.this_device; for logging */
+	struct drm_device	drm;
+	struct device		*dev;		/* platform device; for logging */
+	struct device_node	*ctrl_node;	/* "amd,rpu" target */
 
 	struct rpmsg_device	*rpdev;
 	struct mutex		rpmsg_lock;	/* rpmsg send path */
@@ -53,22 +59,26 @@ struct amdrnpu_dev {
 	u32			cmd_xa_next;	/* xa_alloc_cyclic cursor */
 	atomic_t		fence_seqno;
 	u64			fence_context;
-
-	char			dev_name[32];
 };
+
+static inline struct amdrnpu_dev *to_amdrnpu_dev(struct drm_device *ddev)
+{
+	return container_of(ddev, struct amdrnpu_dev, drm);
+}
 
 /*
  * Per-command object, tracked in amdrnpu_dev.cmd_xa at @seq for the duration of
  * a submit.  Single-reffed: the kref is owned by the cmd_xa entry, and whoever
  * wins the erase from cmd_xa completes the fence and drops that reference.  The
- * dma_fence is a separate, independently reference-counted object (exported to
- * userspace as a sync_file), so it can outlive the command.
+ * fence is exported to userspace as a drm_syncobj (an independently
+ * reference-counted object) so it can outlive the command.
  */
 struct amdrnpu_cmd {
 	struct amdrnpu_dev	*rnpu;
 	u32			seq;		/* cmd_xa id / wire seq, or SEQ_NONE */
 	u32			command_op;
 
+	struct drm_syncobj	*syncobj;
 	spinlock_t		fence_lock;	/* pending_fence */
 	struct dma_fence	*pending_fence;
 
@@ -76,13 +86,16 @@ struct amdrnpu_cmd {
 };
 
 /* amdrnpu_drv.c */
-void amdrnpu_dev_get(struct amdrnpu_dev *rnpu);
-void amdrnpu_dev_put(struct amdrnpu_dev *rnpu);
-int  amdrnpu_chardev_register(struct amdrnpu_dev *rnpu);
-void amdrnpu_chardev_deregister(struct amdrnpu_dev *rnpu);
+extern struct platform_driver amdrnpu_platform_driver;
+
+/* amdrnpu_drm.c */
+extern const struct drm_driver amdrnpu_drm_driver;
+int  amdrnpu_drm_register(struct amdrnpu_dev *rnpu);
+void amdrnpu_drm_unregister(struct amdrnpu_dev *rnpu);
 
 /* amdrnpu_cmd.c */
-long amdrnpu_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
+long amdrnpu_ioctl_cmd_submit(struct amdrnpu_dev *rnpu, void __user *uarg,
+			      struct drm_file *file);
 void amdrnpu_dev_cmd_init(struct amdrnpu_dev *rnpu);
 void amdrnpu_dev_cmd_fini(struct amdrnpu_dev *rnpu);
 void amdrnpu_dev_cmd_dispatch_response(struct amdrnpu_dev *rnpu,
