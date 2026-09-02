@@ -16,42 +16,40 @@
 
 static void amdrnpu_dev_release(struct kref *ref)
 {
-	struct amdrnpu_dev *dev =
-		container_of(ref, struct amdrnpu_dev, refcount);
+	struct amdrnpu_dev *rnpu = container_of(ref, struct amdrnpu_dev, refcount);
 
-	amdrnpu_dev_cmd_fini(dev);
-	mutex_destroy(&dev->rpmsg_lock);
-	kfree(dev);
+	amdrnpu_dev_cmd_fini(rnpu);
+	mutex_destroy(&rnpu->rpmsg_lock);
+	kfree(rnpu);
 }
 
-void amdrnpu_dev_get(struct amdrnpu_dev *dev)
+void amdrnpu_dev_get(struct amdrnpu_dev *rnpu)
 {
-	kref_get(&dev->refcount);
+	kref_get(&rnpu->refcount);
 }
 
-void amdrnpu_dev_put(struct amdrnpu_dev *dev)
+void amdrnpu_dev_put(struct amdrnpu_dev *rnpu)
 {
-	kref_put(&dev->refcount, amdrnpu_dev_release);
+	kref_put(&rnpu->refcount, amdrnpu_dev_release);
 }
 
 static int amdrnpu_open(struct inode *inode, struct file *filp)
 {
 	struct miscdevice *mdev = filp->private_data;
-	struct amdrnpu_dev *dev =
-		container_of(mdev, struct amdrnpu_dev, mdev);
+	struct amdrnpu_dev *rnpu = container_of(mdev, struct amdrnpu_dev, mdev);
 
-	amdrnpu_dev_get(dev);
-	filp->private_data = dev;
+	amdrnpu_dev_get(rnpu);
+	filp->private_data = rnpu;
 	return 0;
 }
 
 static int amdrnpu_release(struct inode *inode, struct file *filp)
 {
-	struct amdrnpu_dev *dev = filp->private_data;
+	struct amdrnpu_dev *rnpu = filp->private_data;
 
 	filp->private_data = NULL;
-	if (dev)
-		amdrnpu_dev_put(dev);
+	if (rnpu)
+		amdrnpu_dev_put(rnpu);
 	return 0;
 }
 
@@ -63,19 +61,19 @@ static const struct file_operations amdrnpu_fops = {
 	.compat_ioctl	= amdrnpu_ioctl,
 };
 
-int amdrnpu_chardev_register(struct amdrnpu_dev *dev)
+int amdrnpu_chardev_register(struct amdrnpu_dev *rnpu)
 {
-	dev->mdev.minor = MISC_DYNAMIC_MINOR;
-	dev->mdev.name  = dev->dev_name;
-	dev->mdev.fops  = &amdrnpu_fops;
-	dev->mdev.mode  = 0660;
+	rnpu->mdev.minor = MISC_DYNAMIC_MINOR;
+	rnpu->mdev.name  = rnpu->dev_name;
+	rnpu->mdev.fops  = &amdrnpu_fops;
+	rnpu->mdev.mode  = 0660;
 
-	return misc_register(&dev->mdev);
+	return misc_register(&rnpu->mdev);
 }
 
-void amdrnpu_chardev_deregister(struct amdrnpu_dev *dev)
+void amdrnpu_chardev_deregister(struct amdrnpu_dev *rnpu)
 {
-	misc_deregister(&dev->mdev);
+	misc_deregister(&rnpu->mdev);
 }
 
 static int __init amdrnpu_module_init(void)

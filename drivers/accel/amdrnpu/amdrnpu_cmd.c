@@ -44,7 +44,7 @@ static const struct dma_fence_ops amdrnpu_fence_ops = {
 	.get_timeline_name	= amdrnpu_fence_get_timeline_name,
 };
 
-static struct dma_fence *amdrnpu_fence_create(struct amdrnpu_dev *dev)
+static struct dma_fence *amdrnpu_fence_create(struct amdrnpu_dev *rnpu)
 {
 	struct amdrnpu_fence *f;
 
@@ -54,8 +54,8 @@ static struct dma_fence *amdrnpu_fence_create(struct amdrnpu_dev *dev)
 
 	spin_lock_init(&f->lock);
 	dma_fence_init(&f->base, &amdrnpu_fence_ops, &f->lock,
-		       dev->fence_context,
-		       atomic_inc_return(&dev->fence_seqno));
+		       rnpu->fence_context,
+		       atomic_inc_return(&rnpu->fence_seqno));
 	return &f->base;
 }
 
@@ -83,13 +83,13 @@ static void amdrnpu_cmd_put(struct amdrnpu_cmd *cmd)
 }
 
 /* Remove @seq from cmd_xa; NULL if unknown or already completed. */
-static struct amdrnpu_cmd *amdrnpu_cmd_xa_take(struct amdrnpu_dev *dev, u32 seq)
+static struct amdrnpu_cmd *amdrnpu_cmd_xa_take(struct amdrnpu_dev *rnpu, u32 seq)
 {
 	struct amdrnpu_cmd *cmd;
 
-	mutex_lock(&dev->cmd_lock);
-	cmd = xa_erase(&dev->cmd_xa, seq);
-	mutex_unlock(&dev->cmd_lock);
+	mutex_lock(&rnpu->cmd_lock);
+	cmd = xa_erase(&rnpu->cmd_xa, seq);
+	mutex_unlock(&rnpu->cmd_lock);
 	return cmd;
 }
 
@@ -98,13 +98,13 @@ static struct amdrnpu_cmd *amdrnpu_cmd_xa_take(struct amdrnpu_dev *dev, u32 seq)
  * check via cmpxchg guards against the id having been reused).  Returns true if
  * this caller removed it.
  */
-static bool amdrnpu_cmd_xa_remove(struct amdrnpu_dev *dev, struct amdrnpu_cmd *cmd)
+static bool amdrnpu_cmd_xa_remove(struct amdrnpu_dev *rnpu, struct amdrnpu_cmd *cmd)
 {
 	bool removed;
 
-	mutex_lock(&dev->cmd_lock);
-	removed = xa_cmpxchg(&dev->cmd_xa, cmd->seq, cmd, NULL, GFP_KERNEL) == cmd;
-	mutex_unlock(&dev->cmd_lock);
+	mutex_lock(&rnpu->cmd_lock);
+	removed = xa_cmpxchg(&rnpu->cmd_xa, cmd->seq, cmd, NULL, GFP_KERNEL) == cmd;
+	mutex_unlock(&rnpu->cmd_lock);
 	return removed;
 }
 
@@ -112,22 +112,22 @@ static bool amdrnpu_cmd_xa_remove(struct amdrnpu_dev *dev, struct amdrnpu_cmd *c
  * Allocate a wire command id with xa_alloc_cyclic (xa_limit_32b, reused when
  * free).  Returns 0 on success (both the no-wrap and wrap-around cases).
  */
-static int amdrnpu_cmd_xa_alloc_id(struct amdrnpu_dev *dev, struct amdrnpu_cmd *cmd)
+static int amdrnpu_cmd_xa_alloc_id(struct amdrnpu_dev *rnpu, struct amdrnpu_cmd *cmd)
 {
-	u32 id;
 	int err;
+	u32 id;
 
-	mutex_lock(&dev->cmd_lock);
-	err = xa_alloc_cyclic(&dev->cmd_xa, &id, cmd, xa_limit_32b,
-			      &dev->cmd_xa_next, GFP_KERNEL);
-	mutex_unlock(&dev->cmd_lock);
+	mutex_lock(&rnpu->cmd_lock);
+	err = xa_alloc_cyclic(&rnpu->cmd_xa, &id, cmd, xa_limit_32b,
+			      &rnpu->cmd_xa_next, GFP_KERNEL);
+	mutex_unlock(&rnpu->cmd_lock);
 	if (err < 0)
 		return err;
 	cmd->seq = id;
 	return 0;
 }
 
-static struct amdrnpu_cmd *amdrnpu_cmd_create(struct amdrnpu_dev *dev, u32 op)
+static struct amdrnpu_cmd *amdrnpu_cmd_create(struct amdrnpu_dev *rnpu, u32 op)
 {
 	struct amdrnpu_cmd *cmd;
 	struct dma_fence *fence;
@@ -137,20 +137,20 @@ static struct amdrnpu_cmd *amdrnpu_cmd_create(struct amdrnpu_dev *dev, u32 op)
 	if (!cmd)
 		return ERR_PTR(-ENOMEM);
 
-	cmd->dev	= dev;
+	cmd->rnpu	= rnpu;
 	cmd->command_op	= op;
 	cmd->seq	= AMDRNPU_CMD_SEQ_NONE;
 	spin_lock_init(&cmd->fence_lock);
 	kref_init(&cmd->ref);
 
-	fence = amdrnpu_fence_create(dev);
+	fence = amdrnpu_fence_create(rnpu);
 	if (!fence) {
 		ret = -ENOMEM;
 		goto err_free;
 	}
 	cmd->pending_fence = fence;
 
-	ret = amdrnpu_cmd_xa_alloc_id(dev, cmd);
+	ret = amdrnpu_cmd_xa_alloc_id(rnpu, cmd);
 	if (ret)
 		goto err_fence;
 	return cmd;
@@ -192,29 +192,29 @@ static void amdrnpu_cmd_complete(struct amdrnpu_cmd *cmd, int status)
 	amdrnpu_cmd_put(cmd);
 }
 
-void amdrnpu_dev_cmd_init(struct amdrnpu_dev *dev)
+void amdrnpu_dev_cmd_init(struct amdrnpu_dev *rnpu)
 {
-	mutex_init(&dev->cmd_lock);
-	xa_init_flags(&dev->cmd_xa, XA_FLAGS_ALLOC);
-	dev->cmd_xa_next = 0;
-	dev->fence_context = dma_fence_context_alloc(1);
-	atomic_set(&dev->fence_seqno, 0);
+	mutex_init(&rnpu->cmd_lock);
+	xa_init_flags(&rnpu->cmd_xa, XA_FLAGS_ALLOC);
+	rnpu->cmd_xa_next = 0;
+	rnpu->fence_context = dma_fence_context_alloc(1);
+	atomic_set(&rnpu->fence_seqno, 0);
 }
 
 /* Forcibly complete every in-flight command with @err. */
-static void amdrnpu_cmd_drain_xa(struct amdrnpu_dev *dev, int err)
+static void amdrnpu_cmd_drain_xa(struct amdrnpu_dev *rnpu, int err)
 {
 	struct amdrnpu_cmd *cmd;
 	unsigned long index;
 
 	for (;;) {
 		cmd = NULL;
-		mutex_lock(&dev->cmd_lock);
-		xa_for_each(&dev->cmd_xa, index, cmd) {
-			xa_erase(&dev->cmd_xa, index);
+		mutex_lock(&rnpu->cmd_lock);
+		xa_for_each(&rnpu->cmd_xa, index, cmd) {
+			xa_erase(&rnpu->cmd_xa, index);
 			break;
 		}
-		mutex_unlock(&dev->cmd_lock);
+		mutex_unlock(&rnpu->cmd_lock);
 		if (!cmd)
 			break;
 
@@ -222,27 +222,27 @@ static void amdrnpu_cmd_drain_xa(struct amdrnpu_dev *dev, int err)
 	}
 }
 
-void amdrnpu_dev_cmd_drain(struct amdrnpu_dev *dev, int err)
+void amdrnpu_dev_cmd_drain(struct amdrnpu_dev *rnpu, int err)
 {
 	if (!err)
 		err = -ENOTCONN;
-	amdrnpu_cmd_drain_xa(dev, err);
+	amdrnpu_cmd_drain_xa(rnpu, err);
 }
 
-void amdrnpu_dev_cmd_fini(struct amdrnpu_dev *dev)
+void amdrnpu_dev_cmd_fini(struct amdrnpu_dev *rnpu)
 {
-	amdrnpu_cmd_drain_xa(dev, -ENODEV);
-	xa_destroy(&dev->cmd_xa);
-	mutex_destroy(&dev->cmd_lock);
+	amdrnpu_cmd_drain_xa(rnpu, -ENODEV);
+	xa_destroy(&rnpu->cmd_xa);
+	mutex_destroy(&rnpu->cmd_lock);
 }
 
-void amdrnpu_dev_cmd_dispatch_response(struct amdrnpu_dev *dev, const void *payload,
+void amdrnpu_dev_cmd_dispatch_response(struct amdrnpu_dev *rnpu, const void *payload,
 				       size_t len)
 {
 	struct amdrnpu_wire_rsp wr;
 	struct amdrnpu_cmd *cmd;
-	u32 rsp_seq;
 	u32 rsp_type;
+	u32 rsp_seq;
 	int status;
 
 	if (len < sizeof(wr))
@@ -253,14 +253,14 @@ void amdrnpu_dev_cmd_dispatch_response(struct amdrnpu_dev *dev, const void *payl
 	rsp_type = le32_to_cpu(wr.command_rsp_type);
 
 	if (rsp_type >= ARRAY_SIZE(amdrnpu_rsp_to_err))
-		dev_err_ratelimited(dev->dev,
+		dev_err_ratelimited(rnpu->dev,
 				    "amdrnpu: unexpected response type %u (seq %u); completing -EREMOTEIO\n",
 				    rsp_type, rsp_seq);
 	status = amdrnpu_rsp_err(rsp_type);
 
-	cmd = amdrnpu_cmd_xa_take(dev, rsp_seq);
+	cmd = amdrnpu_cmd_xa_take(rnpu, rsp_seq);
 	if (!cmd) {
-		dev_notice_ratelimited(dev->dev,
+		dev_notice_ratelimited(rnpu->dev,
 				       "amdrnpu: response for unknown seq %u dropped\n",
 				       rsp_seq);
 		return;
@@ -269,7 +269,7 @@ void amdrnpu_dev_cmd_dispatch_response(struct amdrnpu_dev *dev, const void *payl
 	amdrnpu_cmd_complete(cmd, status);
 }
 
-static int amdrnpu_resolve_args(struct amdrnpu_dev *dev, struct amdrnpu_arg *args,
+static int amdrnpu_resolve_args(struct amdrnpu_dev *rnpu, struct amdrnpu_arg *args,
 				u32 num_args, __le64 *out_words)
 {
 	u32 i;
@@ -279,7 +279,7 @@ static int amdrnpu_resolve_args(struct amdrnpu_dev *dev, struct amdrnpu_arg *arg
 
 		/* Buffer args (size != 0) are not implemented yet. */
 		if (a->size != 0) {
-			dev_dbg(dev->dev,
+			dev_dbg(rnpu->dev,
 				"arg %u: buffer args not supported yet (size=%llu)\n",
 				i, (unsigned long long)a->size);
 			return -EOPNOTSUPP;
@@ -289,7 +289,7 @@ static int amdrnpu_resolve_args(struct amdrnpu_dev *dev, struct amdrnpu_arg *arg
 	return 0;
 }
 
-static long amdrnpu_ioctl_cmd_submit(struct amdrnpu_dev *dev, void __user *uarg)
+static long amdrnpu_ioctl_cmd_submit(struct amdrnpu_dev *rnpu, void __user *uarg)
 {
 	struct sync_file *sync_file = NULL;
 	struct amdrnpu_arg *args = NULL;
@@ -321,7 +321,7 @@ static long amdrnpu_ioctl_cmd_submit(struct amdrnpu_dev *dev, void __user *uarg)
 		}
 	}
 
-	cmd = amdrnpu_cmd_create(dev, uhdr.command_op);
+	cmd = amdrnpu_cmd_create(rnpu, uhdr.command_op);
 	if (IS_ERR(cmd)) {
 		ret = PTR_ERR(cmd);
 		goto out_free_args;
@@ -339,12 +339,12 @@ static long amdrnpu_ioctl_cmd_submit(struct amdrnpu_dev *dev, void __user *uarg)
 			ret = -ENOMEM;
 			goto out_cancel_cmd;
 		}
-		ret = amdrnpu_resolve_args(dev, args, uhdr.num_args, words);
+		ret = amdrnpu_resolve_args(rnpu, args, uhdr.num_args, words);
 		if (ret)
 			goto out_cancel_cmd;
 	}
 
-	ret = amdrnpu_rpmsg_send_cmd(dev, cmd->seq, uhdr.command_op, 0, words,
+	ret = amdrnpu_rpmsg_send_cmd(rnpu, cmd->seq, uhdr.command_op, 0, words,
 				     uhdr.num_args);
 	if (ret)
 		goto out_cancel_cmd;
@@ -383,7 +383,7 @@ out_cancel_cmd:
 	 * If @cmd is still in cmd_xa we won the race and own its completion;
 	 * otherwise a response already took it and will complete it.
 	 */
-	if (amdrnpu_cmd_xa_remove(dev, cmd))
+	if (amdrnpu_cmd_xa_remove(rnpu, cmd))
 		amdrnpu_cmd_complete(cmd, ret < 0 ? (int)ret : -EIO);
 	dma_fence_put(fence);
 	amdrnpu_cmd_put(cmd);
@@ -395,14 +395,14 @@ out_free_args:
 
 long amdrnpu_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
-	struct amdrnpu_dev *dev = filp->private_data;
+	struct amdrnpu_dev *rnpu = filp->private_data;
 
-	if (!dev)
+	if (!rnpu)
 		return -ENODEV;
 
 	switch (cmd) {
 	case AMDRNPU_CMD_SUBMIT:
-		return amdrnpu_ioctl_cmd_submit(dev, (void __user *)arg);
+		return amdrnpu_ioctl_cmd_submit(rnpu, (void __user *)arg);
 	default:
 		return -ENOTTY;
 	}

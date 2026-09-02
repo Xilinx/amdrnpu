@@ -17,7 +17,7 @@
 
 static atomic_t amdrnpu_instance_counter = ATOMIC_INIT(0);
 
-int amdrnpu_rpmsg_send_cmd(struct amdrnpu_dev *dev, u32 seq, u32 command_op,
+int amdrnpu_rpmsg_send_cmd(struct amdrnpu_dev *rnpu, u32 seq, u32 command_op,
 			   u32 flags, const void *args, u32 num_args)
 {
 	struct amdrnpu_wire_cmd *msg;
@@ -42,15 +42,15 @@ int amdrnpu_rpmsg_send_cmd(struct amdrnpu_dev *dev, u32 seq, u32 command_op,
 	if (num_args)
 		memcpy(msg->args, args, num_args * sizeof(__le64));
 
-	mutex_lock(&dev->rpmsg_lock);
-	if (!dev->rpdev) {
-		mutex_unlock(&dev->rpmsg_lock);
-		dev_err(dev->dev, "cmd submit failed: rpmsg channel not connected\n");
+	mutex_lock(&rnpu->rpmsg_lock);
+	if (!rnpu->rpdev) {
+		mutex_unlock(&rnpu->rpmsg_lock);
+		dev_err(rnpu->dev, "cmd submit failed: rpmsg channel not connected\n");
 		kfree(msg);
 		return -ENOTCONN;
 	}
-	ret = rpmsg_send(dev->rpdev->ept, msg, msg_len);
-	mutex_unlock(&dev->rpmsg_lock);
+	ret = rpmsg_send(rnpu->rpdev->ept, msg, msg_len);
+	mutex_unlock(&rnpu->rpmsg_lock);
 
 	kfree(msg);
 	return ret;
@@ -59,9 +59,9 @@ int amdrnpu_rpmsg_send_cmd(struct amdrnpu_dev *dev, u32 seq, u32 command_op,
 static int amdrnpu_rpmsg_cb(struct rpmsg_device *rpdev, void *data,
 			    int len, void *priv, u32 src)
 {
-	struct amdrnpu_dev *dev = dev_get_drvdata(&rpdev->dev);
+	struct amdrnpu_dev *rnpu = dev_get_drvdata(&rpdev->dev);
 
-	if (!dev) {
+	if (!rnpu) {
 		/* Channel was unbound while a callback was racing in. */
 		dev_warn_ratelimited(&rpdev->dev,
 				     "amdrnpu: rpmsg msg dropped: channel not bound\n");
@@ -75,65 +75,65 @@ static int amdrnpu_rpmsg_cb(struct rpmsg_device *rpdev, void *data,
 		return 0;
 	}
 
-	amdrnpu_dev_cmd_dispatch_response(dev, data, (size_t)len);
+	amdrnpu_dev_cmd_dispatch_response(rnpu, data, (size_t)len);
 	return 0;
 }
 
 static int amdrnpu_rpmsg_probe(struct rpmsg_device *rpdev)
 {
-	struct amdrnpu_dev *dev;
+	struct amdrnpu_dev *rnpu;
 	int idx, ret;
 
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
-	if (!dev)
+	rnpu = kzalloc(sizeof(*rnpu), GFP_KERNEL);
+	if (!rnpu)
 		return -ENOMEM;
 
-	kref_init(&dev->refcount);
-	mutex_init(&dev->rpmsg_lock);
-	amdrnpu_dev_cmd_init(dev);
-	dev->rpdev = rpdev;
+	kref_init(&rnpu->refcount);
+	mutex_init(&rnpu->rpmsg_lock);
+	amdrnpu_dev_cmd_init(rnpu);
+	rnpu->rpdev = rpdev;
 
 	idx = atomic_fetch_inc(&amdrnpu_instance_counter);
-	snprintf(dev->dev_name, sizeof(dev->dev_name), "%s.%d",
+	snprintf(rnpu->dev_name, sizeof(rnpu->dev_name), "%s.%d",
 		 AMDRNPU_DRIVER_NAME, idx);
 
-	ret = amdrnpu_chardev_register(dev);
+	ret = amdrnpu_chardev_register(rnpu);
 	if (ret) {
 		dev_err(&rpdev->dev,
 			"amdrnpu: misc_register(%s) failed: %d\n",
-			dev->dev_name, ret);
-		amdrnpu_dev_cmd_fini(dev);
-		mutex_destroy(&dev->rpmsg_lock);
-		kfree(dev);
+			rnpu->dev_name, ret);
+		amdrnpu_dev_cmd_fini(rnpu);
+		mutex_destroy(&rnpu->rpmsg_lock);
+		kfree(rnpu);
 		return ret;
 	}
 
-	dev->dev = dev->mdev.this_device;
-	dev_set_drvdata(&rpdev->dev, dev);
+	rnpu->dev = rnpu->mdev.this_device;
+	dev_set_drvdata(&rpdev->dev, rnpu);
 	dev_info(&rpdev->dev,
 		 "amdrnpu: bound channel %s -> /dev/%s (ABI v%u)\n",
-		 rpdev->id.name, dev->dev_name, AMDRNPU_ABI_VERSION);
+		 rpdev->id.name, rnpu->dev_name, AMDRNPU_ABI_VERSION);
 	return 0;
 }
 
 static void amdrnpu_rpmsg_remove(struct rpmsg_device *rpdev)
 {
-	struct amdrnpu_dev *dev = dev_get_drvdata(&rpdev->dev);
+	struct amdrnpu_dev *rnpu = dev_get_drvdata(&rpdev->dev);
 
-	if (!dev)
+	if (!rnpu)
 		return;
 
-	dev_info(&rpdev->dev, "amdrnpu: removing /dev/%s\n", dev->dev_name);
-	amdrnpu_chardev_deregister(dev);
+	dev_info(&rpdev->dev, "amdrnpu: removing /dev/%s\n", rnpu->dev_name);
+	amdrnpu_chardev_deregister(rnpu);
 
-	mutex_lock(&dev->rpmsg_lock);
-	dev->rpdev = NULL;
-	mutex_unlock(&dev->rpmsg_lock);
+	mutex_lock(&rnpu->rpmsg_lock);
+	rnpu->rpdev = NULL;
+	mutex_unlock(&rnpu->rpmsg_lock);
 
-	amdrnpu_dev_cmd_drain(dev, -ENOTCONN);
+	amdrnpu_dev_cmd_drain(rnpu, -ENOTCONN);
 
 	dev_set_drvdata(&rpdev->dev, NULL);
-	amdrnpu_dev_put(dev);
+	amdrnpu_dev_put(rnpu);
 }
 
 static const struct rpmsg_device_id amdrnpu_rpmsg_id_table[] = {

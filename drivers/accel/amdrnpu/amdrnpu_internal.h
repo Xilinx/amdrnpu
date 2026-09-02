@@ -65,7 +65,7 @@ struct amdrnpu_dev {
  * userspace as a sync_file), so it can outlive the command.
  */
 struct amdrnpu_cmd {
-	struct amdrnpu_dev	*dev;
+	struct amdrnpu_dev	*rnpu;
 	u32			seq;		/* cmd_xa id / wire seq, or SEQ_NONE */
 	u32			command_op;
 
@@ -76,24 +76,24 @@ struct amdrnpu_cmd {
 };
 
 /* amdrnpu_drv.c */
-void amdrnpu_dev_get(struct amdrnpu_dev *dev);
-void amdrnpu_dev_put(struct amdrnpu_dev *dev);
-int  amdrnpu_chardev_register(struct amdrnpu_dev *dev);
-void amdrnpu_chardev_deregister(struct amdrnpu_dev *dev);
+void amdrnpu_dev_get(struct amdrnpu_dev *rnpu);
+void amdrnpu_dev_put(struct amdrnpu_dev *rnpu);
+int  amdrnpu_chardev_register(struct amdrnpu_dev *rnpu);
+void amdrnpu_chardev_deregister(struct amdrnpu_dev *rnpu);
 
 /* amdrnpu_cmd.c */
 long amdrnpu_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
-void amdrnpu_dev_cmd_init(struct amdrnpu_dev *dev);
-void amdrnpu_dev_cmd_fini(struct amdrnpu_dev *dev);
-void amdrnpu_dev_cmd_dispatch_response(struct amdrnpu_dev *dev,
+void amdrnpu_dev_cmd_init(struct amdrnpu_dev *rnpu);
+void amdrnpu_dev_cmd_fini(struct amdrnpu_dev *rnpu);
+void amdrnpu_dev_cmd_dispatch_response(struct amdrnpu_dev *rnpu,
 				       const void *payload, size_t len);
-void amdrnpu_dev_cmd_drain(struct amdrnpu_dev *dev, int err);
+void amdrnpu_dev_cmd_drain(struct amdrnpu_dev *rnpu, int err);
 
 /* amdrnpu_rpmsg.c */
 int  amdrnpu_rpmsg_register(void);
 void amdrnpu_rpmsg_unregister(void);
 /* @seq: driver command id (amdrnpu_cmd.seq), not supplied by userspace. */
-int  amdrnpu_rpmsg_send_cmd(struct amdrnpu_dev *dev, u32 seq, u32 command_op,
+int  amdrnpu_rpmsg_send_cmd(struct amdrnpu_dev *rnpu, u32 seq, u32 command_op,
 			    u32 flags, const void *args, u32 num_args);
 
 #endif /* _AMDRNPU_INTERNAL_H_ */
