@@ -3,12 +3,11 @@
  * Copyright (C) 2026, Advanced Micro Devices, Inc.
  */
 
+#include <linux/atomic.h>
 #include <linux/device.h>
+#include <linux/kref.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
-#include <linux/of.h>
-#include <linux/platform_device.h>
-#include <linux/remoteproc.h>
 #include <linux/rpmsg.h>
 #include <linux/slab.h>
 #include <linux/stddef.h>
@@ -16,13 +15,18 @@
 
 #include "amdrnpu_internal.h"
 
+static atomic_t amdrnpu_instance_counter = ATOMIC_INIT(0);
+
 int amdrnpu_rpmsg_send_cmd(struct amdrnpu_dev *rnpu, u32 seq, u32 command_op,
 			   u32 flags, const void *args, u32 num_args)
 {
-	size_t hdr_off = offsetof(struct amdrnpu_wire_cmd, args);
-	size_t msg_len = hdr_off + (size_t)num_args * sizeof(__le64);
 	struct amdrnpu_wire_cmd *msg;
+	size_t hdr_off;
+	size_t msg_len;
 	int ret;
+
+	hdr_off = offsetof(struct amdrnpu_wire_cmd, args);
+	msg_len = hdr_off + (size_t)num_args * sizeof(__le64);
 
 	if (msg_len > 4096)
 		return -E2BIG;
@@ -41,6 +45,7 @@ int amdrnpu_rpmsg_send_cmd(struct amdrnpu_dev *rnpu, u32 seq, u32 command_op,
 	mutex_lock(&rnpu->rpmsg_lock);
 	if (!rnpu->rpdev) {
 		mutex_unlock(&rnpu->rpmsg_lock);
+		dev_err(rnpu->dev, "cmd submit failed: rpmsg channel not connected\n");
 		kfree(msg);
 		return -ENOTCONN;
 	}
@@ -51,53 +56,8 @@ int amdrnpu_rpmsg_send_cmd(struct amdrnpu_dev *rnpu, u32 seq, u32 command_op,
 	return ret;
 }
 
-/*
- * Find the DT node of the RPU core that "owns" @rpdev: get the remoteproc that
- * @rpdev is a child of, then take its parent's of_node.
- */
-static struct device_node *amdrnpu_rpu_node_of_channel(struct rpmsg_device *rpdev)
-{
-	struct device_node *core_np;
-	struct rproc *rp;
-
-	rp = rproc_get_by_child(&rpdev->dev);
-	if (!rp)
-		return NULL;
-
-	core_np = rp->dev.parent ? rp->dev.parent->of_node : NULL;
-	return core_np;
-}
-
-static int amdrnpu_match_rpu(struct device *dev, const void *data)
-{
-	struct amdrnpu_dev *rnpu = platform_get_drvdata(to_platform_device(dev));
-	const struct device_node *rpu_np = data;
-
-	return rnpu && rnpu->ctrl_node == rpu_np;
-}
-
-/*
- * Find the amdrnpu platform_device whose "amd,rpu" target (ctrl_node) resolves
- * to @rpu_np, by searching the devices bound to amdrnpu_platform_driver.
- */
-static struct platform_device *
-amdrnpu_pdev_for_rpu(struct device_node *rpu_np)
-{
-	struct device *dev;
-
-	if (!rpu_np)
-		return NULL;
-
-	dev = driver_find_device(&amdrnpu_platform_driver.driver, NULL,
-				 rpu_np, amdrnpu_match_rpu);
-	if (!dev)
-		return NULL;
-
-	return to_platform_device(dev);
-}
-
-static int amdrnpu_rpmsg_cb(struct rpmsg_device *rpdev, void *data, int len,
-			    void *priv, u32 src)
+static int amdrnpu_rpmsg_cb(struct rpmsg_device *rpdev, void *data,
+			    int len, void *priv, u32 src)
 {
 	struct amdrnpu_dev *rnpu = dev_get_drvdata(&rpdev->dev);
 
@@ -121,59 +81,38 @@ static int amdrnpu_rpmsg_cb(struct rpmsg_device *rpdev, void *data, int len,
 
 static int amdrnpu_rpmsg_probe(struct rpmsg_device *rpdev)
 {
-	struct device_node *rpu_np;
-	struct platform_device *pdev;
-	struct device_link *link;
 	struct amdrnpu_dev *rnpu;
+	int idx, ret;
 
-	rpu_np = amdrnpu_rpu_node_of_channel(rpdev);
-	if (!rpu_np) {
-		dev_err(&rpdev->dev, "cannot find owning RPU DT node\n");
-		return -ENODEV;
-	}
-
-	pdev = amdrnpu_pdev_for_rpu(rpu_np);
-	if (!pdev) {
-		/*
-		 * Either no DT node references this rpu, or the platform
-		 * device for the matching amdrnpu node has not been
-		 * instantiated yet.  Defer and retry.
-		 */
-		dev_dbg(&rpdev->dev,
-			"no amdrnpu platform device for rpu %pOFn yet, deferring\n",
-			rpu_np);
-		return -EPROBE_DEFER;
-	}
-
-	rnpu = platform_get_drvdata(pdev);
-	if (!rnpu) {
-		/* pdev exists but its driver has not finished probing. */
-		put_device(&pdev->dev);
-		return -EPROBE_DEFER;
-	}
-
-	/*
-	 * Hook the rpmsg device's lifetime to the platform device's.
-	 * AUTOREMOVE_CONSUMER means: when the supplier (platform device) is
-	 * unbound, the consumer (rpdev) is unbound first.  That guarantees
-	 * amdrnpu_platform_remove() never sees a live rnpu->rpdev pointer.
-	 */
-	link = device_link_add(&rpdev->dev, rnpu->dev,
-			       DL_FLAG_AUTOREMOVE_CONSUMER);
-	if (!link) {
-		put_device(&pdev->dev);
+	rnpu = kzalloc(sizeof(*rnpu), GFP_KERNEL);
+	if (!rnpu)
 		return -ENOMEM;
+
+	kref_init(&rnpu->refcount);
+	mutex_init(&rnpu->rpmsg_lock);
+	amdrnpu_dev_cmd_init(rnpu);
+	rnpu->rpdev = rpdev;
+
+	idx = atomic_fetch_inc(&amdrnpu_instance_counter);
+	snprintf(rnpu->dev_name, sizeof(rnpu->dev_name), "%s.%d",
+		 AMDRNPU_DRIVER_NAME, idx);
+
+	ret = amdrnpu_chardev_register(rnpu);
+	if (ret) {
+		dev_err(&rpdev->dev,
+			"amdrnpu: misc_register(%s) failed: %d\n",
+			rnpu->dev_name, ret);
+		amdrnpu_dev_cmd_fini(rnpu);
+		mutex_destroy(&rnpu->rpmsg_lock);
+		kfree(rnpu);
+		return ret;
 	}
 
-	mutex_lock(&rnpu->rpmsg_lock);
-	rnpu->rpdev = rpdev;
+	rnpu->dev = rnpu->mdev.this_device;
 	dev_set_drvdata(&rpdev->dev, rnpu);
-	mutex_unlock(&rnpu->rpmsg_lock);
-
-	dev_info(rnpu->dev, "amdrnpu: rpmsg channel %s attached (rpu node %pOFn)\n",
-		 dev_name(&rpdev->dev), rpu_np);
-
-	put_device(&pdev->dev);
+	dev_info(&rpdev->dev,
+		 "amdrnpu: bound channel %s -> /dev/%s (ABI v%u)\n",
+		 rpdev->id.name, rnpu->dev_name, AMDRNPU_ABI_VERSION);
 	return 0;
 }
 
@@ -184,16 +123,17 @@ static void amdrnpu_rpmsg_remove(struct rpmsg_device *rpdev)
 	if (!rnpu)
 		return;
 
+	dev_info(&rpdev->dev, "amdrnpu: removing /dev/%s\n", rnpu->dev_name);
+	amdrnpu_chardev_deregister(rnpu);
+
 	mutex_lock(&rnpu->rpmsg_lock);
-	if (rnpu->rpdev == rpdev)
-		rnpu->rpdev = NULL;
-	dev_set_drvdata(&rpdev->dev, NULL);
+	rnpu->rpdev = NULL;
 	mutex_unlock(&rnpu->rpmsg_lock);
 
 	amdrnpu_dev_cmd_drain(rnpu, -ENOTCONN);
 
-	dev_info(rnpu->dev, "amdrnpu: rpmsg channel %s detached\n",
-		 dev_name(&rpdev->dev));
+	dev_set_drvdata(&rpdev->dev, NULL);
+	amdrnpu_dev_put(rnpu);
 }
 
 static const struct rpmsg_device_id amdrnpu_rpmsg_id_table[] = {

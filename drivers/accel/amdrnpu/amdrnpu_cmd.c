@@ -8,18 +8,19 @@
 #include <linux/device.h>
 #include <linux/dma-fence.h>
 #include <linux/err.h>
+#include <linux/fcntl.h>
+#include <linux/file.h>
+#include <linux/fs.h>
 #include <linux/kref.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/stddef.h>
 #include <linux/string.h>
+#include <linux/sync_file.h>
 #include <linux/types.h>
 #include <linux/uaccess.h>
 #include <linux/xarray.h>
-
-#include <drm/drm_file.h>
-#include <drm/drm_syncobj.h>
 
 #include "amdrnpu_internal.h"
 
@@ -73,10 +74,6 @@ static void amdrnpu_cmd_release(struct kref *ref)
 		dma_fence_signal(f);
 		dma_fence_put(f);
 	}
-
-	if (cmd->syncobj)
-		drm_syncobj_put(cmd->syncobj);
-
 	kfree(cmd);
 }
 
@@ -151,22 +148,14 @@ static struct amdrnpu_cmd *amdrnpu_cmd_create(struct amdrnpu_dev *rnpu, u32 op)
 		ret = -ENOMEM;
 		goto err_free;
 	}
-
-	ret = drm_syncobj_create(&cmd->syncobj, 0, fence);
-	if (ret) {
-		dma_fence_put(fence);
-		goto err_free;
-	}
 	cmd->pending_fence = fence;
 
 	ret = amdrnpu_cmd_xa_alloc_id(rnpu, cmd);
 	if (ret)
-		goto err_syncobj;
+		goto err_fence;
 	return cmd;
 
-err_syncobj:
-	drm_syncobj_put(cmd->syncobj);
-	cmd->syncobj = NULL;
+err_fence:
 	dma_fence_put(fence);
 err_free:
 	kfree(cmd);
@@ -300,15 +289,16 @@ static int amdrnpu_resolve_args(struct amdrnpu_dev *rnpu, struct amdrnpu_arg *ar
 	return 0;
 }
 
-long amdrnpu_ioctl_cmd_submit(struct amdrnpu_dev *rnpu, void __user *uarg,
-			      struct drm_file *file)
+static long amdrnpu_ioctl_cmd_submit(struct amdrnpu_dev *rnpu, void __user *uarg)
 {
+	struct sync_file *sync_file = NULL;
 	struct amdrnpu_arg *args = NULL;
 	struct amdrnpu_cmd_submit uhdr;
-	__le64 words[AMDRNPU_MAX_ARGS];
+	struct dma_fence *fence = NULL;
 	struct amdrnpu_cmd *cmd;
-	u32 syncobj_handle = 0;
+	__le64 *words = NULL;
 	size_t args_bytes;
+	int fd = -1;
 	long ret;
 
 	if (copy_from_user(&uhdr, uarg, AMDRNPU_SUBMIT_HDR_SZ))
@@ -337,12 +327,18 @@ long amdrnpu_ioctl_cmd_submit(struct amdrnpu_dev *rnpu, void __user *uarg,
 		goto out_free_args;
 	}
 	/*
-	 * Hold a call-scoped reference so a response that completes @cmd via
-	 * cmd_xa cannot free the command while we still use it.
+	 * Hold call-scoped references so a response that completes @cmd via
+	 * cmd_xa cannot free the command or its fence while we still use them.
 	 */
 	kref_get(&cmd->ref);
+	fence = dma_fence_get(cmd->pending_fence);
 
 	if (uhdr.num_args) {
+		words = kvcalloc(uhdr.num_args, sizeof(*words), GFP_KERNEL);
+		if (!words) {
+			ret = -ENOMEM;
+			goto out_cancel_cmd;
+		}
 		ret = amdrnpu_resolve_args(rnpu, args, uhdr.num_args, words);
 		if (ret)
 			goto out_cancel_cmd;
@@ -353,20 +349,35 @@ long amdrnpu_ioctl_cmd_submit(struct amdrnpu_dev *rnpu, void __user *uarg,
 	if (ret)
 		goto out_cancel_cmd;
 
-	ret = drm_syncobj_get_handle(file, cmd->syncobj, &syncobj_handle);
-	if (ret)
-		goto out_cancel_cmd;
-
-	uhdr.sync_handle = syncobj_handle;
-	if (copy_to_user(uarg, &uhdr, AMDRNPU_SUBMIT_HDR_SZ)) {
-		ret = -EFAULT;
+	fd = get_unused_fd_flags(O_CLOEXEC);
+	if (fd < 0) {
+		ret = fd;
 		goto out_cancel_cmd;
 	}
 
+	sync_file = sync_file_create(fence);
+	if (!sync_file) {
+		ret = -ENOMEM;
+		goto out_put_fd;
+	}
+
+	uhdr.sync_handle = fd;
+	if (copy_to_user(uarg, &uhdr, AMDRNPU_SUBMIT_HDR_SZ)) {
+		ret = -EFAULT;
+		goto out_put_sync_file;
+	}
+
+	fd_install(fd, sync_file->file);
+	dma_fence_put(fence);
 	amdrnpu_cmd_put(cmd);
+	kvfree(words);
 	kvfree(args);
 	return 0;
 
+out_put_sync_file:
+	fput(sync_file->file);
+out_put_fd:
+	put_unused_fd(fd);
 out_cancel_cmd:
 	/*
 	 * If @cmd is still in cmd_xa we won the race and own its completion;
@@ -374,8 +385,25 @@ out_cancel_cmd:
 	 */
 	if (amdrnpu_cmd_xa_remove(rnpu, cmd))
 		amdrnpu_cmd_complete(cmd, ret < 0 ? (int)ret : -EIO);
+	dma_fence_put(fence);
 	amdrnpu_cmd_put(cmd);
+	kvfree(words);
 out_free_args:
 	kvfree(args);
 	return ret;
+}
+
+long amdrnpu_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+{
+	struct amdrnpu_dev *rnpu = filp->private_data;
+
+	if (!rnpu)
+		return -ENODEV;
+
+	switch (cmd) {
+	case AMDRNPU_CMD_SUBMIT:
+		return amdrnpu_ioctl_cmd_submit(rnpu, (void __user *)arg);
+	default:
+		return -ENOTTY;
+	}
 }
