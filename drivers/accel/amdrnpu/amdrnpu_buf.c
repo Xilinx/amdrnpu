@@ -142,7 +142,7 @@ int amdrnpu_ioctl_buf_import(struct amdrnpu_client *client, void __user *uarg)
 
 	ret = amdrnpu_sgt_dma_contig(buf->sgt, &base, &len);
 	if (ret) {
-		dev_dbg(rnpu->dev, "buf import: buffer is not physically contiguous\n");
+		RNPU_ERR(rnpu, "buf import: buffer is not physically contiguous\n");
 		goto err_unmap;
 	}
 	buf->dma_addr = base;

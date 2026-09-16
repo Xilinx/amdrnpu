@@ -37,6 +37,7 @@ int amdrnpu_rpmsg_send_cmd(struct amdrnpu_dev *rnpu, struct amdrnpu_wire_cmd *ms
 	if (!rnpu->rpdev) {
 		mutex_unlock(&rnpu->rpmsg_lock);
 		RNPU_ERR(rnpu, "cmd submit failed: rpmsg channel not connected\n");
+		kfree(msg);
 		return -ENOTCONN;
 	}
 	ret = rpmsg_send(rnpu->rpdev->ept, msg, msg_len);
@@ -124,9 +125,8 @@ static int amdrnpu_rpmsg_probe(struct rpmsg_device *rpdev)
 		get_device(rnpu->rproc_dev);
 
 	dev_set_drvdata(&rpdev->dev, rnpu);
-	dev_info(&rpdev->dev,
-		 "amdrnpu: bound channel %s -> /dev/%s (ABI v%u)\n",
-		 rpdev->id.name, rnpu->dev_name, AMDRNPU_ABI_VERSION);
+	RNPU_INFO(rnpu, "bound channel %s -> /dev/%s (ABI v%u)\n",
+		  rpdev->id.name, rnpu->dev_name, AMDRNPU_ABI_VERSION);
 	return 0;
 }
 
@@ -137,7 +137,7 @@ static void amdrnpu_rpmsg_remove(struct rpmsg_device *rpdev)
 	if (!rnpu)
 		return;
 
-	dev_info(&rpdev->dev, "amdrnpu: removing /dev/%s\n", rnpu->dev_name);
+	RNPU_INFO(rnpu, "removing /dev/%s\n", rnpu->dev_name);
 	amdrnpu_chardev_deregister(rnpu);
 
 	mutex_lock(&rnpu->rpmsg_lock);

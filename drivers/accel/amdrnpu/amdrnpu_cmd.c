@@ -294,22 +294,22 @@ static int amdrnpu_resolve_args(struct amdrnpu_client *client, struct amdrnpu_cm
 
 		/* Buffer arg: look up the imported handle and bounds-check. */
 		if (a->bo.buffer_handle <= 0) {
-			dev_dbg(rnpu->dev, "arg %u: invalid buffer handle %d\n",
-				i, a->bo.buffer_handle);
+			RNPU_ERR(rnpu, "arg %u: invalid buffer handle %d\n",
+				 i, a->bo.buffer_handle);
 			return -EINVAL;
 		}
 		buf = amdrnpu_buf_get(client, (u32)a->bo.buffer_handle);
 		if (!buf) {
-			dev_dbg(rnpu->dev, "arg %u: unknown buffer handle %d\n",
-				i, a->bo.buffer_handle);
+			RNPU_ERR(rnpu, "arg %u: unknown buffer handle %d\n",
+				 i, a->bo.buffer_handle);
 			return -ENOENT;
 		}
 		if (a->bo.offset > buf->size ||
 		    a->size > (u64)(buf->size - a->bo.offset)) {
-			dev_dbg(rnpu->dev,
-				"arg %u: slice out of bounds (off=%u size=%llu buf=%zu)\n",
-				i, a->bo.offset, (unsigned long long)a->size,
-				buf->size);
+			RNPU_ERR(rnpu,
+				 "arg %u: slice out of bounds (off=%u size=%llu buf=%zu)\n",
+				 i, a->bo.offset, (unsigned long long)a->size,
+				 buf->size);
 			amdrnpu_buf_put(buf);
 			return -EINVAL;
 		}

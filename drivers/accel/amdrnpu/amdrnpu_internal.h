@@ -7,6 +7,8 @@
 #define _AMDRNPU_INTERNAL_H_
 
 #include <linux/atomic.h>
+#include <linux/container_of.h>
+#include <linux/dev_printk.h>
 #include <linux/dma-fence.h>
 #include <linux/kref.h>
 #include <linux/miscdevice.h>
@@ -64,6 +66,14 @@ struct amdrnpu_dev {
 
 	char			dev_name[32];
 };
+
+#define RNPU_INFO(rnpu, fmt, args...)	dev_info((rnpu)->dev, fmt, ##args)
+#define RNPU_WARN(rnpu, fmt, args...)	dev_warn((rnpu)->dev, "%s: "fmt, __func__, ##args)
+#define RNPU_ERR(rnpu, fmt, args...)	dev_err((rnpu)->dev, "%s: "fmt, __func__, ##args)
+#define RNPU_DBG(rnpu, fmt, args...)	dev_dbg((rnpu)->dev, fmt, ##args)
+
+#define to_amdrnpu_dev(misc_dev) \
+	container_of(misc_dev, struct amdrnpu_dev, mdev)
 
 /*
  * An imported dma-buf usable as a command buffer argument.  Allocation lives in

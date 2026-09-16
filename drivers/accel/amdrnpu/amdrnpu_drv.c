@@ -90,15 +90,16 @@ int amdrnpu_chardev_register(struct amdrnpu_dev *rnpu)
 	if (ret)
 		return ret;
 
+	rnpu->dev = rnpu->mdev.this_device;
+
 	/*
 	 * Imported dma-bufs are mapped against this device.  It is a plain
 	 * miscdevice with no of_node/iommu, so mappings are direct; allow a
 	 * 64-bit mask so >32-bit device buffers are not bounced.
 	 */
-	if (dma_coerce_mask_and_coherent(rnpu->mdev.this_device,
-					 DMA_BIT_MASK(64)))
-		dev_warn(rnpu->mdev.this_device,
-			 "amdrnpu: 64-bit DMA mask unavailable; buffer import may be limited\n");
+	if (dma_coerce_mask_and_coherent(rnpu->dev, DMA_BIT_MASK(64)))
+		RNPU_WARN(rnpu,
+			  "64-bit DMA mask unavailable; buffer import may be limited\n");
 
 	return 0;
 }
