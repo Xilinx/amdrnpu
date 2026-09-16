@@ -1,20 +1,26 @@
 /* SPDX-License-Identifier: MIT */
 /*
- * amdrnpu_lib - userspace helpers for the amdrnpu DRM driver.
+ * amdrnpu_lib - userspace helpers for the amdrnpu driver.
  *
  * Stable ABI and ioctl layout: `<amdrnpu/amdrnpu.h>`.
  *
- * Buffer lifecycle: **`amdrnpu_buf_alloc()`** /
- * **`amdrnpu_buf_close()`** (`DRM_IOCTL_GEM_CLOSE`).
- * Cacheable native buffers require **`amdrnpu_buf_sync()`** (or the
- * direction helpers) around device DMA — see buffer-management.md.
+ * The public function signatures below are a stable interface; existing
+ * callers depend on them, so they must not change (parameter names and
+ * documentation may be refined, but arity and types are frozen).  The driver
+ * is now an rpmsg char device (`/dev/amdrnpu.N`) rather than a DRM device, so
+ * some parameters that only made sense for the old DRM/GEM model are retained
+ * for source compatibility and documented as reserved; the library maps each
+ * call onto the char-driver ABI internally.
  *
- * Command completion: **`amdrnpu_syncobj_wait_complete()`** and
- * **`amdrnpu_syncobj_wait_busy_poll()`** both call **`DRM_IOCTL_SYNCOBJ_DESTROY`**
- * on the submit syncobj after the kernel reports a **non-pending** fence (success,
- * error class from firmware, or driver completion). Pending probes leave the handle
- * valid. **`amdrnpu_syncobj_fence_status()`** never destroys (intended for raw
- * polling loops). **`amdrnpu_syncobj_to_fence_fd()`** exports for `poll(2)`.
+ * Buffer lifecycle: **`amdrnpu_buf_alloc()`** allocates and imports a buffer in
+ * one step and returns an opaque handle; free it with **`amdrnpu_buf_close()`**.
+ * CPU-map a handle with **`amdrnpu_buf_mmap()`** and bracket device DMA with
+ * **`amdrnpu_buf_sync()`** (or the direction helpers).
+ *
+ * Command completion: **`amdrnpu_cmd_submit()`** returns a completion handle in
+ * `hdr_out->sync_handle` (a sync_file fd).  Wait/probe it with the
+ * **`amdrnpu_syncobj_*`** helpers, or export it for `poll(2)` with
+ * **`amdrnpu_syncobj_to_fence_fd()`**.
  */
 #ifndef AMDRNPU_LIB_H_
 #define AMDRNPU_LIB_H_
@@ -37,165 +43,185 @@ extern "C" {
 #endif
 
 /**
- * amdrnpu_buf_alloc - AMDRNPU_BUF_ALLOC ioctl wrapper.
+ * amdrnpu_buf_alloc - allocate and import a buffer; returns an opaque handle.
  *
- * Returns 0 on success; sets @out_handle to the DRM GEM handle.
+ * @fd:		open /dev/amdrnpu.N descriptor.
+ * @memory_type: target memory domain, an enum amdrnpu_memory_type
+ *		(AMDRNPU_MEMORY_DEVICE / AMDRNPU_MEMORY_DEFAULT for device
+ *		memory, AMDRNPU_MEMORY_RPU for RPU/firmware memory).  The library
+ *		allocates from the matching dma-buf heap and imports the buffer
+ *		in the corresponding DMA domain.
+ * @size:	allocation size in bytes.
+ * @out_handle:	on success, the opaque handle for use in
+ *		struct amdrnpu_arg.bo.buffer_handle and the other buf_* helpers.
+ *
+ * The library owns the underlying dma-buf fd for the handle; release it with
+ * amdrnpu_buf_close().  Returns 0 on success or a negative errno.
  */
-AMDRNPU_LIB_API int amdrnpu_buf_alloc(int drm_fd, uint32_t memory_type,
-						  uint64_t size, uint32_t *out_handle);
+AMDRNPU_LIB_API int amdrnpu_buf_alloc(int fd, uint32_t memory_type,
+				      uint64_t size, uint32_t *out_handle);
 
 /**
- * amdrnpu_buf_close - DRM_IOCTL_GEM_CLOSE (@handle).
+ * amdrnpu_buf_close - release a handle from amdrnpu_buf_alloc().
  *
- * Drops the handle reference; the backing buffer may remain alive if a submitted
- * command still pins it — see buffer-management.md §6.
+ * @fd:		open /dev/amdrnpu.N descriptor (same as passed to buf_alloc).
+ * @handle:	handle returned by amdrnpu_buf_alloc().
+ *
+ * Drops the driver's import and closes the library-owned dma-buf fd.  If a
+ * submitted command still references the buffer, the backing memory stays alive
+ * until that command completes.  Returns 0 on success or a negative errno.
  */
-AMDRNPU_LIB_API int amdrnpu_buf_close(int drm_fd, uint32_t handle);
+AMDRNPU_LIB_API int amdrnpu_buf_close(int fd, uint32_t handle);
 
 /**
- * amdrnpu_buf_mmap - map a page-aligned range of a GEM buffer.
+ * amdrnpu_buf_mmap - CPU-map a (sub)range of a buffer.
  *
- * Uses DRM_IOCTL_MODE_MAP_DUMB + mmap(). @offset and @length must be
- * page-aligned. @length 0 maps from @offset through end-of-buffer and
- * requires @buf_size (the allocation size from amdrnpu_buf_alloc).
+ * @fd:		open /dev/amdrnpu.N descriptor (same as passed to buf_alloc).
+ * @handle:	handle from amdrnpu_buf_alloc().
+ * @buf_size:	reserved; the library tracks the allocation size internally and
+ *		ignores this argument (pass 0 or the allocation size).
+ * @offset:	byte offset into the buffer; must be page-aligned.
+ * @length:	bytes to map; 0 maps from @offset through end-of-buffer.
+ * @out_map:	on success, the mapping base; unmap with amdrnpu_buf_munmap().
  *
- * Partial mmap is supported: only the requested page range is mapped into
- * the process (the driver honours mmap offset within the BO).
- *
- * @drm_fd must be a DRM **card** node (/dev/dri/cardN), not renderD*:
- * MODE_MAP_DUMB is not permitted on render clients in DRM core.
- *
- * On success sets @out_map to the mapping base; unmap with
- * amdrnpu_buf_munmap(@out_map, mapped_length).
+ * The mapping is PROT_READ|PROT_WRITE, MAP_SHARED on the buffer's dma-buf.
+ * Returns 0 on success or a negative errno.
  */
-AMDRNPU_LIB_API int amdrnpu_buf_mmap(int drm_fd, uint32_t handle,
-						 uint64_t buf_size,
-						 uint64_t offset, uint64_t length,
-						 void **out_map);
+AMDRNPU_LIB_API int amdrnpu_buf_mmap(int fd, uint32_t handle,
+				     uint64_t buf_size,
+				     uint64_t offset, uint64_t length,
+				     void **out_map);
 
-/** munmap() wrapper; @length must match the length passed to buf_mmap. */
+/** munmap() wrapper; @length must match the mapped length from buf_mmap. */
 AMDRNPU_LIB_API void amdrnpu_buf_munmap(void *addr, uint64_t length);
 
 /**
- * amdrnpu_buf_sync - AMDRNPU_BUF_SYNC for a native driver-allocated buffer.
+ * amdrnpu_buf_sync - CPU cache maintenance around device DMA.
  *
- * @direction: AMDRNPU_BUF_SYNC_TO_DEVICE or AMDRNPU_BUF_SYNC_FROM_DEVICE.
- * @offset: byte offset into the buffer (0 = start).
- * @length: bytes to sync; 0 means from @offset through end-of-buffer.
+ * @fd:		open /dev/amdrnpu.N descriptor (same as passed to buf_alloc).
+ * @handle:	handle from amdrnpu_buf_alloc().
+ * @direction:	AMDRNPU_BUF_SYNC_TO_DEVICE (flush CPU writes) or
+ *		AMDRNPU_BUF_SYNC_FROM_DEVICE (invalidate before CPU read).
+ * @offset:	reserved; DMA_BUF_IOCTL_SYNC operates on the whole buffer, so
+ *		this argument is ignored (pass 0).
+ * @length:	reserved; ignored for the same reason (pass 0).
  *
- * Returns -EOPNOTSUPP for PRIME-imported handles (use the exporter's sync).
+ * Issues DMA_BUF_IOCTL_SYNC on the buffer's dma-buf fd.  Returns 0 on success
+ * or a negative errno.
  */
-AMDRNPU_LIB_API int amdrnpu_buf_sync(int drm_fd, uint32_t handle,
-						 uint32_t direction,
-						 uint64_t offset,
-						 uint64_t length);
+AMDRNPU_LIB_API int amdrnpu_buf_sync(int fd, uint32_t handle,
+				     uint32_t direction,
+				     uint64_t offset, uint64_t length);
 
-/** Flush a CPU-written range so device DMA sees it. */
-static inline int amdrnpu_buf_sync_to_device(int drm_fd, uint32_t handle,
-						   uint64_t offset,
-						   uint64_t length)
+/** Flush a CPU-written buffer so device DMA sees it. */
+static inline int amdrnpu_buf_sync_to_device(int fd, uint32_t handle,
+					     uint64_t offset, uint64_t length)
 {
-	return amdrnpu_buf_sync(drm_fd, handle,
-				     AMDRNPU_BUF_SYNC_TO_DEVICE, offset, length);
+	return amdrnpu_buf_sync(fd, handle,
+				AMDRNPU_BUF_SYNC_TO_DEVICE, offset, length);
 }
 
-/** Invalidate a range after device DMA before the CPU reads it. */
-static inline int amdrnpu_buf_sync_from_device(int drm_fd, uint32_t handle,
-						     uint64_t offset,
-						     uint64_t length)
+/** Invalidate a buffer after device DMA before the CPU reads it. */
+static inline int amdrnpu_buf_sync_from_device(int fd, uint32_t handle,
+					       uint64_t offset, uint64_t length)
 {
-	return amdrnpu_buf_sync(drm_fd, handle,
-				     AMDRNPU_BUF_SYNC_FROM_DEVICE, offset, length);
+	return amdrnpu_buf_sync(fd, handle,
+				AMDRNPU_BUF_SYNC_FROM_DEVICE, offset, length);
 }
 
 /**
- * amdrnpu_cmd_submit - AMDRNPU_CMD_SUBMIT; syncobj handle in @hdr_out->sync_handle on success.
+ * amdrnpu_cmd_submit - AMDRNPU_CMD_SUBMIT; sync_file fd in @hdr_out->sync_handle.
  *
- * Builds a variable-length ioctl buffer from @command_op and @args[0 .. @num_args-1].
- * See include/uapi/amdrnpu/amdrnpu.h for a full example (e.g. OP_CODE_CMD0
- * with 16 MiB input BO + 8 MiB output BO via six amdrnpu_arg entries).
+ * Builds a variable-length ioctl buffer from @command_op and
+ * @args[0 .. @num_args-1] (scalar args with @size == 0, buffer args with
+ * @size != 0 referencing a handle from amdrnpu_buf_alloc()).
+ *
+ * @fd:		open /dev/amdrnpu.N descriptor.
+ * @hdr_out:	receives the returned header (at least the fixed part); on
+ *		success @hdr_out->sync_handle is a sync_file fd the caller owns.
+ * @hdr_out_sz:	size of @hdr_out; must be >= offsetof(..., args).
+ *
+ * Wait for completion with the amdrnpu_syncobj_* helpers (passing
+ * @hdr_out->sync_handle), then close(2) the fd.  Returns 0 on success or a
+ * negative errno.
  */
-AMDRNPU_LIB_API int amdrnpu_cmd_submit(int drm_fd,
-						   uint32_t command_op,
-						   const struct amdrnpu_arg *args,
-						   uint32_t num_args,
-						   struct amdrnpu_cmd_submit *hdr_out,
-						   size_t hdr_out_sz);
+AMDRNPU_LIB_API int amdrnpu_cmd_submit(int fd,
+				       uint32_t command_op,
+				       const struct amdrnpu_arg *args,
+				       uint32_t num_args,
+				       struct amdrnpu_cmd_submit *hdr_out,
+				       size_t hdr_out_sz);
 
 /**
- * amdrnpu_syncobj_wait_complete - wait or probe syncobj-backed command.
+ * amdrnpu_syncobj_wait_complete - wait for or probe a submission's completion.
  *
- * @timeout_ns == 0: non-blocking probe via exported sync_file + `SYNC_IOC_FILE_INFO`.
- * @timeout_ns > 0: waits up to @timeout_ns relative nanoseconds (`DRM_SYNCOBJ_WAIT`),
- *	then refreshes fence status via the same probe path.
- * @timeout_ns < 0 is rejected with `-EINVAL`.
+ * @fd:		reserved; the completion handle carries the state, so the device
+ *		fd is not needed and this argument is ignored.
+ * @syncobj_handle: the sync_file fd returned in amdrnpu_cmd_submit()'s
+ *		@hdr_out->sync_handle.
+ * @timeout_ns:	== 0 non-blocking probe; > 0 waits up to that many relative
+ *		nanoseconds (millisecond granularity); < 0 is rejected (-EINVAL).
+ * @out_wait_status: 0 not signalled, 1 completed without error, or a negative
+ *		errno when signalled with a fence error (e.g. -EREMOTEIO).
  *
- * Writes @out_wait_status: **0** not signaled, **1** completed without fence error,
- * negative errno (`dma_fence_get_status`) when signaled with error (e.g. `-EREMOTEIO`,
- * `-ECANCELED`, `-EOPNOTSUPP` from remote completion mapping).
- *
- * After a **non-zero** @out_wait_status (fence reached a terminal state from the
- * driver), the library issues **`DRM_IOCTL_SYNCOBJ_DESTROY`** on @syncobj_handle
- * (same teardown rule as **`amdrnpu_syncobj_wait_busy_poll()`**). While the
- * status remains **0** (pending), the handle is left intact.
- *
- * Return value **0**: wait/query succeeded and status was written (including probe
- * of a still-pending fence). **-ETIMEDOUT**: deadline expired while still pending.
- * Other negatives: ioctl/query failure (`-errno`).
+ * Unlike the old DRM implementation this does not destroy the handle; the
+ * caller still owns @syncobj_handle and must close(2) it.  Returns 0 when the
+ * status was written (including a still-pending probe), -ETIMEDOUT if the
+ * deadline expired while pending, or a negative errno on failure.
  */
-AMDRNPU_LIB_API int amdrnpu_syncobj_wait_complete(int drm_fd,
-							       uint32_t syncobj_handle,
-							       int64_t timeout_ns,
-							       int32_t *out_wait_status);
+AMDRNPU_LIB_API int amdrnpu_syncobj_wait_complete(int fd,
+						  uint32_t syncobj_handle,
+						  int64_t timeout_ns,
+						  int32_t *out_wait_status);
 
 /**
- * amdrnpu_syncobj_fence_status - exported sync_file + SYNC_IOC_FILE_INFO.
+ * amdrnpu_syncobj_fence_status - non-blocking completion status query.
  *
- * **Non-blocking.** Does **not** destroy the syncobj. Safe to call in a polling loop
- * (`out_fence_status == 0` ⇒ fence still pending).
+ * @fd:		reserved; ignored (see amdrnpu_syncobj_wait_complete()).
+ * @syncobj_handle: the sync_file fd from amdrnpu_cmd_submit().
+ * @out_fence_status: >0 signalled, 0 pending, <0 fence errno.
  *
- *   >0 — signaled (typically `1`),
- *    0 — still pending,
- *   <0 — dma_fence errno (negative, e.g. `-EREMOTEIO`).
- *
- * Returns 0 on success of the query; negative errno on failure to export or ioctl.
+ * Does not close the handle.  Safe in a polling loop.  Returns 0 on a
+ * successful query or a negative errno on failure.
  */
-AMDRNPU_LIB_API int amdrnpu_syncobj_fence_status(int drm_fd,
-							     uint32_t syncobj_handle,
-							     int32_t *out_fence_status);
+AMDRNPU_LIB_API int amdrnpu_syncobj_fence_status(int fd,
+						 uint32_t syncobj_handle,
+						 int32_t *out_fence_status);
 
 /**
- * amdrnpu_syncobj_wait_busy_poll - poll fence status until signaled or timed out.
+ * amdrnpu_syncobj_wait_busy_poll - OBSOLETE; delegates to wait_complete().
  *
- * Each iteration invokes `amdrnpu_syncobj_fence_status()`. When the fence
- * leaves the pending state (`*out_fence_status != 0`), issues
- * **`DRM_IOCTL_SYNCOBJ_DESTROY`** on @syncobj_handle (same as **`…_wait_complete()`**
- * on terminal completion).
+ * No way to query command status ahead of the response message yet, so there
+ * is nothing to busy-poll; prefer amdrnpu_syncobj_wait_complete() directly.
  *
- * @max_wall_ns: monotonic **relative** ceiling: `< 0` = wait indefinitely;
- *               `≥ 0` = return `-ETIMEDOUT` once elapsed wall time exceeds this
- *                       after still pending (`0` ⇒ single probe-like attempt).
- * @interval_ns: `> 0` sleep between probes; `== 0` use `sched_yield()` only (no CPU
- *               sleep — tight cooperative polling, avoid on large multicore workloads).
+ * @fd:		reserved; ignored (see amdrnpu_syncobj_wait_complete()).
+ * @syncobj_handle: the sync_file fd from amdrnpu_cmd_submit().
+ * @max_wall_ns: forwarded as amdrnpu_syncobj_wait_complete()'s @timeout_ns.
+ * @interval_ns: reserved; ignored (no dedicated busy-poll path yet).
+ * @out_fence_status: same semantics as amdrnpu_syncobj_fence_status().
  *
- * On success writes the same semantics as fence_status (`1`/`>0`, `0`, or errno).
+ * Does not close the handle.  Returns 0 on success or a negative errno.
  */
-AMDRNPU_LIB_API int amdrnpu_syncobj_wait_busy_poll(int drm_fd,
-							       uint32_t syncobj_handle,
-							       int64_t max_wall_ns,
-							       uint64_t interval_ns,
-							       int32_t *out_fence_status);
+AMDRNPU_LIB_API int amdrnpu_syncobj_wait_busy_poll(int fd,
+						   uint32_t syncobj_handle,
+						   int64_t max_wall_ns,
+						   uint64_t interval_ns,
+						   int32_t *out_fence_status);
 
 /**
- * amdrnpu_syncobj_to_fence_fd - export one-shot sync_file for blocking poll(2).
+ * amdrnpu_syncobj_to_fence_fd - obtain a poll(2)-able fence fd for a submission.
  *
- * Does **not** destroy the submit syncobj; caller must still complete via
- * **`amdrnpu_syncobj_wait_complete()`** / **`…_wait_busy_poll()`**, or destroy
- * manually if using only fence export.
+ * @fd:		reserved; ignored (see amdrnpu_syncobj_wait_complete()).
+ * @syncobj_handle: the sync_file fd from amdrnpu_cmd_submit().
+ * @out_fence_fd: on success, a new fd (dup, O_CLOEXEC) the caller must close.
+ *
+ * The submission handle is already a sync_file fd; this returns an independent
+ * duplicate suitable for a blocking poll(2).  Returns 0 on success or a
+ * negative errno.
  */
-AMDRNPU_LIB_API int amdrnpu_syncobj_to_fence_fd(int drm_fd,
-							    uint32_t syncobj_handle,
-							    int *out_fence_fd);
+AMDRNPU_LIB_API int amdrnpu_syncobj_to_fence_fd(int fd,
+						uint32_t syncobj_handle,
+						int *out_fence_fd);
 
 #ifdef __cplusplus
 }
