@@ -8,6 +8,7 @@ ccflags-y += -I$(src)
 obj-m += amdrnpu.o
 
 amdrnpu-y := \
+	amdrnpu_buf.o   \
+	amdrnpu_cmd.o   \
 	amdrnpu_drv.o   \
-	amdrnpu_rpmsg.o \
-	amdrnpu_cmd.o
+	amdrnpu_rpmsg.o

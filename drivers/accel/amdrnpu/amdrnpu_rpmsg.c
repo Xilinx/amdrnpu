@@ -8,6 +8,8 @@
 #include <linux/kref.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/of.h>
+#include <linux/overflow.h>
 #include <linux/rpmsg.h>
 #include <linux/slab.h>
 #include <linux/stddef.h>
@@ -17,42 +19,29 @@
 
 static atomic_t amdrnpu_instance_counter = ATOMIC_INIT(0);
 
-int amdrnpu_rpmsg_send_cmd(struct amdrnpu_dev *rnpu, u32 seq, u32 command_op,
-			   u32 flags, const void *args, u32 num_args)
+int amdrnpu_rpmsg_send_cmd(struct amdrnpu_dev *rnpu, struct amdrnpu_wire_cmd *msg,
+			   u32 seq, u32 command_op, u32 flags, u32 num_args)
 {
-	struct amdrnpu_wire_cmd *msg;
-	size_t hdr_off;
-	size_t msg_len;
+	size_t msg_len = struct_size(msg, args, num_args);
 	int ret;
-
-	hdr_off = offsetof(struct amdrnpu_wire_cmd, args);
-	msg_len = hdr_off + (size_t)num_args * sizeof(__le64);
 
 	if (msg_len > 4096)
 		return -E2BIG;
-
-	msg = kmalloc(msg_len, GFP_KERNEL);
-	if (!msg)
-		return -ENOMEM;
 
 	msg->seq         = cpu_to_le32(seq);
 	msg->command_op  = cpu_to_le32(command_op);
 	msg->flags       = cpu_to_le32(flags);
 	msg->num_args    = cpu_to_le32(num_args);
-	if (num_args)
-		memcpy(msg->args, args, num_args * sizeof(__le64));
 
 	mutex_lock(&rnpu->rpmsg_lock);
 	if (!rnpu->rpdev) {
 		mutex_unlock(&rnpu->rpmsg_lock);
-		dev_err(rnpu->dev, "cmd submit failed: rpmsg channel not connected\n");
-		kfree(msg);
+		RNPU_ERR(rnpu, "cmd submit failed: rpmsg channel not connected\n");
 		return -ENOTCONN;
 	}
 	ret = rpmsg_send(rnpu->rpdev->ept, msg, msg_len);
 	mutex_unlock(&rnpu->rpmsg_lock);
 
-	kfree(msg);
 	return ret;
 }
 
@@ -77,6 +66,23 @@ static int amdrnpu_rpmsg_cb(struct rpmsg_device *rpdev, void *data,
 
 	amdrnpu_dev_cmd_dispatch_response(rnpu, data, (size_t)len);
 	return 0;
+}
+
+/*
+ * Walk up from the rpmsg channel to the first ancestor backed by a device-tree
+ * node: the remoteproc-owned platform device (the R5F).  Firmware buffers are
+ * attached to this device so the emitted DMA address is the one the RPU sees.
+ * Returns NULL on non-DT platforms.
+ */
+static struct device *amdrnpu_rproc_dev(struct rpmsg_device *rpdev)
+{
+	struct device *dev;
+
+	for (dev = rpdev->dev.parent; dev; dev = dev->parent) {
+		if (dev_of_node(dev))
+			return dev;
+	}
+	return NULL;
 }
 
 static int amdrnpu_rpmsg_probe(struct rpmsg_device *rpdev)
@@ -108,7 +114,15 @@ static int amdrnpu_rpmsg_probe(struct rpmsg_device *rpdev)
 		return ret;
 	}
 
-	rnpu->dev = rnpu->mdev.this_device;
+	/*
+	 * Hold a reference to the remoteproc device for the lifetime of @rnpu;
+	 * released in amdrnpu_dev_release() after all buffer attachments (which
+	 * may target this device) have been torn down.
+	 */
+	rnpu->rproc_dev = amdrnpu_rproc_dev(rpdev);
+	if (rnpu->rproc_dev)
+		get_device(rnpu->rproc_dev);
+
 	dev_set_drvdata(&rpdev->dev, rnpu);
 	dev_info(&rpdev->dev,
 		 "amdrnpu: bound channel %s -> /dev/%s (ABI v%u)\n",

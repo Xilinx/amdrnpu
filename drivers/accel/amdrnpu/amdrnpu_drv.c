@@ -3,6 +3,7 @@
  * Copyright (C) 2026, Advanced Micro Devices, Inc.
  */
 
+#include <linux/dma-mapping.h>
 #include <linux/fs.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -11,6 +12,7 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
+#include <linux/xarray.h>
 
 #include "amdrnpu_internal.h"
 
@@ -19,6 +21,8 @@ static void amdrnpu_dev_release(struct kref *ref)
 	struct amdrnpu_dev *rnpu = container_of(ref, struct amdrnpu_dev, refcount);
 
 	amdrnpu_dev_cmd_fini(rnpu);
+	if (rnpu->rproc_dev)
+		put_device(rnpu->rproc_dev);
 	mutex_destroy(&rnpu->rpmsg_lock);
 	kfree(rnpu);
 }
@@ -37,19 +41,31 @@ static int amdrnpu_open(struct inode *inode, struct file *filp)
 {
 	struct miscdevice *mdev = filp->private_data;
 	struct amdrnpu_dev *rnpu = container_of(mdev, struct amdrnpu_dev, mdev);
+	struct amdrnpu_client *client;
+
+	client = kzalloc(sizeof(*client), GFP_KERNEL);
+	if (!client)
+		return -ENOMEM;
 
 	amdrnpu_dev_get(rnpu);
-	filp->private_data = rnpu;
+	client->rnpu = rnpu;
+	xa_init_flags(&client->buf_xa, XA_FLAGS_ALLOC1);
+
+	filp->private_data = client;
 	return 0;
 }
 
 static int amdrnpu_release(struct inode *inode, struct file *filp)
 {
-	struct amdrnpu_dev *rnpu = filp->private_data;
+	struct amdrnpu_client *client = filp->private_data;
 
 	filp->private_data = NULL;
-	if (rnpu)
-		amdrnpu_dev_put(rnpu);
+	if (client) {
+		amdrnpu_client_buf_release(client);
+		xa_destroy(&client->buf_xa);
+		amdrnpu_dev_put(client->rnpu);
+		kfree(client);
+	}
 	return 0;
 }
 
@@ -63,12 +79,28 @@ static const struct file_operations amdrnpu_fops = {
 
 int amdrnpu_chardev_register(struct amdrnpu_dev *rnpu)
 {
+	int ret;
+
 	rnpu->mdev.minor = MISC_DYNAMIC_MINOR;
 	rnpu->mdev.name  = rnpu->dev_name;
 	rnpu->mdev.fops  = &amdrnpu_fops;
 	rnpu->mdev.mode  = 0660;
 
-	return misc_register(&rnpu->mdev);
+	ret = misc_register(&rnpu->mdev);
+	if (ret)
+		return ret;
+
+	/*
+	 * Imported dma-bufs are mapped against this device.  It is a plain
+	 * miscdevice with no of_node/iommu, so mappings are direct; allow a
+	 * 64-bit mask so >32-bit device buffers are not bounced.
+	 */
+	if (dma_coerce_mask_and_coherent(rnpu->mdev.this_device,
+					 DMA_BIT_MASK(64)))
+		dev_warn(rnpu->mdev.this_device,
+			 "amdrnpu: 64-bit DMA mask unavailable; buffer import may be limited\n");
+
+	return 0;
 }
 
 void amdrnpu_chardev_deregister(struct amdrnpu_dev *rnpu)

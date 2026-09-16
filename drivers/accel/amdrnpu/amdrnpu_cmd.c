@@ -13,6 +13,7 @@
 #include <linux/fs.h>
 #include <linux/kref.h>
 #include <linux/mutex.h>
+#include <linux/overflow.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/stddef.h>
@@ -74,6 +75,12 @@ static void amdrnpu_cmd_release(struct kref *ref)
 		dma_fence_signal(f);
 		dma_fence_put(f);
 	}
+
+	/* Drop the buffers pinned for this command's arguments. */
+	while (cmd->num_bo_refs)
+		amdrnpu_buf_put(cmd->bo_refs[--cmd->num_bo_refs]);
+	kfree(cmd->bo_refs);
+
 	kfree(cmd);
 }
 
@@ -269,34 +276,60 @@ void amdrnpu_dev_cmd_dispatch_response(struct amdrnpu_dev *rnpu, const void *pay
 	amdrnpu_cmd_complete(cmd, status);
 }
 
-static int amdrnpu_resolve_args(struct amdrnpu_dev *rnpu, struct amdrnpu_arg *args,
-				u32 num_args, __le64 *out_words)
+static int amdrnpu_resolve_args(struct amdrnpu_client *client, struct amdrnpu_cmd *cmd,
+				struct amdrnpu_arg *args, u32 num_args,
+				__le64 *out_words)
 {
+	struct amdrnpu_dev *rnpu = client->rnpu;
 	u32 i;
 
 	for (i = 0; i < num_args; i++) {
 		struct amdrnpu_arg *a = &args[i];
+		struct amdrnpu_buf *buf;
 
-		/* Buffer args (size != 0) are not implemented yet. */
-		if (a->size != 0) {
-			dev_dbg(rnpu->dev,
-				"arg %u: buffer args not supported yet (size=%llu)\n",
-				i, (unsigned long long)a->size);
-			return -EOPNOTSUPP;
+		if (a->size == 0) {
+			out_words[i] = cpu_to_le64(a->value);
+			continue;
 		}
-		out_words[i] = cpu_to_le64(a->value);
+
+		/* Buffer arg: look up the imported handle and bounds-check. */
+		if (a->bo.buffer_handle <= 0) {
+			dev_dbg(rnpu->dev, "arg %u: invalid buffer handle %d\n",
+				i, a->bo.buffer_handle);
+			return -EINVAL;
+		}
+		buf = amdrnpu_buf_get(client, (u32)a->bo.buffer_handle);
+		if (!buf) {
+			dev_dbg(rnpu->dev, "arg %u: unknown buffer handle %d\n",
+				i, a->bo.buffer_handle);
+			return -ENOENT;
+		}
+		if (a->bo.offset > buf->size ||
+		    a->size > (u64)(buf->size - a->bo.offset)) {
+			dev_dbg(rnpu->dev,
+				"arg %u: slice out of bounds (off=%u size=%llu buf=%zu)\n",
+				i, a->bo.offset, (unsigned long long)a->size,
+				buf->size);
+			amdrnpu_buf_put(buf);
+			return -EINVAL;
+		}
+
+		out_words[i] = cpu_to_le64((u64)buf->dma_addr + a->bo.offset);
+		/* Transfer the reference from amdrnpu_buf_get() into the cmd. */
+		cmd->bo_refs[cmd->num_bo_refs++] = buf;
 	}
 	return 0;
 }
 
-static long amdrnpu_ioctl_cmd_submit(struct amdrnpu_dev *rnpu, void __user *uarg)
+static long amdrnpu_ioctl_cmd_submit(struct amdrnpu_client *client, void __user *uarg)
 {
+	struct amdrnpu_dev *rnpu = client->rnpu;
 	struct sync_file *sync_file = NULL;
 	struct amdrnpu_arg *args = NULL;
 	struct amdrnpu_cmd_submit uhdr;
 	struct dma_fence *fence = NULL;
 	struct amdrnpu_cmd *cmd;
-	__le64 *words = NULL;
+	struct amdrnpu_wire_cmd *msg = NULL;
 	size_t args_bytes;
 	int fd = -1;
 	long ret;
@@ -333,18 +366,26 @@ static long amdrnpu_ioctl_cmd_submit(struct amdrnpu_dev *rnpu, void __user *uarg
 	kref_get(&cmd->ref);
 	fence = dma_fence_get(cmd->pending_fence);
 
+	msg = kmalloc(struct_size(msg, args, uhdr.num_args), GFP_KERNEL);
+	if (!msg) {
+		ret = -ENOMEM;
+		goto out_cancel_cmd;
+	}
+
 	if (uhdr.num_args) {
-		words = kvcalloc(uhdr.num_args, sizeof(*words), GFP_KERNEL);
-		if (!words) {
+		cmd->bo_refs = kcalloc(uhdr.num_args, sizeof(*cmd->bo_refs),
+				       GFP_KERNEL);
+		if (!cmd->bo_refs) {
 			ret = -ENOMEM;
 			goto out_cancel_cmd;
 		}
-		ret = amdrnpu_resolve_args(rnpu, args, uhdr.num_args, words);
+		ret = amdrnpu_resolve_args(client, cmd, args, uhdr.num_args,
+					   msg->args);
 		if (ret)
 			goto out_cancel_cmd;
 	}
 
-	ret = amdrnpu_rpmsg_send_cmd(rnpu, cmd->seq, uhdr.command_op, 0, words,
+	ret = amdrnpu_rpmsg_send_cmd(rnpu, msg, cmd->seq, uhdr.command_op, 0,
 				     uhdr.num_args);
 	if (ret)
 		goto out_cancel_cmd;
@@ -370,7 +411,7 @@ static long amdrnpu_ioctl_cmd_submit(struct amdrnpu_dev *rnpu, void __user *uarg
 	fd_install(fd, sync_file->file);
 	dma_fence_put(fence);
 	amdrnpu_cmd_put(cmd);
-	kvfree(words);
+	kfree(msg);
 	kvfree(args);
 	return 0;
 
@@ -387,7 +428,7 @@ out_cancel_cmd:
 		amdrnpu_cmd_complete(cmd, ret < 0 ? (int)ret : -EIO);
 	dma_fence_put(fence);
 	amdrnpu_cmd_put(cmd);
-	kvfree(words);
+	kfree(msg);
 out_free_args:
 	kvfree(args);
 	return ret;
@@ -395,14 +436,19 @@ out_free_args:
 
 long amdrnpu_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
-	struct amdrnpu_dev *rnpu = filp->private_data;
+	struct amdrnpu_client *client = filp->private_data;
+	void __user *uarg = (void __user *)arg;
 
-	if (!rnpu)
+	if (!client || !client->rnpu)
 		return -ENODEV;
 
 	switch (cmd) {
 	case AMDRNPU_CMD_SUBMIT:
-		return amdrnpu_ioctl_cmd_submit(rnpu, (void __user *)arg);
+		return amdrnpu_ioctl_cmd_submit(client, uarg);
+	case AMDRNPU_BUF_IMPORT:
+		return amdrnpu_ioctl_buf_import(client, uarg);
+	case AMDRNPU_BUF_DESTROY:
+		return amdrnpu_ioctl_buf_destroy(client, uarg);
 	default:
 		return -ENOTTY;
 	}
