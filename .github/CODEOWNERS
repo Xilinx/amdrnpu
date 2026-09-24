@@ -1,2 +1,2 @@
-# Notify this team on workflow-related changes/failures
-.github/workflows/ @PhysicalAI/tessai-agent-team @hlaccabu
+# Add code owners here to request review on workflow-related changes.
+# .github/workflows/ @your-org/your-team

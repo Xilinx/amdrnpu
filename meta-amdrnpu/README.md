@@ -20,8 +20,7 @@ the source tree that the layer ships inside (the parent directory of
 
 ## Adding the layer to a Yocto build
 
-From your build directory (e.g.
-`/scratch/wendy/t20/Vitis-AI-Telluride/examples/reference_design/vek385/vitis_platforms/vaiml_platform/sw/yocto/build`):
+From your Yocto build directory (e.g. `/path/to/yocto/build`):
 
 ```sh
 bitbake-layers add-layer /path/to/tessai-agent/meta-amdrnpu
