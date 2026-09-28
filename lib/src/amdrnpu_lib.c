@@ -474,56 +474,11 @@ int amdrnpu_syncobj_wait_busy_poll(int fd, uint32_t syncobj_handle,
 	 */
 	(void)interval_ns; /* reserved: no dedicated busy-poll path yet */
 
-<<<<<<< HEAD
 	AMDRNPU_TRACE2(busy_poll_enter, (int)syncobj_handle, (int)interval_ns);
 	AMDRNPU_TRACE_RET(busy_poll_exit,
 			  amdrnpu_syncobj_wait_complete(fd, syncobj_handle,
 							max_wall_ns,
 							out_fence_status));
-=======
-	(void)fd; /* reserved */
-
-	AMDRNPU_TRACE2(busy_poll_enter, fence_fd, (int)interval_ns);
-	if (!out_fence_status)
-		AMDRNPU_TRACE_RET(busy_poll_exit, -EINVAL);
-
-	*out_fence_status = 0;
-	start = amdrnpu_now_ns();
-	for (;;) {
-		int timeout_ms;
-		int pr;
-
-		/*
-		 * Poll the sync_file for the completion fence.  interval_ns sets
-		 * the poll cadence: 0 => non-blocking spin (poll returns at
-		 * once, then sched_yield()); otherwise block up to interval_ns
-		 * (millisecond granularity, sub-ms rounded up to 1ms).
-		 */
-		if (interval_ns == 0) {
-			timeout_ms = 0;
-		} else {
-			timeout_ms = (int)(interval_ns / 1000000);
-			if (timeout_ms == 0)
-				timeout_ms = 1;
-		}
-
-		pr = amdrnpu_poll_fence(fence_fd, timeout_ms);
-		if (pr == 0)
-			AMDRNPU_TRACE_RET(busy_poll_exit,
-					  amdrnpu_fence_status(fence_fd,
-							       out_fence_status));
-		if (pr != -ETIMEDOUT)
-			AMDRNPU_TRACE_RET(busy_poll_exit, pr);
-
-		/* poll timed out => still pending */
-		if (max_wall_ns >= 0 &&
-		    amdrnpu_now_ns() - start >= (uint64_t)max_wall_ns)
-			AMDRNPU_TRACE_RET(busy_poll_exit, -ETIMEDOUT);
-
-		if (interval_ns == 0)
-			(void)sched_yield();
-	}
->>>>>>> 6291591 (Remove device tree + update build.sh)
 }
 
 int amdrnpu_syncobj_to_fence_fd(int fd, uint32_t syncobj_handle,
