@@ -37,7 +37,6 @@ int amdrnpu_rpmsg_send_cmd(struct amdrnpu_dev *rnpu, struct amdrnpu_wire_cmd *ms
 	if (!rnpu->rpdev) {
 		mutex_unlock(&rnpu->rpmsg_lock);
 		RNPU_ERR(rnpu, "cmd submit failed: rpmsg channel not connected\n");
-		kfree(msg);
 		return -ENOTCONN;
 	}
 	ret = rpmsg_send(rnpu->rpdev->ept, msg, msg_len);
