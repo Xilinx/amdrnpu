@@ -1,10 +1,20 @@
-# Device-tree binding: `amd,amdrnpu`
+# Platform integration (device tree & dma-buf heaps)
 
-This document describes how the `amdrnpu` driver is wired into a
-SoC's device tree. The machine-checkable schema lives at
-[`Documentation/devicetree/bindings/accel/amd,amdrnpu.yaml`](../Documentation/devicetree/bindings/accel/amd,amdrnpu.yaml)
-and is the source of truth; this page is a friendlier
-prose-and-diagram reference.
+**`amdrnpu` has no device-tree binding of its own.** It is a pure rpmsg
+client: the module registers one `rpmsg_driver` whose `id_table` matches
+the channel name **`amdrnpu`**, and a `/dev/amdrnpu.N` node is created
+whenever RPU firmware advertises that channel (see
+[`architecture.md` §3](architecture.md#3-instances-and-rpmsg-binding)).
+
+There is therefore **no** `amd,amdrnpu` compatible, **no** `bank@0` /
+`bank@1` child nodes, and **no** binding schema under
+`Documentation/devicetree/bindings/`. This page instead documents the
+platform infrastructure the driver *depends on*:
+
+1. the **remoteproc** (R5F) node and its firmware, which brings up the
+   rpmsg channel;
+2. the **OpenAMP reserved-memory** used by the rpmsg transport; and
+3. the **dma-buf heaps** userspace allocates command buffers from.
 
 ---
 
@@ -12,141 +22,103 @@ prose-and-diagram reference.
 
 ```mermaid
 flowchart TB
-    subgraph TOP["Parent node (compatible = amd,amdrnpu)"]
-        P_COMPAT["compatible<br/>= amd,amdrnpu"]
-        P_RPROC["amd,remoteproc<br/>= sibling rproc r5f@…"]
-        P_AC["#address-cells = 1<br/>#size-cells = 0"]
+    subgraph DT["Device tree"]
+        RPROC["remoteproc R5F node<br/>(e.g. xlnx,zynqmp-r5f)<br/>firmware-name, mboxes, ..."]
+        RMEM["reserved-memory<br/>(OpenAMP vrings + resource table)"]
+        HEAPS["dma-buf heap sources<br/>(reserved-memory pools /<br/>system heap)"]
     end
 
-    subgraph CHILDREN["Memory bank children — bank@0, bank@1"]
-        B0["bank@0  (RPU bank)<br/>compatible = amd,amdrnpu-bank<br/>reg = 0  (AMDRNPU_BANK_RPU / AMDRNPU_MEMORY_RPU)<br/>32-bit coherent mask (driver)<br/>memory-region: 32-bit-reachable carveout"]
-        B1["bank@1  (device bank)<br/>compatible = amd,amdrnpu-bank<br/>reg = 1  (AMDRNPU_BANK_DEV / AMDRNPU_MEMORY_DEVICE)<br/>64-bit coherent mask (driver, 32-bit fallback)<br/>memory-region: device/CMA carveout"]
+    subgraph KERN["Kernel"]
+        RP["remoteproc + rpmsg core"]
+        RDR["amdrnpu rpmsg_driver"]
+        HEAPDEV["/dev/dma_heap/*"]
     end
 
-    TOP --> CHILDREN
-    P_RPROC -. phandle .-> RPROC["remoteproc device node<br/>(e.g. r5f@… under cluster)"]
-    B0 -. phandle .-> POOL_RPU["reserved-memory<br/>shared-dma-pool + reusable"]
-    B1 -. phandle .-> POOL_DEV["reserved-memory<br/>shared-dma-pool + reusable"]
+    subgraph USER["User space"]
+        APP["application + libamdrnpu"]
+    end
+
+    RPROC --> RP
+    RMEM -. vrings .-> RP
+    RP -- "channel 'amdrnpu'" --> RDR
+    HEAPS --> HEAPDEV
+    APP -- "alloc dma-buf" --> HEAPDEV
+    APP -- "BUF_IMPORT(fd)" --> RDR
 ```
 
-Upstream-friendly placement (**Versal / Telluride** using Xilinx **`xlnx,zynqmp-r5f`**
-remoteproc): keep **`amd,amdrnpu` as a sibling** of the **`r5f@…`**
-remoteproc node under the soc / platform bus, and tie them with **`amd,remoteproc`**.
-
-A binding instance always has:
-
-- **One** parent node with `compatible = "amd,amdrnpu"` and an
-  `amd,remoteproc` phandle pointing at the RPU's remoteproc DT node.
-
-- **Two** child nodes (**`bank@0`** and **`bank@1`**)—logical DMA heaps backing
-  GEM allocation for (**a**) firmware-visible / RPU 32-bit memory and (**b**) a
-  broader device-visible bank. Both carry the **same** compatible
-  **`amd,amdrnpu-bank`**; the role is encoded by the logical-index
-  **`reg`** cell. The reg value is the kernel slot index
-  (`tdev->banks[reg]`) and is also the matching UAPI `AMDRNPU_MEMORY_*`
-  identifier.
-
-The driver allocates buffers mapped for remote firmware DMA and accelerator-side DMA,
-and forwards opaque control payloads to firmware over the **`amdrnpu`** RPMsg
-virtio channel on that processor.
-
-Multiple SoC instances (**one remoteproc each**) instantiate multiple
-`amdrnpu` nodes (`amd,remoteproc` disambiguates). See [`architecture.md`](architecture.md).
+The driver walks up from the bound rpmsg channel to the first ancestor
+device with a DT node — that is the **remoteproc device** — and uses it
+as the DMA domain for firmware-visible buffers
+(`AMDRNPU_BUF_IMPORT_FW`). Everything else about placement comes from the
+heap the buffer was allocated from.
 
 ---
 
-## 2. Parent node properties
+## 2. Remoteproc node and firmware
 
-| Property | Type | Required | Description |
-|----------|------|:-------:|-------------|
-| `compatible` | string | yes | Must be `"amd,amdrnpu"`. |
-| `amd,remoteproc` | phandle | yes | Phandle of the remoteproc node whose firmware advertises the `amdrnpu` RPMsg endpoint. Used to pair each DRM instance with the correct channel in multi-core systems (see [`architecture.md` §3](architecture.md#3-multiple-instances-two-driver-halves-each)). |
+`amdrnpu` does not probe the remoteproc node directly; it relies on the
+platform's remoteproc driver (for example Xilinx `xlnx,zynqmp-r5f`) to
+load and boot the R5F firmware. When that firmware runs its OpenAMP
+stack and announces an rpmsg channel named **`amdrnpu`**, the rpmsg core
+probes this driver and a `/dev/amdrnpu.N` node appears.
 
-**Required on parent:**
+Requirements:
 
-| Property | Value | Why |
-|---|---|---|
-| `#address-cells` | `<1>` | Children carry a single-cell logical-index `reg`. |
-| `#size-cells` | `<0>` | Children have no size — `reg` is an index, not a window. |
+- A remoteproc node whose firmware advertises the **`amdrnpu`** rpmsg
+  channel (`amdrnpu_ept.c` in the RPU firmware).
+- The remoteproc node must have an `of_node` (it does, being a DT
+  device) so the driver can resolve the firmware DMA domain by walking
+  the rpmsg parent chain. On non-DT platforms, `AMDRNPU_BUF_IMPORT_FW`
+  imports fail with `-ENODEV`.
 
-**`dma-ranges`** is omitted: memory placement comes from each bank's
-**`memory-region`**, and per-bank dma-mask width is enforced in the
-amdrnpu kernel driver (32 vs 64‑bit coherent) after
-**`of_dma_configure()`**.
-
-**Per-bank `compatible`:** required. Each bank child carries the
-**single shared** compatible **`amd,amdrnpu-bank`**, so the parent
-driver can use **`devm_of_platform_populate()`** (the upstream-preferred path)
-to bind both children against one bank `platform_driver`.
-
-**Per-bank `reg`:** required, **logical index only** (not MMIO). The reg
-value selects the bank role and matches the kernel `enum amdrnpu_bank_index`
-and the UAPI `AMDRNPU_MEMORY_*` enum:
-
-| `reg` | Role | Driver enum | UAPI enum |
-|:----:|------|-------------|-----------|
-| `0` | RPU-facing (32-bit) | `AMDRNPU_BANK_RPU` | `AMDRNPU_MEMORY_RPU` |
-| `1` | Device-facing (64-bit) | `AMDRNPU_BANK_DEV` | `AMDRNPU_MEMORY_DEVICE` |
-
-Today the binding requires exactly one of each (`bank@0`, `bank@1`); the
-schema may be extended on future SoCs.
+Multiple R5Fs each advertising the channel produce multiple
+`/dev/amdrnpu.N` nodes, indexed in bind order by a module-global
+counter.
 
 ---
 
-## 3. Memory bank children (`bank@0`, `bank@1`)
+## 3. OpenAMP reserved-memory
 
-The parent **requires** exactly these two DT children. They share one
-`compatible` so a single bank `platform_driver` matches both, and a
-mandatory `reg` cell selects the role.
+The rpmsg transport (vrings, virtio buffer pool, resource table) uses
+reserved-memory regions described in device tree and shared with the
+RPU. These belong to the **remoteproc / OpenAMP** setup, not to
+`amdrnpu`; the driver never touches them directly. A representative
+layout (matching `lib/examples/README-inout-example.md`):
 
-| Subnode | Required `compatible` | Required `reg` | Driver slot | UAPI |
-|---------|----------------------|---|-------------|------|
-| `bank@0` | **`amd,amdrnpu-bank`** | `<0>` | `AMDRNPU_BANK_RPU` (32-bit mask) | `AMDRNPU_MEMORY_RPU` |
-| `bank@1` | **`amd,amdrnpu-bank`** | `<1>` | `AMDRNPU_BANK_DEV` (64-bit mask, fallback 32) | `AMDRNPU_MEMORY_DEVICE` |
+| Region | Physical start | Size |
+|--------|----------------|------|
+| Resource table | `0x09800000` | 256 B |
+| VirtIO vring 0 | `0x09860000` | 16 KiB |
+| VirtIO vring 1 | `0x09864000` | 16 KiB |
+| VirtIO buffer pool | `0x09868000` | 256 KiB |
 
-`reg` is a **logical bank index only** — it is not an MMIO base. Buffer
-placement is driven by **`memory-region`** (the reserved-memory node's own
-`reg`), and the driver enforces coherent **`dma-mask`** widths.
-
-**`dma-coherent` is intentionally not used on the bank nodes.** Native GEM
-buffers use **`dma_alloc_noncoherent()`** (contiguous, cacheable CPU mappings). Userspace
-must **`AMDRNPU_BUF_SYNC`** around device DMA; the driver does not rely on
-hardware cache snooping from the reserved pools.
-
-| Property | Type | Required | Description |
-|----------|------|:-------:|-------------|
-| `compatible` | string | yes | Must be `"amd,amdrnpu-bank"` for both children. |
-| `reg` | u32 | yes | Logical bank index. `0` for the RPU bank, `1` for the device bank. Range bounded by the schema and re-checked by the driver. |
-| `memory-region` | phandle | no | Reserved-memory **`shared-dma-pool`** with **`reusable`** (CMA binding on the bank device). **`bank@0` must not use `no-map`** on its pool. Omit to use ordinary default heaps. |
-| `iommus` | phandle-array | no | SMMU stream(s) for the bank's `struct device`. Present on platforms with IOMMU, omitted otherwise. The same driver code handles both configurations. |
-
-Probe sequence:
-
-1. The parent's `platform_driver` (matching `amd,amdrnpu`) calls
-   **`platform_set_drvdata()`** then **`devm_of_platform_populate()`**.
-2. The OF core walks each child and creates a `platform_device`; because the
-   bank `platform_driver` is **already registered** (init order in the module),
-   each bank probes **synchronously** before populate returns.
-3. Bank probe reads `reg` (the bank index), validates it is in
-   `[0, AMDRNPU_NUM_BANKS - 1]`, calls
-   `of_reserved_mem_device_init_by_idx()` (reusable pools bind via
-   **`dev->cma_area`**; dedicated `no-map` pools use **`dev->dma_mem`** —
-   amdrnpu treats either as a valid heap), then
-   `dma_coerce_mask_and_coherent()` (32-bit when `reg == AMDRNPU_BANK_RPU`,
-   64-bit-with-fallback otherwise), and registers itself into
-   `tdev->banks[reg]`.
-4. After populate returns, the parent verifies both bank slots are present and
-   then registers the DRM render node.
+These addresses must match the RPU firmware's OpenAMP overlay.
 
 ---
 
-## 4. Reserved-memory companion nodes
+## 4. Command buffers come from dma-buf heaps
 
-Each bank's `memory-region` points at a **`shared-dma-pool`** reserved-memory
-node. On VEK385-class systems both banks use **reusable** CMA pools (not
-`no-map`). The official Versal-net base DT declares both pools with
-**explicit `phandle` values** and **no DT labels**, so the
-`amdrnpu` node references them by numeric phandle:
+The driver imports buffers; it never allocates them. Userspace obtains a
+dma-buf from a **dma-buf heap** and imports the fd with
+`AMDRNPU_BUF_IMPORT`. The imported buffer must be **physically
+contiguous** (the driver rejects a scattered SG table), and to be
+usable by the RPU it must live in an RPU-reachable region.
+
+Two DMA domains exist, selected by the import `flags`:
+
+| `flags` | Attach device | Placement source |
+|---------|---------------|------------------|
+| `AMDRNPU_BUF_IMPORT_DEVICE` (0) | accelerator misc device (64-bit mask) | the device-visible heap |
+| `AMDRNPU_BUF_IMPORT_FW` (`1<<0`) | remoteproc device | an RPU-reachable heap |
+
+The library's `amdrnpu_buf_alloc()` selects the matching heap and import
+flag for `AMDRNPU_MEMORY_RPU` vs `AMDRNPU_MEMORY_DEVICE`.
+
+### Reserved-memory-backed heaps
+
+An RPU-reachable, contiguous pool is typically exposed as a dma-buf
+heap. For example, a `shared-dma-pool` reserved-memory region that the
+RPU firmware also maps (its MPU/MMU must cover the same physical span):
 
 ```dts
 reserved-memory {
@@ -155,219 +127,50 @@ reserved-memory {
     ranges;
 
     /*
-     * RPU bank (bank@0): below 4 GiB, reusable CMA — bound as
-     * dev->cma_area. Also carries linux,cma-default (system-wide CMA
-     * fallback for APU-side drivers that don't declare their own
-     * memory-region).
+     * RPU-reachable contiguous pool (below 4 GiB). Exposed to userspace
+     * as a dma-buf heap; buffers allocated here are imported with
+     * AMDRNPU_BUF_IMPORT_FW so the RPU can dereference their DMA address.
      */
-    rpu_gem_cma@20000000 {
-        phandle = <0x500>;
+    rpu_reserved@20000000 {
         compatible = "shared-dma-pool";
         reusable;
         reg = <0x0 0x20000000 0x0 0x20000000>; /* 512 MiB */
-        linux,cma-default;
-    };
-
-    /*
-     * Device bank (bank@1): high DDR, 4 GiB. Reusable CMA but
-     * intentionally NOT linux,cma-default -- exclusive to consumers
-     * that bind it by explicit memory-region phandle.
-     */
-    buffer@50000000000 {
-        reg = <0x500 0x0 0x1 0x0>;
-        compatible = "shared-dma-pool";
-        reusable;
-        phandle = <0x01>;
     };
 };
 ```
 
-Notes:
-
-- **`compatible = "shared-dma-pool"`** and **`reusable`** are required for
-  the RPU CMA heap (`bank@0`). Do **not** add **`no-map`** on that node;
-  the kernel registers a CMA pool, not a dedicated `dma_mem` carveout.
-- **`linux,cma-default`** sits on **`bank@0`** (`rpu_gem_cma@20000000`),
-  making the small 512 MiB RPU-reachable pool the system-wide CMA
-  fallback. APU-side drivers without their own `memory-region` therefore
-  share this pool with `amdrnpu`'s RPU bank — size
-  `CONFIG_CMA_SIZE_MBYTES` and any contended-driver allocation budgets
-  with that in mind.
-- **`bank@1`** intentionally does **not** carry `linux,cma-default` — the
-  4 GiB high-DDR pool is reachable only by drivers that bind it by
-  explicit `memory-region` phandle.
-- Phandle values `0x500` (RPU pool) and `0x01` (device pool) are part of
-  the Versal-net SoC-level DT contract: the Versal-net team owns the
-  pool definitions, `amdrnpu` owns the consumer references. Any
-  change to either side requires multi-team alignment.
-- Sizes and base addresses are SoC-specific; RPU firmware MPU must agree on
-  the physical span referenced by **`bank@0`**.
+How a reserved-memory region becomes a `/dev/dma_heap/*` node is
+platform-specific (e.g. a CMA heap or a dedicated reserved-memory heap
+exporter). The key contract for `amdrnpu` is only that the resulting
+dma-buf is **physically contiguous** and, for firmware use,
+**RPU-reachable**.
 
 ---
 
-## 5. Annotated example
+## 5. Common pitfalls
 
-```dts
-/dts-v1/;
-/ {
-    #address-cells = <2>;
-    #size-cells = <2>;
-
-    /* ---------------- reserved-memory pools (official Versal-net layout) ----------- */
-    reserved-memory {
-        #address-cells = <2>;
-        #size-cells = <2>;
-        ranges;
-
-        rpu_gem_cma@20000000 {
-            phandle = <0x500>;
-            compatible = "shared-dma-pool";
-            reusable;
-            reg = <0x0 0x20000000 0x0 0x20000000>;
-            linux,cma-default;
-        };
-        buffer@50000000000 {
-            reg = <0x500 0x0 0x1 0x0>;
-            compatible = "shared-dma-pool";
-            reusable;
-            phandle = <0x01>;
-        };
-    };
-
-    /* Vendor RPU remoteproc (Xilinx-compatible string substituted per SoC) */
-    r5f_0: r5f@ff9a0000 {
-        compatible = "xlnx,zynqmp-r5f";
-        reg = <0x0 0xff9a0000 0x0 0x10000>;
-        /* clocks, resets, firmware-name, … */
-    };
-
-    /* ---------------- amdrnpu sibling instance ---------------- */
-    amdrnpu_0: amdrnpu {
-        compatible = "amd,amdrnpu";
-        amd,remoteproc = <&r5f_0>;
-
-        #address-cells = <1>;
-        #size-cells    = <0>;
-
-        /*
-         * RPU-visible heap — driver coerces 32-bit coherent dma-mask.
-         * reg = <0> matches AMDRNPU_BANK_RPU and AMDRNPU_MEMORY_RPU.
-         * memory-region binds by numeric phandle 0x500
-         * (rpu_gem_cma@20000000) -- the official Versal-net pool is
-         * unlabeled, so symbolic &references aren't an option.
-         */
-        npu_bank_rpu: bank@0 {
-            compatible    = "amd,amdrnpu-bank";
-            reg           = <0>;
-            memory-region = <0x500>;
-        };
-
-        /*
-         * Device-side accelerator heap — prefers 64-bit mask (falls back to 32).
-         * reg = <1> matches AMDRNPU_BANK_DEV and AMDRNPU_MEMORY_DEVICE.
-         * memory-region binds by numeric phandle 0x01
-         * (buffer@50000000000), same labelless contract.
-         */
-        npu_bank_dev: bank@1 {
-            compatible    = "amd,amdrnpu-bank";
-            reg           = <1>;
-            memory-region = <0x01>;
-        };
-    };
-};
-```
+- **RPU can't see the buffer.** If an `AMDRNPU_BUF_IMPORT_FW` buffer is
+  allocated from a pool the RPU firmware doesn't map, the RPU faults
+  when it dereferences the DMA address. Allocate firmware buffers from
+  an RPU-reachable heap and ensure the firmware MPU covers that span.
+- **Non-contiguous dma-buf.** Import fails with `-EINVAL` if the mapped
+  scatter-gather table is not a single contiguous run. Use a heap that
+  guarantees contiguity (CMA / carveout), not the generic system heap
+  for firmware-visible buffers.
+- **FW domain on a non-DT platform.** `AMDRNPU_BUF_IMPORT_FW` returns
+  `-ENODEV` when the rpmsg channel has no DT-backed ancestor to use as
+  the remoteproc DMA device.
+- **Wrong / missing channel name.** The driver only binds to an rpmsg
+  channel named exactly **`amdrnpu`**. Confirm the firmware's OpenAMP
+  endpoint name.
 
 ---
 
-## 6. Multi-RPU example
+## 6. See also
 
-For SoCs with two R5Fs each running distinct firmware payloads:
-
-```dts
-r5f_0: r5f@ff9a0000 { compatible = "xlnx,zynqmp-r5f"; };
-r5f_1: r5f@ff9b0000 { compatible = "xlnx,zynqmp-r5f"; };
-
-amdrnpu_0: amdrnpu {
-    compatible = "amd,amdrnpu";
-    amd,remoteproc = <&r5f_0>;
-
-    #address-cells = <1>;
-    #size-cells    = <0>;
-
-    bank@0 {
-        compatible    = "amd,amdrnpu-bank";
-        reg           = <0>;
-        memory-region = <&pool_rpu_0>;
-    };
-    bank@1 {
-        compatible    = "amd,amdrnpu-bank";
-        reg           = <1>;
-        memory-region = <&pool_dev_0>;
-    };
-};
-
-amdrnpu_1: amdrnpu {
-    compatible = "amd,amdrnpu";
-    amd,remoteproc = <&r5f_1>;
-
-    #address-cells = <1>;
-    #size-cells    = <0>;
-
-    bank@0 {
-        compatible    = "amd,amdrnpu-bank";
-        reg           = <0>;
-        memory-region = <&pool_rpu_1>;
-    };
-    bank@1 {
-        compatible    = "amd,amdrnpu-bank";
-        reg           = <1>;
-        memory-region = <&pool_dev_1>;
-    };
-};
-```
-
-Each instance shows up as its own DRM render node
-(`/dev/dri/renderD128`, `/dev/dri/renderD129`, …) bound to the **`amd,amdrnpu`**
-platform probe; **`amd,remoteproc`** routes RPMsg to the pairing selected above.
-
-[`architecture.md` §3](architecture.md#3-multiple-instances-two-driver-halves-each).
-
----
-
-## 7. Validating a DT
-
-If you have `dtschema` installed, you can validate against the YAML
-schema directly:
-
-```bash
-# Check the schema itself parses cleanly
-dt-validate -m Documentation/devicetree/bindings/accel/amd,amdrnpu.yaml
-
-# Validate a compiled DTB
-dt-validate -s Documentation/devicetree/bindings/accel/amd,amdrnpu.yaml \
-    /path/to/your.dtb
-```
-
-When using the in-kernel validator (`make dtbs_check`), drop the YAML
-into the kernel tree at the same path and it will be picked up
-automatically.
-
----
-
-## 8. Common pitfalls
-
-- **`AMDRNPU_MEMORY_RPU` without an RPU-aligned carveout.** On VEK385, the RPU GEM CMA pool is `rpu_gem_cma@20000000` (a **`shared-dma-pool`** with **`reusable`** + **`linux,cma-default`** at PA **`0x20000000`**, **512 MiB** through **`0x3fffffff`**, exposed as phandle **`<0x500>`**). The **`bank@0`** subnode needs **`memory-region = <0x500>`** (numeric phandle — the official Versal-net pool is unlabeled, so symbolic `&references` won't resolve). RPU firmware MPU must map the same span via **`zephyr,tess-rpu-gem-shm`**. Otherwise GEM alloc fails (`-ENXIO`) or the RPU faults when it dereferences **`dma_addr`**.
-- **Wrong `reg` for the role.** `bank@0` must have `reg = <0>` (RPU) and `bank@1` must have `reg = <1>` (device). Swapping them silently mis-routes 64-bit GEMs into the 32-bit heap (or vice versa). The schema pins `reg` per node name and the driver re-checks at probe.
-- **Stale DTS using two separate compatibles** (`amd,amdrnpu-rpu-bank` / `-dev-bank`) **or no `reg`/unit-address.** Older drafts are deprecated; the schema and driver no longer accept them. Use the single shared `amd,amdrnpu-bank` compatible plus `reg`.
-- **Sharing one reserved-memory pool between both banks.** The driver attaches each heap to separate `struct device`; sharing defeats per-bank `dma-mask`.
-- **`no-map` on `bank@0`.** Reusable **`shared-dma-pool`** (without **`no-map`**) is required for the RPU CMA heap; **`no-map`** pools bind via **`dev->dma_mem`** and are not what **`bank@0`** uses on VEK385.
-- **Wrong `amd,remoteproc` target.** Confirm runtime logs tying RPMsg bind to expected remoteproc **`%pOF`** path.
-
----
-
-## 9. See also
-
-- [`architecture.md`](architecture.md) — runtime behaviour (`platform_driver`,
-  `rpmsg_driver`, GEM banks).
-- [`buffer-management.md`](buffer-management.md) — userspace bank selection (`AMDRNPU_MEMORY_*`).
-- Upstream **`shared-dma-pool`** binding.
+- [`architecture.md`](architecture.md) — rpmsg binding, DMA domains, and
+  the miscdevice.
+- [`buffer-management.md`](buffer-management.md) — dma-buf import,
+  contiguity, and handle lifetime.
+- [`lib-userspace-flow.md`](lib-userspace-flow.md) — how the library
+  picks a heap for `AMDRNPU_MEMORY_*`.

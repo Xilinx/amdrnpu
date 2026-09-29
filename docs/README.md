@@ -4,22 +4,23 @@ This folder describes the design of the `amdrnpu` driver. The
 documents are written to be read in order, but each one stands on its
 own.
 
+`amdrnpu` is a lightweight rpmsg char-device driver (`/dev/amdrnpu.N`),
+not a DRM driver. Buffers are userspace-allocated dma-bufs imported into
+the driver; command completion is a `sync_file` fd.
+
 | Document | What it covers |
 |----------|----------------|
-| [lib-userspace-flow.md](lib-userspace-flow.md) | **`libamdrnpu`** API (`amdrnpu_*`): buffer alloc/close, command submit, syncobj wait helpers, diagrams. |
-| [architecture.md](architecture.md) | System view, in-kernel block diagram, file-by-file responsibilities, the dual platform/rpmsg driver registration, and the per-bank memory layout. |
-| [devicetree-binding.md](devicetree-binding.md) | Prose reference for the `amd,amdrnpu` DT binding: parent/child schema, reserved-memory companion nodes, single- and multi-RPU examples, validation, and common pitfalls. |
-| [buffer-management.md](buffer-management.md) | `AMDRNPU_BUF_ALLOC`, GEM mmap, handle lifetime, in-flight command pins, and release via `amdrnpu_buf_close` / `DRM_IOCTL_GEM_CLOSE`. |
-| [commands.md](commands.md) | Command submission (`AMDRNPU_CMD_SUBMIT`), wire format, and drm_syncobj / dma_fence interaction. |
-
-The machine-checkable YAML schema for the binding lives at
-[`Documentation/devicetree/bindings/accel/amd,amdrnpu.yaml`](../Documentation/devicetree/bindings/accel/amd,amdrnpu.yaml).
+| [lib-userspace-flow.md](lib-userspace-flow.md) | **`libamdrnpu`** API (`amdrnpu_*`): buffer alloc/import/close, command submit, `sync_file` wait helpers, diagrams. |
+| [architecture.md](architecture.md) | System view, in-kernel block diagram, file-by-file responsibilities, rpmsg binding, and the two DMA domains. |
+| [devicetree-binding.md](devicetree-binding.md) | Platform integration: the driver has no DT binding of its own; how the rpmsg channel, remoteproc node, and dma-buf heaps are wired in. |
+| [buffer-management.md](buffer-management.md) | Buffer import (`AMDRNPU_BUF_IMPORT`), dma-buf mmap/sync, handle lifetime, in-flight command pins, and release via `amdrnpu_buf_close` / `AMDRNPU_BUF_DESTROY`. |
+| [commands.md](commands.md) | Command submission (`AMDRNPU_CMD_SUBMIT`), wire format, and `sync_file` / dma_fence interaction. |
 
 ## Quick links
 
 - Userspace library: [`lib/`](../lib/) (`libamdrnpu` + `amdrnpu_test` CLI)
 - UAPI header: [`include/uapi/amdrnpu/amdrnpu.h`](../include/uapi/amdrnpu/amdrnpu.h)
-- Driver source: [`drivers/accel/tessai-agent/`](../drivers/accel/tessai-agent/)
+- Driver source: [`drivers/rpmsg/amdrnpu/`](../drivers/rpmsg/amdrnpu/)
 - Build orchestrator: [`build/build.sh`](../build/build.sh) (native / `-cross-vitis` / `-cross-yocto`)
 - Top-level overview: [`../README.md`](../README.md)
 

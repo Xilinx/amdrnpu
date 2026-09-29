@@ -195,29 +195,29 @@ porting to gtest.
 
 | Area                         | C smoke (historical, `amdrnpu_lifecycle.c`) | Gtest (`amdrnpu_unittest`) | Validates |
 |------------------------------|--------------------------------------------|----------------------------------|-----------|
-| device discovery             | `open_amdrnpu_card` + `drm_get_name`       | `AmdrnpuBasic.DriverNameIsAmdrnpu` | `/dev/dri/cardN` opens; `DRM_IOCTL_VERSION.name == "amdrnpu"`. |
+| device discovery             | `open_amdrnpu_card` + `drm_get_name`       | `AmdrnpuBasic.DeviceNodeIsAmdrnpu` | `/dev/amdrnpu.N` opens (miscdevice; no name/version ioctl -- identity is the node path). |
 | channel up                   | `test_noop_submit`                        | `AmdrnpuBasic.NoopSubmit` | Submit (num_args=0) -> syncobj SIGNALED. Channel-up, COMPLETE shape. |
 | scalar args                  | `test_scalar_args_submit`                 | `AmdrnpuBasic.ScalarArgsSubmit` | Scalar `__u64` args propagate verbatim across the wire. |
 | opcode dispatch              | `test_fw_echo_op_submit`                  | `AmdrnpuBasic.FwEchoOpSubmitScalarOnly` | `AMDRNPU_FW_ECHO_OP` (0x42424242) dispatch, scalar args. |
 | writeback                    | `test_fw_echo_writeback`                  | `AmdrnpuCmd.FwEchoWriteback` | `fw_echo` with an RPU-bank BO at args[0] -> endpoint writes the canonical `rsp: command id: %u, num_args: %u\n` banner; sscanf verifies bytes. |
 | burst submits                | `test_burst_sequential`                   | `AmdrnpuCmd.BurstSequentialSubmit` | 16 sequential submits all signal within timeout (no queue stalls / lost seqs). |
-| Tier A (async/poll)          | `test_completion_via_poll_on_sync_file`   | `AmdrnpuFence.PollOnSyncFile` | `DRM_SYNCOBJ_HANDLE_TO_FD` + `EXPORT_SYNC_FILE`, `poll(POLLIN, 2s)` wakeup. |
+| Tier A (async/poll)          | `test_completion_via_poll_on_sync_file`   | `AmdrnpuFence.PollOnSyncFile` | Export the completion sync_file fd (`amdrnpu_syncobj_to_fence_fd`), `poll(POLLIN, 2s)` wakeup. |
 | Tier A (fence query)         | `test_non_blocking_fence_status_before_after` | `AmdrnpuFence.FenceStatusBeforeAndAfter` | `SYNC_IOC_FILE_INFO` probe before+after blocking wait. |
 | Tier A (busy poll)           | `test_wait_busy_poll_sleep_interval`      | `AmdrnpuFence.BusyPollSleepInterval` | 10ms-interval poll loop on `fence_status`. |
-| Tier A (in-flight pin)       | `test_inflight_pin_survives_gem_close`    | `AmdrnpuFence.InflightPinSurvivesGemClose` | `GEM_CLOSE` immediately after submit; verify writeback observable via the surviving mmap. |
-| Tier A (RAII FD teardown)    | `test_unique_fd_closes_at_inner_scope_exit` | `AmdrnpuFence.UniqueFdClosesAtInnerScopeExit` | `int captured = -1; { unique_fd local{open_drm()}; captured = local.get(); }` then exercise `captured` with `DRM_IOCTL_VERSION` and verify it returns `-EBADF` -- pins down the contract that RAII wrappers close the held fd at scope exit. |
+| Tier A (in-flight pin)       | `test_inflight_pin_survives_gem_close`    | `AmdrnpuFence.InflightPinSurvivesGemClose` | Buffer close (`amdrnpu_buf_close`) immediately after submit; verify writeback observable via the surviving mmap. |
+| Tier A (RAII FD teardown)    | `test_unique_fd_closes_at_inner_scope_exit` | `AmdrnpuFence.UniqueFdClosesAtInnerScopeExit` | `int captured = -1; { unique_fd local{open_amdrnpu_device()}; captured = local.get(); }` then probe `captured` (`probe_fd`) and verify it returns `-EBADF` -- pins down the contract that RAII wrappers close the held fd at scope exit. |
 | Tier B (fault opcodes)       | `test_fence_error_remoteio`               | `AmdrnpuFault.RemoteIo` | Op `'REMI'` -> `fence_status == -EREMOTEIO`. |
 | Tier B (fault opcodes)       | `test_fence_error_notsupp`                | `AmdrnpuFault.NotSupported` | Op `'NOTS'` -> `fence_status == -EOPNOTSUPP`. |
 | Tier B (fault opcodes)       | `test_fence_error_cancelled`              | `AmdrnpuFault.Cancelled` | Op `'CANC'` -> `fence_status == -ECANCELED`. |
 | Tier B (fault opcodes)       | `test_invalid_rsp_type_to_remoteio`       | `AmdrnpuFault.InvalidRspTypeFallback` | Op `'BADC'` -> driver-side fallback `-EREMOTEIO` (endpoint emits out-of-range rsp_type=99). |
 | partial BUF_SYNC round trip  | (no equivalent)                           | `AmdrnpuMemory.BufSyncPartialRoundTrip` | `fw_echo_region` (`'RGNE'`) round trip: partial `BUF_SYNC TO_DEVICE` window flushed -> RPU echoes 8-byte input back in the banner (proves TO_DEVICE reached memory) -> partial `BUF_SYNC FROM_DEVICE` invalidate -> banner visible (proves FROM_DEVICE reached cache); sentinels outside the window prove the partial sync didn't widen. |
 | DEVICE-bank PA round trip    | (no equivalent)                           | `AmdrnpuCmd.DeviceShmemAddrRoundTrip` | `AMDRNPU_FW_OP_DEVICE_ADDR_PING` (`'DAPP'`): BO allocated in `AMDRNPU_MEMORY_DEVICE` (= `buffer@50000000000`, 4 GiB high-DDR reusable CMA pool at PA `0x500_0000_0000`, bound by numeric phandle `<0x01>` -- the official Versal-net layout leaves this pool unlabeled) at the largest size the host's CMA pool can satisfy — tries 1 GiB first, then halves down to 1 MiB on `-EINVAL`/`-ENOMEM`. The halving fallback distinguishes "CMA just fragmented" (succeeds at a smaller size) from "DEVICE bank wasn't registered at all" (every size fails -> SKIP with a dts-pointer diagnostic). Kernel patches the PA into `args[1]` and a separate small RPU-bank carveout BO into `args[0]`. RPU NEVER touches device shmem (it has no MPU window covering it) — it just `snprintf`s `"dev-ping pa=0x%016llx size=%llu seq=%u"` into the carveout. Userspace `sscanf`s the banner and asserts (a) PA inside `[0x50000000000, 0x50100000000)`, (b) `pa+size` doesn't overflow the bank, (c) echoed size == requested (whatever size won the fallback), (d) bytes past `kFwDappBannerMax` survived the pre-fill (cap-honoring sentinel). Skips cleanly when the bank looks broken or endpoint pre-dates the DAPP opcode. |
-| UAPI version                 | (no equivalent)                           | `AmdrnpuDevice.{AbiVersionMatchesUapiHeader,DrmVersionPopulated}` | UAPI ABI version + `DRM_IOCTL_VERSION` triple. |
+| UAPI version                 | (no equivalent)                           | `AmdrnpuDevice.AbiVersionMatchesUapiHeader` | UAPI ABI version surface (`AMDRNPU_ABI_VERSION`). |
 | per-fd thread-safety         | (no equivalent)                           | `AmdrnpuDevice.ConcurrentSubmitSingleFd` | N threads × M submits on the same fd; per-file idr / xa thread-safety. |
-| multi-fd                     | (no equivalent)                           | `AmdrnpuDeviceStandalone.MultipleOpenClose` | Multiple simultaneous opens of the same card, independent per-fd state. |
+| multi-fd                     | (no equivalent)                           | `AmdrnpuDeviceStandalone.MultipleOpenClose` | Multiple simultaneous opens of the same device, independent per-fd state. |
 | multi-client open/close      | (no equivalent)                           | `AmdrnpuBasicStandalone.NoopSubmitMultiThreaded` | N threads each open their own fd, submit, close; multi-client open/close stress. |
 | BO lifecycle (per-step)      | (no equivalent)                           | `AmdrnpuMemory.{BufAlloc*,BufMmap*,BufSyncBothDirectionsWholeBuffer,BufSyncPartialRange}` | Per-step BO lifecycle split out of the writeback round-trip. |
-| negative API                 | (no equivalent)                           | `AmdrnpuError.*` | Negative API: invalid memory_type, zero-size alloc, bad direction, bad offset, invalid handles, double-destroy, lying num_args, nonexistent /dev/dri path. |
+| negative API                 | (no equivalent)                           | `AmdrnpuError.*` | Negative API: invalid memory_type, zero-size alloc, bad direction, invalid handles, double-destroy, null-args-with-count, nonexistent /dev/amdrnpu.N path. |
 | alloc/close stress           | (no equivalent)                           | `AmdrnpuError.BufAllocCloseStressMultiThreaded` | Tight alloc/close loop across threads; per-file xa allocation races. |
 
 ## Output
@@ -232,7 +232,7 @@ binary works on dev hosts without the hardware.
 
 ## Troubleshooting
 
-- `amdrnpu DRM card not found` SKIP messages —
+- `no /dev/amdrnpu.N found` SKIP messages —
   `amdrnpu.ko` is not loaded, or the DT overlay was not applied,
   or the rpmsg channel did not bind. Check
   `dmesg | grep -E 'amdrnpu|rpmsg.*amdrnpu'`.

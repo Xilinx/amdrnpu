@@ -2,7 +2,7 @@
 
 The APU-side `amdrnpu` driver and its `amdrnpu_unittest`
 gtest suite are only one half of the Link A contract; every test
-that pokes the `amdrnpu` rpmsg endpoint on `/dev/dri/cardN`
+that pokes the `amdrnpu` rpmsg endpoint on `/dev/amdrnpu.N`
 needs a matching slave on R5_1 that registers the `"amdrnpu"`
 endpoint, replies to `fw_echo`, services the fault-injection
 opcodes (`REMI` / `NOTS` / `CANC` / `BADC`), and otherwise idles.

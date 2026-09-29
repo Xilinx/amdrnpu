@@ -1,179 +1,167 @@
 # Buffer Management
 
-This document describes how userspace allocates, maps, and frees buffers
-through the `amdrnpu` driver.
+This document describes how userspace provides, references, and releases
+buffers through the `amdrnpu` driver.
 
-The driver uses **DRM GEM** as its buffer abstraction so it can use the
-standard handle and mmap path. Each native buffer is backed by a contiguous
-**cacheable** allocation (`dma_alloc_noncoherent()` on the per-bank struct
-device) from a specific *memory bank* (RPU 32-bit or dev 64-bit). Userspace
-must call **`AMDRNPU_BUF_SYNC`** (or **`amdrnpu_buf_sync()`**) to flush or
-invalidate CPU cache lines around device DMA — see §3.
+The driver does **not allocate buffer memory**. Userspace allocates a
+dma-buf — typically from a dma-buf heap such as
+`/dev/dma_heap/reserved` — and **imports** it into the driver with
+**`AMDRNPU_BUF_IMPORT`**. The driver attaches the dma-buf to a DMA
+domain, verifies it is physically contiguous, records its DMA address,
+and returns an opaque per-file **handle**. That handle is what a
+`struct amdrnpu_arg` buffer slice refers to; the driver programs
+`dma_addr + offset` on the wire when the buffer is used by a command.
 
-**Userspace helpers:** [`lib-userspace-flow.md`](lib-userspace-flow.md) covers
-**`amdrnpu_buf_alloc()`**, **`amdrnpu_buf_close()`**, sync, mmap, and
-how they line up with the ioctl flow below.
+CPU mapping and cache maintenance are performed by userspace **on the
+dma-buf fd directly** (`mmap(2)`, `DMA_BUF_IOCTL_SYNC`) — not through
+this driver. The library wraps this in `amdrnpu_buf_mmap()` /
+`amdrnpu_buf_sync()`.
 
-The buffer is **reference-counted**, the standard way GEM objects are managed.
-The backing memory is freed only when the last reference is dropped — **not**
-when any individual handle or command goes away. References are acquired and
-released from several independent sources (handles, in-flight commands), and a
-**GEM close** only decrements the count; whether memory is freed depends on
-whether any *other* reference is still held.
+**Userspace helpers:** [`lib-userspace-flow.md`](lib-userspace-flow.md)
+covers **`amdrnpu_buf_alloc()`** (heap allocate + import in one step),
+**`amdrnpu_buf_close()`**, **`amdrnpu_buf_mmap()`**, and
+**`amdrnpu_buf_sync()`**, and how they line up with the ioctl flow
+below.
+
+Each imported buffer is **reference-counted** (`struct amdrnpu_buf`,
+`kref`). The per-client handle table owns one reference; each in-flight
+command that references the buffer holds another. The dma-buf attachment
+is torn down only when the last reference is dropped — **not**
+necessarily when the handle is destroyed.
 
 ---
 
 ## 1. Lifecycle overview
 
-The buffer’s high-level state is **`Live`** vs **`Freed`**, with `mmap()` /
-`munmap()` toggling mapping state inside **`Live`**. Leaving **`Live`** happens
-when the GEM object’s refcount reaches zero.
+An imported buffer is **`Live`** from `AMDRNPU_BUF_IMPORT` until its
+last reference is released. `AMDRNPU_BUF_DESTROY` (or file close) drops
+the handle-table reference; if a command still pins the buffer, the
+attachment survives until that command completes.
 
 ```mermaid
 stateDiagram-v2
     direction LR
 
-    [*] --> Live : AMDRNPU_BUF_ALLOC, refcount = 1
-
-    state Live {
-        direction LR
-        [*] --> Unmapped
-        Unmapped --> Mapped : mmap on gem offset
-        Mapped --> Unmapped : munmap
-    }
+    [*] --> Live : AMDRNPU_BUF_IMPORT, refcount = 1 (handle)
 
     Live --> Freed : last reference released (refcount 1 to 0)
     Freed --> [*]
 ```
 
-While **`Live`**, refcount can rise and fall as holders acquire and release.
-**No single close frees the buffer on its own** — only the holder that drops
-the *last* reference triggers **`amdrnpu_gem_free()`**.
-
 | Holder | Acquired by | Released by |
 |---|---|---|
-| DRM handle | `AMDRNPU_BUF_ALLOC` (one ref per handle) | **`amdrnpu_buf_close()`** / `DRM_IOCTL_GEM_CLOSE`, or implicit teardown on last `close()` of the DRM fd |
-| In-flight command pin | `AMDRNPU_CMD_SUBMIT` with a buffer arg (`size != 0`) | Terminal `AMDRNPU_RSP_*`, submit-failure cleanup, driver drain / `amdrnpu_cmd_release`; see §5 |
+| Handle-table entry | `AMDRNPU_BUF_IMPORT` (one ref) | **`AMDRNPU_BUF_DESTROY`** / **`amdrnpu_buf_close()`**, or implicit teardown on `close()` of the device fd |
+| In-flight command pin | `AMDRNPU_CMD_SUBMIT` with a buffer arg (`size != 0`) | Terminal `AMDRNPU_RSP_*`, submit-failure cleanup, or drain on channel unbind / module unload (see §4) |
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant U as Userspace
-    participant CORE as DRM core
+    participant BUF as amdrnpu_buf (kref)
     participant CMD as in-flight amdrnpu_cmd
-    Note over CORE: refcount = 0
+    Note over BUF: refcount = 0 (not yet imported)
 
-    U->>CORE: AMDRNPU_BUF_ALLOC
-    Note over CORE: refcount = 1 (handle)
+    U->>BUF: AMDRNPU_BUF_IMPORT(fd)
+    Note over BUF: refcount = 1 (handle table)
 
-    U->>CMD: AMDRNPU_CMD_SUBMIT(BO=h)
-    Note over CORE: refcount = 2 (handle + cmd pin)
+    U->>CMD: AMDRNPU_CMD_SUBMIT(bo = h)
+    Note over BUF: refcount = 2 (handle + cmd pin)
 
-    U->>CORE: GEM_CLOSE / amdrnpu_buf_close(handle)
-    Note over CORE: refcount = 1 (cmd pin only)
+    U->>BUF: AMDRNPU_BUF_DESTROY(h)
+    Note over BUF: refcount = 1 (cmd pin only)
 
-    CMD-->>CORE: command terminates → drm_gem_object_put()
-    Note over CORE: refcount = 0 → amdrnpu_gem_free()
+    CMD-->>BUF: command terminates → amdrnpu_buf_put()
+    Note over BUF: refcount = 0 → detach + dma_buf_put
 ```
 
 ---
 
-## 2. Allocation: `AMDRNPU_BUF_ALLOC`
+## 2. Import: `AMDRNPU_BUF_IMPORT`
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant U as Userspace
-    participant K as amdrnpu_drm.c
-    participant CORE as DRM core
-    participant DMA as dma_alloc_noncoherent
-    participant BANK as bank->dev (per-bank struct device)
+    participant HEAP as dma-buf heap
+    participant K as amdrnpu_buf.c
+    participant DMABUF as dma-buf core
 
-    U->>K: ioctl(AMDRNPU_BUF_ALLOC, {memory_type, size})
-    K->>K: amdrnpu_bank_memory_type()
-    K->>CORE: drm_gem_object_init(size)
-    K->>DMA: dma_alloc_noncoherent(bank->dev, size, &dma_addr, DMA_BIDIRECTIONAL)
-    DMA->>BANK: honors dma-mask + reserved-mem (kvaddr + dma_addr)
-    DMA-->>K: kvaddr, dma_addr
-    K->>CORE: drm_gem_create_mmap_offset(obj)
-    K->>CORE: drm_gem_handle_create(file, obj, &handle)
-    CORE->>CORE: handle = idr_alloc()
-    K-->>U: drm_handle
+    U->>HEAP: allocate a contiguous dma-buf
+    HEAP-->>U: dma-buf fd
+    U->>K: ioctl(AMDRNPU_BUF_IMPORT, {fd, flags})
+    K->>DMABUF: dma_buf_get(fd)
+    K->>DMABUF: dma_buf_attach(dmabuf, attach_dev)
+    Note over K: attach_dev = misc dev (DEVICE) or rproc dev (FW)
+    K->>DMABUF: dma_buf_map_attachment_unlocked(DMA_BIDIRECTIONAL)
+    K->>K: verify sg table is a single contiguous run
+    K->>K: xa_alloc(&client->buf_xa) → handle
+    K-->>U: handle
 ```
 
-**Inputs (`struct amdrnpu_buf_alloc`):**
+**Inputs (`struct amdrnpu_buf_import`):**
 
 | Field | Meaning |
 |-------|---------|
-| `flags` | must be 0 |
-| `memory_type` | `AMDRNPU_MEMORY_RPU` or `AMDRNPU_MEMORY_DEVICE` (default via `AMDRNPU_MEMORY_DEFAULT`) |
-| `reserved0` | must be 0 |
-| `size` | bytes; rounded up internally |
-| `drm_handle` | **output**: GEM handle for this `drm_file` |
+| `fd` | dma-buf fd to import (must be ≥ 0) |
+| `flags` | target DMA domain: `AMDRNPU_BUF_IMPORT_DEVICE` (0, default) or `AMDRNPU_BUF_IMPORT_FW` (`1<<0`); all other bits reserved |
+| `handle` | **output**: opaque per-file handle for `amdrnpu_arg.bo.buffer_handle` |
+| `pad` | reserved, must be 0 |
 
-**Failure modes:** `-ENODEV`, `-EINVAL`, `-ENOMEM`.
+The imported buffer **must be physically contiguous** — the driver
+walks the mapped scatter-gather table and requires a single continuous
+DMA run (`amdrnpu_sgt_dma_contig()`); otherwise import fails with
+`-EINVAL`. This lets the driver hand the RPU a single base address.
+
+**Domain selection.** `AMDRNPU_BUF_IMPORT_FW` attaches the buffer to the
+remoteproc device so the emitted DMA address is the one the RPU
+dereferences; it fails with `-ENODEV` on non-DT platforms where no
+remoteproc device was found. `AMDRNPU_BUF_IMPORT_DEVICE` (the default)
+attaches to the accelerator misc device.
+
+**Failure modes:** `-EFAULT`, `-EINVAL` (bad flags/pad/handle, or
+non-contiguous), `-ENODEV` (FW domain unavailable), `-ENOMEM`, plus any
+error from `dma_buf_get` / `dma_buf_attach` /
+`dma_buf_map_attachment`.
 
 ---
 
-## 3. Cache sync: `AMDRNPU_BUF_SYNC`
+## 3. CPU mapping and cache sync (on the dma-buf, not the driver)
 
-Native driver-allocated buffers are **cacheable**. Before the device reads CPU
-writes, flush with **`AMDRNPU_BUF_SYNC_TO_DEVICE`**. After the device writes data
-the CPU will read, invalidate with **`AMDRNPU_BUF_SYNC_FROM_DEVICE`**.
+The driver imports buffers for **device DMA only**. Everything the CPU
+does with the buffer — mapping it, and cache maintenance around device
+DMA — happens on the **dma-buf fd** using standard kernel interfaces:
 
-```c
-struct amdrnpu_buf_sync {
-    __u32 drm_handle;
-    __u32 direction;   /* AMDRNPU_BUF_SYNC_TO_DEVICE or AMDRNPU_BUF_SYNC_FROM_DEVICE */
-    __u32 flags;       /* must be 0 */
-    __u64 offset;      /* byte offset into the buffer */
-    __u64 length;      /* bytes; 0 = from offset through end-of-buffer */
-};
-```
+- **`mmap(2)`** on the dma-buf fd gives a CPU mapping.
+- **`DMA_BUF_IOCTL_SYNC`** with `DMA_BUF_SYNC_START` /
+  `DMA_BUF_SYNC_END` (and the `TO_DEVICE` / `FROM_DEVICE` direction
+  bits) performs cache maintenance.
 
-Library wrappers: **`amdrnpu_buf_sync()`**, **`amdrnpu_buf_sync_to_device()`**,
-**`amdrnpu_buf_sync_from_device()`**. PRIME-imported handles return
-**`-EOPNOTSUPP`** — use the exporter’s sync rules.
+The library wraps these:
+
+| Library helper | Underlying operation |
+|----------------|----------------------|
+| **`amdrnpu_buf_mmap()`** / **`amdrnpu_buf_munmap()`** | `mmap`/`munmap` on the dma-buf fd (`PROT_READ\|PROT_WRITE`, `MAP_SHARED`) |
+| **`amdrnpu_buf_sync()`** and the **`_to_device()`** / **`_from_device()`** inline helpers | `DMA_BUF_IOCTL_SYNC` on the dma-buf fd |
+
+> Note: `amdrnpu_buf_sync()`'s `offset`/`length` parameters are reserved
+> — `DMA_BUF_IOCTL_SYNC` operates on the whole buffer — and
+> `amdrnpu_buf_mmap()`'s `buf_size` parameter is reserved (the library
+> tracks the allocation size internally). See the header for details.
 
 Typical flow around a command that DMAs a userspace-filled input buffer:
 
-1. CPU writes via `mmap` or kernel mapping.
-2. **`AMDRNPU_BUF_SYNC_TO_DEVICE`** on the written range (often the whole buffer).
+1. CPU writes via the dma-buf mapping.
+2. **`amdrnpu_buf_sync_to_device()`** (flush) before submit.
 3. **`AMDRNPU_CMD_SUBMIT`** referencing the handle.
-4. After completion, **`AMDRNPU_BUF_SYNC_FROM_DEVICE`** on output ranges before CPU read.
+4. After completion, **`amdrnpu_buf_sync_from_device()`** (invalidate)
+   before the CPU reads output.
 
 ---
 
-## 4. mmap
+## 4. In-flight command pins
 
-`mmap()` on the DRM fd uses the standard GEM mmap offset path. **`amdrnpu_buf_mmap()`**
-wraps **`DRM_IOCTL_MODE_MAP_DUMB`** + **`mmap()`** (requires a **card** fd, not
-renderD*). **Partial mmap** is supported: pass a page-aligned **`offset`** and
-**`length`**; only that range is mapped (the driver maps `page + offset/PAGE_SIZE`).
-**`offset`** and **`length`** must be page-aligned; **`length == 0`** maps from
-**`offset`** through end-of-buffer and requires **`buf_size`** from allocation.
-Unmap with **`amdrnpu_buf_munmap(addr, length)`**.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant U as Userspace
-    participant DRM as DRM core
-    participant K as amdrnpu_gem_obj_mmap
-    participant DMA as dma_mmap_pages
-
-    U->>DRM: GEM mmap path (offset from DRM_IOCTL_MODE_MAP_DUMB or equivalent)
-    DRM->>K: amdrnpu_gem_obj_mmap(obj, vma)
-    K->>DMA: dma_mmap_pages(bank->dev, vma, size, page)
-    K-->>U: pages mapped
-```
-
----
-
-## 5. In-flight command pins
-
-A buffer referenced by a command (any `amdrnpu_arg` with `size != 0`) is held
-alive by the driver while that command runs.
+A buffer referenced by a command argument (any `amdrnpu_arg` with
+`size != 0`) is pinned by the driver for the command's lifetime.
 
 ```mermaid
 sequenceDiagram
@@ -181,99 +169,87 @@ sequenceDiagram
     participant U as Userspace
     participant SUB as AMDRNPU_CMD_SUBMIT
     participant CMD as amdrnpu_cmd
-    participant CORE as DRM GEM core
+    participant BUF as amdrnpu_buf
     participant RPU as RPU firmware
 
-    U->>SUB: ioctl AMDRNPU_CMD_SUBMIT with buffer arg
-    SUB->>CORE: drm_gem_object_lookup on handle h
-    CORE-->>SUB: obj refcount incremented
-    SUB->>CMD: store obj in bo_refs array
+    U->>SUB: ioctl(AMDRNPU_CMD_SUBMIT) with buffer arg (handle h)
+    SUB->>BUF: amdrnpu_buf_get(client, h) → extra ref
+    SUB->>BUF: bounds-check [offset, offset+size)
+    SUB->>CMD: transfer ref into cmd->bo_refs[]
     SUB-->>U: sync_handle
 
-    Note over U,CORE: GEM close may run after submit returns, pin keeps object alive
-    U->>CORE: amdrnpu_buf_close or GEM_CLOSE on h
-    CORE->>CORE: drop handle ref object may remain pinned by cmd
+    Note over U,BUF: BUF_DESTROY may run after submit returns; the pin keeps the buffer alive
+    U->>BUF: AMDRNPU_BUF_DESTROY(h)
+    Note over BUF: handle-table ref dropped; attachment survives via cmd pin
 
-    RPU-->>CMD: terminal mgmt response on RPMsg
-    CMD->>CMD: amdrnpu_cmd_set_terminated
-    CMD->>CORE: drm_gem_object_put for each bo_ref
+    RPU-->>CMD: terminal response over rpmsg
+    CMD->>BUF: amdrnpu_buf_put() for each bo_ref
 ```
 
-**At termination** the driver puts each `bo_refs[]` entry once. That covers
-normal completions, error-class responses, file teardown, and module unload
-paths.
+**At termination** the driver puts each `bo_refs[]` entry once. This
+covers normal completions, error-class responses, submit-failure
+cleanup, channel-unbind drain (`-ENOTCONN`), and module unload
+(`-ENODEV`).
 
-**Userspace:** after a successful submit you may call **`amdrnpu_buf_close`**
-as soon as you no longer need the handle for your own lookups; the object stays
-allocated until the command finishes and drops its pin.
+**Userspace:** after a successful submit you may call
+**`AMDRNPU_BUF_DESTROY`** / **`amdrnpu_buf_close()`** as soon as you no
+longer need the handle for your own lookups; the buffer stays attached
+until the command finishes and drops its pin.
 
 ---
 
-## 6. Free / cleanup
+## 5. Release / cleanup
 
-A buffer is destroyed when refcount goes **1 → 0**. Typical paths:
+An imported buffer is torn down when its refcount reaches **0**. Paths:
 
-- **`amdrnpu_buf_close()`** / **`DRM_IOCTL_GEM_CLOSE`** on the last open handle.
-- **`close(drm_fd)`** walks the per-file handle table and closes GEMs.
-- Command completion **`drm_gem_object_put`** when the last in-flight use ends.
+- **`AMDRNPU_BUF_DESTROY`** / **`amdrnpu_buf_close()`** on the handle
+  (`xa_erase` + `amdrnpu_buf_put`).
+- **`close(fd)`** on the device node walks the client's `buf_xa` and
+  releases every remaining handle
+  (`amdrnpu_client_buf_release()`).
+- The final **command completion** dropping the last `bo_refs[]` pin.
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant U as Userspace
-    participant CORE as DRM core
-    participant K as amdrnpu_gem_free
-    participant DMA as dma_free_noncoherent
+When the last reference goes away, `amdrnpu_buf_release()` runs:
 
-    rect rgba(180,220,255,0.25)
-    Note over U,CORE: Explicit GEM close
-    U->>CORE: amdrnpu_buf_close / DRM_IOCTL_GEM_CLOSE
-    CORE->>CORE: idr_remove + drm_gem_object_put
-    CORE->>K: gem_obj->funcs->free(obj)
-    end
-
-    rect rgba(255,220,180,0.25)
-    Note over U,CORE: Implicit on drm fd close
-    U->>CORE: close(drm_fd)
-    CORE->>CORE: drm_release walks handle IDR
-    CORE->>K: ... free each object
-    end
-
-    K->>DMA: dma_free_noncoherent(bank->dev, size, kvaddr, dma_addr, dir)
+```c
+dma_buf_unmap_attachment_unlocked(buf->attach, buf->sgt, DMA_BIDIRECTIONAL);
+dma_buf_detach(buf->dmabuf, buf->attach);
+dma_buf_put(buf->dmabuf);
 ```
 
-While a command still pins a BO, **`GEM_CLOSE` only drops the userspace
-handle** — memory stays until the submit completes and releases **`bo_refs`**.
+While a command still pins a buffer, `AMDRNPU_BUF_DESTROY` only drops
+the handle-table reference — the attachment (and the underlying dma-buf)
+survive until the submit completes.
 
 ---
 
-## 7. Userspace sketch
+## 6. Userspace sketch
+
+Using the library, which allocates from the correct dma-buf heap and
+imports in one step:
 
 ```c
 #include <errno.h>
-#include <fcntl.h>
 #include <string.h>
-#include <sys/mman.h>
 #include <unistd.h>
-#include <xf86drm.h>
 #include <amdrnpu/amdrnpu_lib.h>
 
 int main(void)
 {
-	int fd = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
+	int fd = open("/dev/amdrnpu.0", O_RDWR | O_CLOEXEC);
 	uint32_t handle;
-	int err;
+	uint64_t sz = 1u << 20;
+	void *p;
 
-	err = amdrnpu_buf_alloc(fd, AMDRNPU_MEMORY_DEVICE, 1u << 20, &handle);
-	if (err)
+	if (fd < 0)
+		return 1;
+	if (amdrnpu_buf_alloc(fd, AMDRNPU_MEMORY_DEVICE, sz, &handle))
 		return 1;
 
-	void *p;
-	uint64_t sz = 1u << 20;
-
-	amdrnpu_buf_mmap(fd, handle, sz, 0, 0, &p);
+	amdrnpu_buf_mmap(fd, handle, 0, 0, 0, &p);	/* whole buffer */
 	memset(p, 0xa5, sz);
 	amdrnpu_buf_sync_to_device(fd, handle, 0, 0);
+	/* ... AMDRNPU_CMD_SUBMIT referencing handle ... */
 	amdrnpu_buf_munmap(p, sz);
 	amdrnpu_buf_close(fd, handle);
 	close(fd);
@@ -281,10 +257,18 @@ int main(void)
 }
 ```
 
+A raw ioctl caller would instead allocate its own dma-buf (e.g. via a
+dma-buf heap), call `AMDRNPU_BUF_IMPORT` with the fd, `mmap`/
+`DMA_BUF_IOCTL_SYNC` on that dma-buf fd, and `AMDRNPU_BUF_DESTROY` when
+done.
+
 ---
 
-## 8. See also
+## 7. See also
 
-- [`architecture.md`](architecture.md) — per-bank platform devices and DMA windows.
-- [`commands.md`](commands.md) — `amdrnpu_arg` buffer references and wire DMA addresses.
-- [`lib-userspace-flow.md`](lib-userspace-flow.md) — library API for alloc, close, submit, wait.
+- [`architecture.md`](architecture.md) — the two DMA domains and how the
+  driver imports dma-bufs.
+- [`commands.md`](commands.md) — `amdrnpu_arg` buffer references and how
+  they become wire DMA addresses.
+- [`lib-userspace-flow.md`](lib-userspace-flow.md) — the library API for
+  allocate, import, map, sync, and release.

@@ -24,8 +24,8 @@ status and optional latency writeback.
 | `args[2]` | ELF size in bytes (scalar; 0 → RPU default 15376) |
 | `args[3]` | Optional RPU BO for `apu_xrt_bist_result` writeback |
 
-Response: `amdrnpu_wire_rsp.command_rsp_type` → DRM syncobj fence status
-(`1` = COMPLETE, negative = REMOTEIO / etc.).
+Response: `amdrnpu_wire_rsp.command_rsp_type` → completion (sync_file) fence
+status (`1` = COMPLETE, negative = REMOTEIO / etc.).
 
 ## Target firmware
 
@@ -47,7 +47,8 @@ dow -data nop.elf 0x20100000
 ## Linux
 
 - `amdrnpu.ko` loaded
-- Open **`/dev/dri/cardN`** (primary node for result BO mmap)
+- Open **`/dev/amdrnpu.N`** (the driver is a miscdevice); the result BO is
+  CPU-mapped via `amdrnpu_buf_mmap()` on its dma-buf.
 
 ## Build
 
@@ -72,7 +73,7 @@ amdrnpu_xrt_bist_example --elf-pa 0x20100000 --elf-size 15376
 amdrnpu_xrt_bist_example
 
 # Full options
-amdrnpu_xrt_bist_example --device /dev/dri/card1 --elf-file /path/to/nop.elf --iterations 50
+amdrnpu_xrt_bist_example --device /dev/amdrnpu.0 --elf-file /path/to/nop.elf --iterations 50
 ```
 
 Success prints `completion: fence_st=1 (COMPLETE)` and `PASS`.

@@ -9,7 +9,7 @@ runtime library shipped in the [amdrnpu](..) repository.
 meta-amdrnpu/
 ├── conf/layer.conf
 ├── recipes-kernel/
-│   └── amdrnpu-mod/        # out-of-tree DRM/RPMsg kernel module
+│   └── amdrnpu-mod/        # out-of-tree rpmsg char-device kernel module
 └── recipes-libs/
     └── amdrnpu-lib/        # user-space runtime library + amdrnpu_test CLI
 ```

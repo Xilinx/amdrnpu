@@ -6,7 +6,13 @@ between userspace and the RPU, and how data and control flow through
 the major subsystems.
 
 Everything below describes the driver under
-[`drivers/accel/tessai-agent/`](../drivers/accel/tessai-agent/).
+[`drivers/rpmsg/amdrnpu/`](../drivers/rpmsg/amdrnpu/).
+
+`amdrnpu` is a **lightweight rpmsg char driver**, not a DRM driver. It
+exposes a miscdevice (`/dev/amdrnpu.N`), imports userspace-allocated
+dma-buf objects, forwards opaque commands to firmware over rpmsg, and
+reports completion through a per-command `dma_fence` exported as a
+`sync_file` fd.
 
 ---
 
@@ -21,14 +27,15 @@ handles the actual hardware (AIE/NPU, sensors, etc.).
 flowchart LR
     subgraph User["User space (APU)"]
         APP["Application<br/>(libamdrnpu + custom code)"]
+        HEAP["dma-buf heap<br/>/dev/dma_heap/*"]
     end
 
     subgraph Kernel["Kernel space (APU)"]
-        DRM["DRM render node<br/>/dev/dri/renderD128"]
+        MISC["miscdevice<br/>/dev/amdrnpu.N"]
         TESS["amdrnpu driver"]
         RPMSG["rpmsg core"]
         REMOTEPROC["remoteproc<br/>(loads / boots R5F)"]
-        DMA["non-cacheable<br/>reserved memory"]
+        DMABUF["dma-buf core"]
     end
 
     subgraph RPU["RPU (R5F)"]
@@ -36,23 +43,28 @@ flowchart LR
         AIE["AIE / NPU access"]
     end
 
-    APP -- "ioctl, mmap" --> DRM
-    DRM --> TESS
+    APP -- "ioctl(CMD_SUBMIT,<br/>BUF_IMPORT, BUF_DESTROY)" --> MISC
+    APP -- "alloc dma-buf,<br/>mmap, DMA_BUF_IOCTL_SYNC" --> HEAP
+    HEAP -- "dma-buf fd" --> APP
+    MISC --> TESS
+    TESS -- "dma_buf_attach /<br/>map_attachment" --> DMABUF
     TESS -- "rpmsg_send /<br/>callback" --> RPMSG
     RPMSG <-- "vring" --> FW
-    REMOTEPROC -- "boots,<br/>provides vring" --> RPU
-    TESS -- "dma_alloc_noncoherent /<br/>AMDRNPU_BUF_SYNC /<br/>dma_buf" --> DMA
-    FW <-- "shared buffers<br/>(physical addresses)" --> DMA
+    REMOTEPROC -- "boots,<br/>provides channel" --> RPU
+    HEAP -. "shared physical memory" .-> FW
     FW --> AIE
 ```
 
-**Key idea.** Buffer memory is shared between the APU and the RPU through
-reserved-memory regions described in device tree. Native GEM buffers use
-**cacheable** `dma_alloc_noncoherent()` mappings; userspace calls
-**`AMDRNPU_BUF_SYNC`** to flush or invalidate ranges before/after device DMA.
-The driver translates GEM handles into physical addresses and hands them to the
-RPU as part of submission arguments. Control messages (wire commands and
-responses/events) flow over rpmsg.
+**Key idea.** Buffer memory is **allocated in userspace** from a dma-buf
+heap (e.g. `/dev/dma_heap/reserved`) and shared with the RPU. Userspace
+imports each dma-buf into the driver with **`AMDRNPU_BUF_IMPORT`**; the
+driver attaches it to the appropriate DMA domain, verifies it is
+physically contiguous, and records its DMA address. When the buffer is
+used as a command argument, the driver emits that DMA address on the
+wire. CPU mapping and cache maintenance are performed by userspace on
+the dma-buf fd directly (`mmap(2)`, `DMA_BUF_IOCTL_SYNC`), not through
+this driver. Control messages (wire commands and responses) flow over
+rpmsg.
 
 ---
 
@@ -61,298 +73,210 @@ responses/events) flow over rpmsg.
 ```mermaid
 flowchart TB
     subgraph User["User space"]
-        FOPS["ioctl / mmap on<br/>/dev/dri/renderD*"]
+        FOPS["open / ioctl on<br/>/dev/amdrnpu.N"]
     end
 
     subgraph TESS["amdrnpu kernel module"]
-        DRV["amdrnpu_drv.c<br/>platform_driver +<br/>module init/exit"]
-        DRM["amdrnpu_drm.c<br/>DRM device,<br/>fops, ioctl router,<br/>GEM ops"]
-        BANK["amdrnpu_bank.c<br/>per-bank platform_devices,<br/>dma-mask, reserved-mem"]
-        CMD["amdrnpu_cmd.c<br/>command IDR, dma_fence +<br/>drm_syncobj rotation"]
-        RPMSG["amdrnpu_rpmsg.c<br/>rpmsg_driver,<br/>send / dispatch"]
+        DRV["amdrnpu_drv.c<br/>miscdevice, file ops,<br/>module init/exit"]
+        RPMSG["amdrnpu_rpmsg.c<br/>rpmsg_driver:<br/>probe / remove / callback,<br/>rpmsg_send"]
+        CMD["amdrnpu_cmd.c<br/>ioctl router, dma_fence,<br/>sync_file, cmd_xa"]
+        BUF["amdrnpu_buf.c<br/>dma-buf import/destroy,<br/>arg address resolution"]
     end
 
     subgraph KAPI["Kernel APIs"]
-        DRMCORE["DRM core<br/>(GEM, syncobj, prime)"]
+        MISCC["miscdevice core"]
         DMABUF["dma-buf"]
-        DMA["dma-mapping<br/>(dma_alloc_noncoherent,<br/>dma_sync_single_range)"]
+        SYNCF["sync_file / dma_fence"]
         RPMSGC["rpmsg core"]
-        OF["of_*, of_reserved_mem"]
     end
 
-    FOPS --> DRM
-    DRV --> BANK
+    FOPS --> DRV
     DRV --> CMD
-    DRV --> DRM
     DRV --> RPMSG
-    DRM --> CMD
-    DRM --> BANK
+    CMD --> BUF
     CMD --> RPMSG
-    DRM --- DMABUF
-    BANK --- DMA
-    BANK --- OF
+    CMD --- SYNCF
+    BUF --- DMABUF
+    DRV --- MISCC
     RPMSG --- RPMSGC
 ```
 
 | File | Responsibility |
 |------|----------------|
-| `amdrnpu_drv.c` | Module init/exit, registration of three handlers: parent `platform_driver` (matches `amd,amdrnpu`), bank `platform_driver` (matches the single shared `amd,amdrnpu-bank`), and `rpmsg_driver` (matches channel `amdrnpu`). The parent probe publishes drvdata then calls `devm_of_platform_populate()`. |
-| `amdrnpu_bank.c` | Implements the bank `platform_driver`. Each probe reads `reg` (the logical bank index — `0`=RPU, `1`=device), owns one bank's reserved-memory + dma-mask (32 for rpu, 64 for dev with 32-bit fallback) and registers itself into `tdev->banks[reg]`. |
-| `amdrnpu_drm.c` | Owns the DRM render node. Custom `unlocked_ioctl` routes magic-`'M'` ioctls to our handlers and falls through to `drm_ioctl()` for syncobj/prime/GEM ioctls. Implements GEM `alloc/import/export/mmap` against per-bank devices. |
-| `amdrnpu_cmd.c` | Command lifecycle; **driver-owned command ids** (`cmd_xa` / `xa_alloc_cyclic`, wire `seq`); single `dma_fence` per submission on `drm_syncobj`; `amdrnpu_cmd_dispatch_response()` from rpmsg. |
-| `amdrnpu_rpmsg.c` | `rpmsg_driver` registration, `rpmsg_send()` for outgoing `amdrnpu_wire_cmd`, callback that decodes `amdrnpu_wire_rsp` and feeds it to `amdrnpu_cmd_dispatch_response()`. |
+| `amdrnpu_drv.c` | miscdevice registration (`misc_register`, `/dev/amdrnpu.N`), file `open`/`release`, `unlocked_ioctl`/`compat_ioctl` hooks, per-`amdrnpu_dev` refcounting, and module init/exit (which register/unregister the rpmsg driver). Sets a 64-bit DMA mask on the misc device so >32-bit device buffers are not bounced. |
+| `amdrnpu_rpmsg.c` | The `rpmsg_driver` bound to channel `"amdrnpu"`. `probe` allocates one `struct amdrnpu_dev`, names it `amdrnpu.<idx>`, registers the miscdevice, and records the remoteproc device (for the FW DMA domain). `remove` deregisters the node and drains in-flight commands. `callback` decodes the `amdrnpu_wire_rsp` and dispatches it. `amdrnpu_rpmsg_send_cmd()` sends `amdrnpu_wire_cmd`. |
+| `amdrnpu_cmd.c` | Command lifecycle: the `amdrnpu_ioctl` switch; per-submission `dma_fence` wrapped in a `sync_file`; **driver-owned command ids** in `cmd_xa` (`xa_alloc_cyclic`, wire `seq`); argument resolution (`amdrnpu_resolve_args`); response dispatch and drain. Completion is asynchronous with many commands in flight. |
+| `amdrnpu_buf.c` | `AMDRNPU_BUF_IMPORT` / `AMDRNPU_BUF_DESTROY`: `dma_buf_get` + `dma_buf_attach` + `dma_buf_map_attachment`, physical-contiguity check, per-client handle table (`buf_xa`), and kref-based buffer lifetime. |
 
 ---
 
-## 3. Multiple instances, two driver halves each
+## 3. Instances and rpmsg binding
 
-A single APU may host several RPUs - for example one R5F per cluster -
-and each gets its own `amd,amdrnpu` device-tree node pointing at
-its own remoteproc via `amd,remoteproc`. The driver fully supports
-this: every instance gets its own DRM render node, its own pair of
-banks, and its own rpmsg channel.
+There is **no platform driver and no device-tree binding for
+`amdrnpu`**. The driver is purely an rpmsg client: it registers one
+`rpmsg_driver` whose `id_table` matches the channel name **`amdrnpu`**.
+A `struct amdrnpu_dev` — and therefore a `/dev/amdrnpu.N` node — comes
+into existence when RPU firmware advertises that channel and the rpmsg
+core probes the driver.
 
-```mermaid
-flowchart LR
-    subgraph DT["Device tree"]
-        DT_R0["r5f_0"]
-        DT_R1["r5f_1"]
-        DT_T0["amdrnpu@0<br/>amd,remoteproc = r5f_0"]
-        DT_T1["amdrnpu@1<br/>amd,remoteproc = r5f_1"]
-        DT_T0 -. phandle .-> DT_R0
-        DT_T1 -. phandle .-> DT_R1
-    end
-
-    subgraph KERN["amdrnpu.ko"]
-        T0["amdrnpu_dev #0<br/>rpdev = ch0"]
-        T1["amdrnpu_dev #1<br/>rpdev = ch1"]
-    end
-
-    DT_T0 -- platform_probe --> T0
-    DT_T1 -- platform_probe --> T1
-
-    subgraph RPMSG["rpmsg core"]
-        CH0["channel amdrnpu<br/>parent: r5f_0"]
-        CH1["channel amdrnpu<br/>parent: r5f_1"]
-    end
-
-    CH0 -- rpmsg_probe<br/>DT walk -> r5f_0<br/>match phandle --> T0
-    CH1 -- rpmsg_probe<br/>DT walk -> r5f_1<br/>match phandle --> T1
-```
-
-The kernel module registers **three** handlers, regardless of how many
-instances are present:
-
-| Handler | Multiplicity | Match by |
-|---------|-------------|----------|
-| parent `platform_driver` | one probe per `amdrnpu` DT node | `compatible = "amd,amdrnpu"` |
-| bank `platform_driver`   | two probes per parent (one per bank child; role from `reg`) | `compatible = "amd,amdrnpu-bank"` |
-| `rpmsg_driver`           | one probe per RPU advertising the channel | `id_table.name = "amdrnpu"` |
-
-The two halves find each other entirely through the device tree - no
-global registry, no pending list, no driver-internal book-keeping.
-When an rpmsg channel comes up:
-
-1. Walk the rpmsg device's parent chain to find the first ancestor
-   with an `of_node`. That node is the underlying **remoteproc** (the
-   target of the `amd,remoteproc` phandle).
-2. `for_each_compatible_node(np, NULL, "amd,amdrnpu")` - for each
-   match, dereference its `amd,remoteproc` phandle and compare to the
-   node from step 1.
-3. Once the matching node is found, `of_find_device_by_node()` returns
-   its `platform_device`. The `amdrnpu_dev` pointer is at
-   `platform_get_drvdata(pdev)`.
-4. If the platform device is not yet bound (`drvdata == NULL`),
-   the rpmsg probe returns **`-EPROBE_DEFER`** and the driver core
-   retries later.
-5. Otherwise we install a managed `device_link` from the rpmsg device
-   (consumer) to the platform device (supplier). This guarantees that
-   on platform unbind, our `rpmsg_remove()` runs **before**
-   `amdrnpu_platform_remove()`, so the platform side never sees a live
-   `tdev->rpdev` pointer.
+A single APU may host several RPUs (for example one R5F per cluster).
+Each RPU that advertises the `amdrnpu` channel gets its own
+`amdrnpu_dev` and its own miscdevice node. Node indices are assigned
+from a module-global atomic counter, so nodes appear as
+`/dev/amdrnpu.0`, `/dev/amdrnpu.1`, … in bind order.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant DTS as Device tree
-    participant PR as platform_driver
-    participant TDEV as "amdrnpu_dev instance N"
-    participant RDR as rpmsg_driver
-    participant DC as Driver core
+    participant RPROC as remoteproc (R5F)
+    participant RPMSG as rpmsg core
+    participant RDR as amdrnpu rpmsg_driver
+    participant DEV as amdrnpu_dev
+    participant MISC as miscdevice core
 
-    Note over DTS,TDEV: For each amd,amdrnpu node N
-    DTS->>PR: bind amdrnpu slot N
-    PR->>TDEV: alloc, parse banks,<br/>register DRM
-    PR->>PR: platform_set_drvdata(pdev, tdev)
+    RPROC->>RPMSG: firmware boots, announces channel "amdrnpu"
+    RPMSG->>RDR: probe(rpdev)
+    RDR->>DEV: kzalloc, kref_init,<br/>cmd_init, rpdev = rpdev
+    RDR->>DEV: dev_name = "amdrnpu.<idx>"
+    RDR->>MISC: misc_register(MISC_DYNAMIC_MINOR)
+    MISC-->>RDR: /dev/amdrnpu.<idx>
+    RDR->>DEV: rproc_dev = first DT ancestor of rpdev<br/>(get_device)
+    RDR->>RPMSG: dev_set_drvdata(rpdev, dev)
 
-    Note over RDR: Independently...
-    RDR->>RDR: rpmsg channel "amdrnpu"<br/>advertised by some RPU
-    RDR->>RDR: walk rpdev->parent chain<br/>-> rproc DT node
-    RDR->>RDR: for_each_compatible_node<br/>match amd,remoteproc phandle
-    RDR->>RDR: of_find_device_by_node<br/>-> platform_device
-    alt drvdata == NULL
-        RDR-->>DC: return -EPROBE_DEFER
-        DC-->>RDR: retry later
-    else drvdata == tdev
-        RDR->>DC: device_link_add(rpdev, tdev->dev,<br/>AUTOREMOVE_CONSUMER)
-        RDR->>TDEV: tdev->rpdev = rpdev<br/>dev_set_drvdata(rpdev, tdev)
-    end
+    Note over DEV: node openable; commands flow once channel is live
 
-    Note over TDEV: Buffers usable once platform probe completes
-    Note over TDEV: Command submission returns -ENOTCONN until rpmsg binds
-
-    Note over DTS,DC: ---------- Unbind path ----------
-    DC->>RDR: rpmsg_remove(rpdev)<br/>(forced first by device_link)
-    RDR->>TDEV: clear tdev->rpdev,<br/>clear rpdev drvdata
-    DC->>PR: platform_remove(pdev)<br/>(safe: rpdev already gone)
+    Note over RPMSG,MISC: ---------- unbind path ----------
+    RPMSG->>RDR: remove(rpdev)
+    RDR->>MISC: misc_deregister
+    RDR->>DEV: rpdev = NULL (under rpmsg_lock)
+    RDR->>DEV: drain in-flight cmds with -ENOTCONN
+    RDR->>DEV: amdrnpu_dev_put (drop binding's ref)
 ```
 
-In the fast path, `amdrnpu_rpmsg_cb()` recovers the owning `amdrnpu_dev`
-with one `dev_get_drvdata(&rpdev->dev)` call - no lock, no list walk
-per message.
+In the fast path, `amdrnpu_rpmsg_cb()` recovers the owning
+`amdrnpu_dev` with one `dev_get_drvdata(&rpdev->dev)` call — no lock, no
+list walk per message.
 
-Either half can come up first per-instance:
+### Reference counting
 
-- **Platform first** (typical): buffers usable immediately. The rpmsg
-  channel attaches whenever the RPU firmware boots and announces it.
-- **Rpmsg first**: rpmsg probe returns `-EPROBE_DEFER`; the driver
-  core re-runs it once the matching platform device finishes probing.
-
-This decoupling matters because remoteproc may be loaded long after
-the kernel boots and userspace has already opened the device.
+`struct amdrnpu_dev` is `kref`-counted. The rpmsg binding holds one
+reference for as long as the channel is bound; each open file
+descriptor holds an additional reference. The device is freed (and the
+remoteproc device reference released) only when the last reference
+drops, so an open fd keeps the object valid across an rpmsg unbind —
+subsequent ioctls simply fail once `rpdev` is `NULL`.
 
 ---
 
-## 4. Memory bank layout
+## 4. DMA domains
 
-The driver requires exactly two memory banks, modelled as DT child
-nodes of the parent:
+Imported buffers are attached to one of two devices, selected by the
+`flags` field of `struct amdrnpu_buf_import`:
 
-```mermaid
-flowchart LR
-    subgraph DT["Device tree"]
-        PARENT["amdrnpu<br/>compatible = amd,amdrnpu<br/>#address-cells=1, #size-cells=0"]
-        BANK0["bank@0<br/>compatible = amd,amdrnpu-bank<br/>reg = 0 (AMDRNPU_BANK_RPU / AMDRNPU_MEMORY_RPU)<br/>memory-region = shared_rpu_pool"]
-        BANK1["bank@1<br/>compatible = amd,amdrnpu-bank<br/>reg = 1 (AMDRNPU_BANK_DEV / AMDRNPU_MEMORY_DEVICE)<br/>memory-region = shared_dev_pool"]
-        PARENT --> BANK0
-        PARENT --> BANK1
-    end
+| `flags` | Attach device | Emitted DMA address |
+|---------|---------------|---------------------|
+| `AMDRNPU_BUF_IMPORT_DEVICE` (`0`, default) | the misc device (`mdev.this_device`) | accelerator/device view |
+| `AMDRNPU_BUF_IMPORT_FW` (`1<<0`) | the remoteproc device (`rproc_dev`) | the address the RPU dereferences |
 
-    subgraph KERN["Kernel"]
-        TDEV["amdrnpu_dev"]
-        BD0["banks AMDRNPU_BANK_RPU<br/>struct device, 32-bit dma_mask,<br/>reserved-mem = shared_rpu_pool"]
-        BD1["banks AMDRNPU_BANK_DEV<br/>struct device, 64-bit dma_mask,<br/>reserved-mem = shared_dev_pool"]
-        TDEV --> BD0
-        TDEV --> BD1
-    end
+The misc device carries a 64-bit DMA mask
+(`dma_coerce_mask_and_coherent(DMA_BIT_MASK(64))`) so device-domain
+buffers above 4 GiB are not bounced. The firmware domain uses the
+remoteproc platform device, discovered by walking up the rpmsg
+channel's parent chain to the first ancestor with a device-tree node:
 
-    BANK0 -. devm_of_platform_populate<br/>+ bank platform_driver .-> BD0
-    BANK1 -. devm_of_platform_populate<br/>+ bank platform_driver .-> BD1
+```c
+static struct device *amdrnpu_rproc_dev(struct rpmsg_device *rpdev)
+{
+	struct device *dev;
+
+	for (dev = rpdev->dev.parent; dev; dev = dev->parent)
+		if (dev_of_node(dev))
+			return dev;
+	return NULL;
+}
 ```
 
-Why per-bank platform devices? Native GEM allocations call
-`dma_alloc_noncoherent(bank->dev, ...)` and **`AMDRNPU_BUF_SYNC`** for cache
-maintenance (see `drivers/accel/tessai-agent/amdrnpu_drm.c`).
-Each bank has its own `struct device` so:
+If no such ancestor exists (non-DT platforms), FW-domain imports return
+`-ENODEV`.
 
-1. The dma-mask is honoured per allocation. The RPU bank refuses
-   addresses above 4 GiB; the dev bank goes up to its full 64-bit
-   window.
-2. The reserved-memory carve-out attached via
-   `of_reserved_mem_device_init_by_idx()` is local to that bank, so the
-   two pools never bleed into each other.
-3. dma-buf imports re-attach the imported `dma_buf_attachment` to the
-   bank's device, so the kernel re-maps the SG list within the bank's
-   addressable window when needed.
-
-`enum amdrnpu_memory_type` selects the bank for `AMDRNPU_BUF_ALLOC`:
-
-| Value | Name | Bank |
-|-------|------|------|
-| `0` | `AMDRNPU_MEMORY_RPU` | RPU (`bank@0`, `AMDRNPU_BANK_RPU`) 32-bit pool |
-| `1` | `AMDRNPU_MEMORY_DEVICE` (`AMDRNPU_MEMORY_DEFAULT`) | Dev (`bank@1`, `AMDRNPU_BANK_DEV`) 64-bit pool (default) |
-
-PRIME imports attach to the dev bank device in `amdrnpu_gem_prime_import_sg_table()`.
-
-`AMDRNPU_MEMORY_DEFAULT` expands to `AMDRNPU_MEMORY_DEVICE`, so callers using the macro get the dev bank without naming the constant explicitly.
-
-If userspace passes `memory_type = AMDRNPU_MEMORY_DEVICE` (including via `AMDRNPU_MEMORY_DEFAULT`), the driver uses the dev bank.
+Because the driver only *imports* dma-bufs, it never allocates backing
+memory and never performs cache maintenance. The heap the userspace
+buffer came from determines its physical placement and reachability;
+for RPU-visible buffers, userspace must allocate from an RPU-reachable,
+physically contiguous pool.
 
 ---
 
 ## 5. Userspace surface
 
-The driver presents itself as a DRM render node
-(`/dev/dri/renderD<N>`). Userspace gets:
+The driver presents itself as a miscdevice (`/dev/amdrnpu.N`). Userspace
+gets:
 
-- **Per-process handle space.** GEM handles (`drm_handle`) from
-  `AMDRNPU_BUF_ALLOC` and PRIME import are scoped to the open `drm_file`.
-- **mmap.** `mmap(drm_fd, size, ..., offset)` with the offset returned
-  by `DRM_IOCTL_GEM_MMAP` (the standard DRM mmap dance). The driver's
-  GEM `mmap` op forwards to `dma_mmap_pages()` (native) or the exporter
-  (imports). Native buffers require explicit **`AMDRNPU_BUF_SYNC`** around
-  device DMA.
-- **dma-buf interop.** Standard `DRM_IOCTL_PRIME_HANDLE_TO_FD` and
-  `DRM_IOCTL_PRIME_FD_TO_HANDLE` on the render node; imports attach to
-  the dev bank.
-- **Sync waits.** `AMDRNPU_CMD_SUBMIT` returns a `sync_handle` in
-  `struct amdrnpu_cmd_submit`; userspace waits with
-  `DRM_IOCTL_SYNCOBJ_WAIT` (or `HANDLE_TO_FD` + `poll()`/`epoll()`) and
-  uses `DRM_IOCTL_SYNCOBJ_QUERY` / sync_file probes for fence status.
-  Convenience wrappers live in **`libamdrnpu`** (see [`lib-userspace-flow.md`](lib-userspace-flow.md)).
-- **DRM syncobj (binary only).** `DRIVER_SYNCOBJ` is advertised; the
-  driver does not enable `DRIVER_SYNCOBJ_TIMELINE`. Returned completion
-  handles are single-fence (binary) syncobjs; userspace can still combine
-  waits with other DRM devices in multi-handle waits where the API allows.
-- **Unknown response types.** RPMsg payloads whose `command_rsp_type` is not
-  one of the terminal `AMDRNPU_RSP_*` enums handled in
-  `amdrnpu_cmd_dispatch_response()` are ignored at log level.
+- **Three ioctls** (magic `'R'`, ABI v1):
+  - **`AMDRNPU_BUF_IMPORT`** — import a dma-buf fd, returns a per-file
+    `handle`.
+  - **`AMDRNPU_BUF_DESTROY`** — release a `handle`.
+  - **`AMDRNPU_CMD_SUBMIT`** — submit a command; returns a `sync_handle`
+    (a `sync_file` fd).
+- **Per-file handle space.** Buffer handles from `AMDRNPU_BUF_IMPORT`
+  are scoped to the open file (`struct amdrnpu_client.buf_xa`) and freed
+  on `close()`.
+- **CPU mapping and cache sync happen on the dma-buf**, not the device
+  node: `mmap(2)` and `DMA_BUF_IOCTL_SYNC` on the dma-buf fd. The
+  library hides this behind `amdrnpu_buf_mmap()` / `amdrnpu_buf_sync()`.
+- **Completion via sync_file.** `AMDRNPU_CMD_SUBMIT` returns a
+  `sync_file` fd in `sync_handle`; userspace waits with `poll(2)` for
+  `POLLIN`, or via the `amdrnpu_syncobj_*` wrappers in **`libamdrnpu`**
+  (see [`lib-userspace-flow.md`](lib-userspace-flow.md)). The fence
+  error (if any) is read via `SYNC_IOC_FILE_INFO`.
+- **Unknown response types.** RPMsg payloads whose `command_rsp_type`
+  is outside the known `AMDRNPU_RSP_*` range are logged and complete the
+  command with `-EREMOTEIO`.
 
 ---
 
 ## 6. Code reference
 
-The most relevant entry points:
+The central per-channel state:
 
 ```c
 struct amdrnpu_dev {
-	struct drm_device	drm;
-	struct device		*dev;
-
-	struct amdrnpu_bank	banks[AMDRNPU_NUM_BANKS];
+	struct kref		refcount;
+	struct miscdevice	mdev;
+	struct device		*dev;		/* mdev.this_device; for logging */
+	struct device		*rproc_dev;	/* FW-buffer DMA domain */
 
 	struct rpmsg_device	*rpdev;
-	struct mutex		rpmsg_lock;
+	struct mutex		rpmsg_lock;	/* rpmsg send path */
 
-	struct mutex		cmd_lock;
-	struct xarray		cmd_xa;
-	u32			cmd_xa_next;
+	struct mutex		cmd_lock;	/* cmd_xa alloc/erase */
+	struct xarray		cmd_xa;		/* in-flight cmds; xa_alloc_cyclic */
+	u32			cmd_xa_next;	/* cyclic cursor */
 	atomic_t		fence_seqno;
 	u64			fence_context;
+
+	char			dev_name[32];
 };
 ```
 
-The platform probe assembles all of the above:
+The rpmsg probe assembles all of the above — see
+**`amdrnpu_rpmsg_probe()`** in
+[`drivers/rpmsg/amdrnpu/amdrnpu_rpmsg.c`](../drivers/rpmsg/amdrnpu/amdrnpu_rpmsg.c):
 
-See **`amdrnpu_platform_probe()`** in
-[`drivers/accel/tessai-agent/amdrnpu_drv.c`](../drivers/accel/tessai-agent/amdrnpu_drv.c)
-for the actual sequence:
-
-1. Parse `amd,remoteproc`.
-2. Allocate `amdrnpu_dev` (devm DRM).
-3. Init command lifecycle.
-4. **`platform_set_drvdata(pdev, tdev)`** — bank probes need this.
-5. **`devm_of_platform_populate(dev)`** — triggers synchronous bank probes
-   for both `bank@0` and `bank@1` (single shared compatible
-   `amd,amdrnpu-bank`; role taken from `reg`).
-6. **`amdrnpu_bank_check_all_present(tdev)`** verifies both slots are populated.
-7. **`amdrnpu_drm_register(tdev)`** publishes the render node.
+1. Allocate `amdrnpu_dev`, `kref_init`, init the command bookkeeping.
+2. Record `rpdev` and assign `dev_name = "amdrnpu.<idx>"`.
+3. **`amdrnpu_chardev_register()`** — `misc_register()`, publish
+   `/dev/amdrnpu.<idx>`, set the 64-bit DMA mask.
+4. Resolve and pin `rproc_dev` (the FW DMA domain).
+5. `dev_set_drvdata(rpdev, rnpu)` so the callback can find the device.
 
 ---
 
 ## 7. See also
 
-- [`commands.md`](commands.md) — command submission, the two-state
-  lifecycle, and the rotating fence behind every command's syncobj.
-- [`buffer-management.md`](buffer-management.md) — buffer allocation,
-  import, export, mmap and lifetime details.
+- [`commands.md`](commands.md) — command submission, the async
+  many-in-flight lifecycle, and the per-command `sync_file`.
+- [`buffer-management.md`](buffer-management.md) — dma-buf import,
+  handle scoping, and in-flight command pins.
+- [`devicetree-binding.md`](devicetree-binding.md) — how the rpmsg
+  channel and buffer heaps are wired into device tree.

@@ -1,11 +1,18 @@
 # amdrnpu
 
-A small Linux **DRM render-node driver** + **userspace runtime library** that
-brokers buffer allocation and command submission between application code on
-the APU and firmware running on a remote Cortex-R52 (RPU) over RPMsg. The
-driver exposes the standard DRM ioctl surface (GEM, dumb buffers, syncobj,
-PRIME) plus two custom ioctls under the `'R'` magic; the library is a thin
-wrapper around them.
+A small Linux **rpmsg char-device driver** + **userspace runtime library** that
+brokers buffer sharing and command submission between application code on the
+APU and firmware running on a remote Cortex-R52 (RPU) over RPMsg. The driver is
+a `miscdevice` that exposes a char node (`/dev/amdrnpu.N`) with a tiny custom
+ioctl surface under the `'R'` magic (buffer import/destroy + command submit);
+completion is reported as a poll(2)-able `sync_file` fd. The library is a thin
+wrapper around that surface.
+
+> **Not a DRM driver.** Earlier revisions were a DRM render-node driver (GEM /
+> dumb buffers / syncobj / PRIME on `/dev/dri/*`). That model has been replaced
+> by the rpmsg char device described here: buffers are plain dma-buf objects
+> imported from a dma-buf heap, and completion uses `sync_file` instead of
+> `drm_syncobj`.
 
 Designed to be built either standalone (out-of-tree against any kernel
 checkout) or via Yocto using the included `meta-amdrnpu` layer.
@@ -14,12 +21,11 @@ checkout) or via Yocto using the included `meta-amdrnpu` layer.
 
 ```
 tessai-agent/
-├── drivers/accel/tessai-agent/      # out-of-tree kernel module (DRM accel subsystem)
-│   ├── amdrnpu_drv.c           # platform driver, probe / DT bind, drm_dev_alloc
-│   ├── amdrnpu_drm.c           # DRM driver ops, ioctl table, GEM/dumb hooks
-│   ├── amdrnpu_bank.c          # per-bank carveout (reserved-memory) device
-│   ├── amdrnpu_cmd.{c,h}       # CMD_SUBMIT lifecycle, syncobj/fence wiring
-│   ├── amdrnpu_rpmsg.c         # RPMsg endpoint + wire packing/unpacking
+├── drivers/rpmsg/amdrnpu/           # out-of-tree kernel module (rpmsg char device)
+│   ├── amdrnpu_drv.c           # miscdevice (/dev/amdrnpu.N), file ops, module init
+│   ├── amdrnpu_rpmsg.c         # rpmsg_driver: probe/remove/callback + wire send
+│   ├── amdrnpu_buf.c           # BUF_IMPORT/BUF_DESTROY: dma-buf attach + arg address resolution
+│   ├── amdrnpu_cmd.{c,h}       # CMD_SUBMIT lifecycle, dma_fence + sync_file completion
 │   ├── amdrnpu_internal.h
 │   ├── Kbuild
 │   └── Makefile
@@ -29,7 +35,7 @@ tessai-agent/
 │   ├── CMakeLists.txt
 │   ├── include/amdrnpu/amdrnpu_lib.h
 │   ├── src/amdrnpu_lib.c
-│   ├── examples/amdrnpu_test.c # CLI exercising every UAPI op
+│   ├── examples/                     # example programs (amdrnpu_test CLI, etc.)
 │   └── cmake/                        # pkg-config + CMake config templates
 ├── docs/                             # design documentation (Mermaid diagrams)
 │   ├── architecture.md
@@ -38,8 +44,6 @@ tessai-agent/
 │   ├── commands.md
 │   ├── lib-userspace-flow.md
 │   └── README.md
-├── Documentation/devicetree/bindings/accel/
-│   └── amd,amdrnpu.yaml         # machine-checkable DT schema
 ├── build/                            # build orchestrator (see "Building" below)
 │   ├── build.sh                      # native / -cross-vitis / -cross-yocto
 │   └── strip-dirty-vermagic.py       # post-process helper invoked by build.sh
@@ -56,27 +60,30 @@ and the user-space library include it directly.
 
 ## UAPI at a glance
 
-Two custom ioctls under magic `'R'`:
+Three custom ioctls under magic `'R'`:
 
 | Ioctl | Purpose |
 |---|---|
-| `AMDRNPU_BUF_ALLOC`  | Allocate a GEM-backed BO from one of the device's reserved-memory **banks** (`AMDRNPU_MEMORY_RPU` for the RPU-reachable 512 MiB `linux,cma-default` pool, `AMDRNPU_MEMORY_DEVICE` for the 4 GiB high-DDR pool — see [`docs/devicetree-binding.md` §4](docs/devicetree-binding.md#4-reserved-memory-companion-nodes) for the official Versal-net layout and sharing semantics). Returns a DRM handle that can be `MAP_DUMB`-ed and `mmap`-ed. |
-| `AMDRNPU_CMD_SUBMIT` | Submit a command to the RPU side. Args are an array of `struct amdrnpu_arg` entries; each is either a scalar QWORD or a GEM-slice descriptor `(drm_buffer_handle, offset)` that the driver resolves to an RPU-side physical address. Returns a `drm_syncobj` handle the caller waits on for completion. |
+| `AMDRNPU_BUF_IMPORT`  | Import an external **dma-buf** (typically allocated by userspace from a dma-buf heap such as `/dev/dma_heap/reserved`) for use as a command-buffer argument. `flags` selects the DMA domain — `AMDRNPU_BUF_IMPORT_DEVICE` (the accelerator) or `AMDRNPU_BUF_IMPORT_FW` (the RPU/firmware remoteproc device, so the emitted address is the one the RPU dereferences). Returns an opaque `handle`. |
+| `AMDRNPU_BUF_DESTROY` | Release an imported buffer `handle`. If an in-flight command still references it, the underlying attachment lives until that command completes. |
+| `AMDRNPU_CMD_SUBMIT`  | Submit a command to the RPU. Args are an array of `struct amdrnpu_arg` entries; each is either a scalar QWORD (`size == 0`) or a buffer slice `(buffer_handle, offset)` (`size != 0`) that the driver resolves to an RPU-side DMA address. On success `sync_handle` is a **`sync_file` fd** the caller `poll()`s (`POLLIN`) or waits on for completion. |
 
-Standard DRM ioctls (GEM, dumb buffer, syncobj, PRIME) are reachable on the
-same render-node file via the normal DRM core path.
+There is no DRM surface. CPU mapping (`mmap(2)`) and cache maintenance
+(`DMA_BUF_IOCTL_SYNC`) are performed on the buffer's dma-buf fd directly; the
+library wraps allocation-from-heap, import, mmap, and sync so callers don't have
+to.
 
 ## Building
 
 For local development use the top-level orchestrator at
 [`build/build.sh`](build/build.sh). One invocation builds the kernel
-module, the userspace library, and the `amdrnpu_test` CLI into a
-clean out-of-source tree, leaving `drivers/accel/tessai-agent/` and
+module, the userspace library, and the example programs into a
+clean out-of-source tree, leaving `drivers/rpmsg/amdrnpu/` and
 `lib/` pristine.
 
 ```sh
 # Native (default): build all three against the running kernel.
-# Requires linux-headers-$(uname -r) and libdrm-dev on the host.
+# Requires linux-headers-$(uname -r) on the host.
 build/build.sh
 
 # aarch64 cross-build using a full Yocto build tree at PATH.
@@ -85,8 +92,7 @@ build/build.sh
 build/build.sh -cross-yocto /path/to/yocto/build
 
 # aarch64 cross-build using the Vitis-shipped toolchain and a manually
-# prepared Xilinx kernel tree (no Yocto). PATH is an aarch64 sysroot
-# that has usr/lib/pkgconfig/libdrm.pc.
+# prepared Xilinx kernel tree (no Yocto). PATH is an aarch64 sysroot.
 build/build.sh -cross-vitis -sysroot /path/to/aarch64/sysroot
 
 # Wipe build/Release/ and build/Release-aarch64/.
@@ -99,13 +105,13 @@ Outputs (per invocation):
 |---|---|
 | `build/<TYPE>/driver/amdrnpu.ko` | kernel module |
 | `build/<TYPE>/lib/libamdrnpu.so*` | shared lib (+ `.a` static) |
-| `build/<TYPE>/bin/amdrnpu_test` | CLI |
+| `build/<TYPE>/bin/amdrnpu_test` | example CLI |
 
 where `<TYPE>` is `Release` for native and `Release-aarch64` for either
-cross mode. Loading the `.ko` on a target with a matching
-`compatible = "amd,amdrnpu"` device-tree node creates a DRM render
-node (typically `/dev/dri/renderD128` if no other DRM driver is
-present, or whichever node `amdrnpu_test device` reports).
+cross mode. The module has no device-tree binding of its own: loading the
+`.ko` registers an rpmsg driver, and a `miscdevice` char node at
+`/dev/amdrnpu.N` appears once RPU firmware advertises the `amdrnpu` RPMsg
+channel and the driver binds to it.
 
 CMake options forwarded to the lib build:
 
@@ -113,12 +119,16 @@ CMake options forwarded to the lib build:
 |---|---|---|
 | `AMDRNPU_LIB_BUILD_SHARED`   | `ON` | build `libamdrnpu.so` |
 | `AMDRNPU_LIB_BUILD_STATIC`   | `ON` | build `libamdrnpu.a` |
-| `AMDRNPU_LIB_BUILD_EXAMPLES` | `ON` | build the `amdrnpu_test` CLI |
+| `AMDRNPU_LIB_BUILD_EXAMPLES` | `ON` | build the example programs |
 | `AMDRNPU_UAPI_DIR`           | `<repo>/include/uapi` | path to the shared UAPI headers |
 
-The library depends on `libdrm` for syncobj / sync_file ioctls and
-`struct drm_gem_close`. Downstream projects can consume it via either
-CMake (`find_package(amdrnpu)`) or pkg-config
+The runtime library uses **no libdrm** — buffers are dma-buf objects and
+completion is a `sync_file` fd, so it talks to the char device and the
+dma-buf / dma-heap / sync_file interfaces directly. There is no external
+library dependency for the build.
+
+Downstream projects can consume the library via either CMake
+(`find_package(amdrnpu)`) or pkg-config
 (`pkg-config --cflags --libs amdrnpu`).
 
 Run `build/build.sh -help` for the full flag surface (toolchain path,
@@ -127,18 +137,18 @@ KDIR override, Yocto machine override, `-localversion` injection,
 
 ### Fallback: raw kbuild / Yocto-internal
 
-The kernel-module Makefile in `drivers/accel/tessai-agent/` is still
+The kernel-module Makefile in `drivers/rpmsg/amdrnpu/` is still
 usable directly. `meta-amdrnpu/recipes-kernel/amdrnpu-mod_0.1.0.bb`
 relies on it via Yocto's `module.bbclass`; the same invocation also works
 as a manual fallback:
 
 ```sh
-make -C drivers/accel/tessai-agent KDIR=/lib/modules/$(uname -r)/build
-make -C drivers/accel/tessai-agent KDIR=... ARCH=arm64 \
+make -C drivers/rpmsg/amdrnpu KDIR=/lib/modules/$(uname -r)/build
+make -C drivers/rpmsg/amdrnpu KDIR=... ARCH=arm64 \
      CROSS_COMPILE=aarch64-linux-gnu-
-make -C drivers/accel/tessai-agent KDIR=... INSTALL_MOD_PATH=/tmp/rootfs \
+make -C drivers/rpmsg/amdrnpu KDIR=... INSTALL_MOD_PATH=/tmp/rootfs \
      modules_install
-make -C drivers/accel/tessai-agent KDIR=... clean
+make -C drivers/rpmsg/amdrnpu KDIR=... clean
 ```
 
 `KERNEL_SRC` is accepted as a synonym for `KDIR` so the same Makefile
@@ -174,63 +184,54 @@ See [`meta-amdrnpu/README.md`](meta-amdrnpu/README.md) for more.
 
 ## Runtime usage
 
-The lib mirrors the UAPI 1:1. A minimal end-to-end (alloc → submit → wait →
+The lib mirrors the UAPI. A minimal end-to-end (open → alloc → submit → wait →
 close) looks like:
 
 ```c
 #include <amdrnpu/amdrnpu_lib.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #define OP_CODE_CMD0  0x00000001u
-#define INPUT_BO      1ull
-#define OUTPUT_BO     2ull
 #define SZ_16M        (16u * 1024u * 1024u)
 #define SZ_8M         (8u * 1024u * 1024u)
 
-int fd = amdrnpu_open_render_node();
-uint32_t bo0_hd, bo1_hd;
-struct amdrnpu_arg args[6];
+int fd = open("/dev/amdrnpu.0", O_RDWR | O_CLOEXEC);
+
+uint32_t in_bo, out_bo;
 struct amdrnpu_cmd_submit hdr;
 int32_t status = 0;
 
-amdrnpu_buf_alloc(fd, AMDRNPU_MEMORY_DEVICE, SZ_16M, &bo0_hd);
-amdrnpu_buf_alloc(fd, AMDRNPU_MEMORY_DEVICE, SZ_8M, &bo1_hd);
+/* buf_alloc allocates from the matching dma-buf heap AND imports the
+ * buffer in one step, returning a handle for use in amdrnpu_arg.bo. */
+amdrnpu_buf_alloc(fd, AMDRNPU_MEMORY_DEVICE, SZ_16M, &in_bo);
+amdrnpu_buf_alloc(fd, AMDRNPU_MEMORY_DEVICE, SZ_8M, &out_bo);
 
-args[0] = (struct amdrnpu_arg){ .size = 0, .value = INPUT_BO };
-args[1] = (struct amdrnpu_arg){ .size = 0, .value = SZ_16M };
-args[2] = (struct amdrnpu_arg){
-	.size = SZ_16M,
-	.bo = { .drm_buffer_handle = (__s32)bo0_hd, .offset = 0 },
-};
-args[3] = (struct amdrnpu_arg){ .size = 0, .value = OUTPUT_BO };
-args[4] = (struct amdrnpu_arg){ .size = 0, .value = SZ_8M };
-args[5] = (struct amdrnpu_arg){
-	.size = SZ_8M,
-	.bo = { .drm_buffer_handle = (__s32)bo1_hd, .offset = 0 },
+struct amdrnpu_arg args[] = {
+	{ .size = 0,     .value = SZ_16M },
+	{ .size = SZ_16M, .bo = { .buffer_handle = (int32_t)in_bo,  .offset = 0 } },
+	{ .size = 0,     .value = SZ_8M  },
+	{ .size = SZ_8M,  .bo = { .buffer_handle = (int32_t)out_bo, .offset = 0 } },
 };
 
-amdrnpu_cmd_submit(fd, OP_CODE_CMD0, args, 6, &hdr, sizeof(hdr));
-amdrnpu_syncobj_wait_complete(fd, hdr.sync_handle,
-				   2000000000LL, &status);
+amdrnpu_cmd_submit(fd, OP_CODE_CMD0, args, 4, &hdr, sizeof(hdr));
+amdrnpu_syncobj_wait_complete(fd, hdr.sync_handle, 2000000000LL, &status);
+close(hdr.sync_handle);   /* the completion handle is a sync_file fd */
 
-amdrnpu_buf_close(fd, bo0_hd);
-amdrnpu_buf_close(fd, bo1_hd);
+amdrnpu_buf_close(fd, in_bo);
+amdrnpu_buf_close(fd, out_bo);
 close(fd);
 ```
 
-A raw-`ioctl` variant (no library) is documented in
+For the raw-`ioctl` path (no library): allocate a dma-buf from a heap
+(e.g. `/dev/dma_heap/reserved`), `AMDRNPU_BUF_IMPORT` it, build a
+`struct amdrnpu_cmd_submit`, `ioctl(fd, AMDRNPU_CMD_SUBMIT, ...)`, then
+`poll()` the returned `sync_handle`. The full ABI is documented in
 [`include/uapi/amdrnpu/amdrnpu.h`](include/uapi/amdrnpu/amdrnpu.h).
 
-The `amdrnpu_test` CLI (built by default with the lib) exercises every
-UAPI op individually plus a `lifecycle` shortcut and a fault-class
-fence-error suite. Run with no args for usage:
-
-```sh
-amdrnpu_test                     # help
-amdrnpu_test device              # report which /dev/dri/* node matches
-amdrnpu_test buf_alloc rpu 4096
-amdrnpu_test lifecycle           # alloc + no-op submit + wait + close
-amdrnpu_test fw_echo 0xCAFE 0xBEEF   # round-trip text writeback via RPU
-```
+The `lib/examples/` programs (the `amdrnpu_test` CLI and friends) exercise the
+UAPI end-to-end and open `/dev/amdrnpu.N` (scanning `/dev/amdrnpu.*` when no
+`--device` is given), as do the library API and the gtest unit-test suite.
 
 See [`docs/lib-userspace-flow.md`](docs/lib-userspace-flow.md) for the
 full library walkthrough and [`docs/commands.md`](docs/commands.md) for
@@ -242,20 +243,20 @@ Start at [`docs/README.md`](docs/README.md) for the documentation map.
 Highlights:
 
 - [`docs/architecture.md`](docs/architecture.md) — system view, in-kernel
-  block diagram, file-by-file responsibilities, dual platform/rpmsg
-  driver registration, per-bank memory layout.
-- [`docs/devicetree-binding.md`](docs/devicetree-binding.md) — prose
-  reference for the `amd,amdrnpu` binding (parent/child schema,
-  reserved-memory companions, single- and multi-RPU examples).
+  block diagram, file-by-file responsibilities, rpmsg binding, the two
+  DMA domains.
+- [`docs/devicetree-binding.md`](docs/devicetree-binding.md) — platform
+  integration: no DT binding of its own; how the rpmsg channel,
+  remoteproc node, and dma-buf heaps are wired in.
 - [`docs/buffer-management.md`](docs/buffer-management.md) — buffer
-  lifecycle, in-flight command pinning, `GEM_CLOSE` semantics.
+  lifecycle, in-flight command pinning, handle release semantics.
 - [`docs/commands.md`](docs/commands.md) — `AMDRNPU_CMD_SUBMIT` wire
-  format, drm_syncobj / dma_fence interaction, fence error propagation.
+  format, `sync_file` / dma_fence interaction, fence error propagation.
 - [`docs/lib-userspace-flow.md`](docs/lib-userspace-flow.md) — full
   library API walkthrough.
 
 ## License
 
 - Kernel module: GPL-2.0-only (see SPDX headers in
-  `drivers/accel/tessai-agent/`).
+  `drivers/rpmsg/amdrnpu/`).
 - User-space library and meta-layer: MIT (see [`LICENSE`](LICENSE)).
