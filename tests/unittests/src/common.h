@@ -2,18 +2,18 @@
 // Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 //
 // amdrnpu gtest harness: shared helpers + the AmdrnpuTest
-// fixture that opens /dev/dri/cardN once per test, closes in TearDown,
+// fixture that opens /dev/amdrnpu.N once per test, closes in TearDown,
 // and skips cleanly (GTEST_SKIP) when the driver isn't loaded so we
 // don't hard-fail CI runs on dev hosts.
 //
-// Every helper here is libdrm-free: amdrnpu_lib already wraps
-// these ioctls for production users, but the kernel UAPI surface
-// (drm.h, drm_mode.h, sync_file.h, amdrnpu/amdrnpu.h) is
-// what we actually want to test. Calling raw ioctls also keeps the
-// unittest binary cross-buildable against any sysroot that ships
-// kernel UAPI headers -- the same constraint the retired
-// tests/src/amdrnpu_lifecycle.c libdrm-free C smoke binary lived
-// under before this gtest tree took over its role.
+// The suite drives the device through libamdrnpu (amdrnpu_buf_*,
+// amdrnpu_cmd_submit, amdrnpu_syncobj_*): that is the supported
+// userspace entry point for the char-driver UAPI, so the tests
+// exercise the exact code path production consumers use. The do_*
+// wrappers below are thin adapters that keep the per-test call sites
+// small and give each op a single, greppable failure point. Linking
+// libamdrnpu also keeps the suite cross-buildable against any sysroot
+// that ships the amdrnpu UAPI header (include/uapi/amdrnpu/amdrnpu.h).
 
 #ifndef AMDRNPU_TEST_COMMON_H_
 #define AMDRNPU_TEST_COMMON_H_
@@ -29,16 +29,12 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <sched.h>
-#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <time.h>
 #include <unistd.h>
 
-#include <drm/drm.h>
-#include <drm/drm_mode.h>
-#include <linux/sync_file.h>
-
 #include <amdrnpu/amdrnpu.h>
+#include <amdrnpu/amdrnpu_lib.h>
 
 #include "utils.h"  // utest_common
 
@@ -94,7 +90,7 @@ constexpr uint32_t kFwEchoRegionMax = 400u;
 // by explicit memory-region phandle (today: amdrnpu's bank@1).
 //
 // To verify the live layout matches these constants on the board:
-//   ssh root@vek385 'hexdump -e "\" 0x%08x\"\n" \
+//   ssh root@vek385 'hexdump -e "\" 0x%08x\"\n"
 //       /proc/device-tree/reserved-memory/buffer@50000000000/reg'
 // then byte-swap each printed u32 (the printout is native-LE; dt
 // cells are stored BE) and reassemble as
@@ -135,30 +131,24 @@ constexpr uint32_t kFwOpFaultNotSupp   = 0x4E4F5453u;  // 'N','O','T','S'
 constexpr uint32_t kFwOpFaultCancelled = 0x43414E43u;  // 'C','A','N','C'
 constexpr uint32_t kFwOpFaultBadRsp    = 0x42414443u;  // 'B','A','D','C'
 
-// Older kernel UAPI headers may not expose the EXPORT_SYNC_FILE flag
-// even though every kernel that ships the amdrnpu driver does
-// support it. Local fallback keeps the test compilable against the
-// Vitis sysroot's headers.
-#ifndef DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE
-#define DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE (1u << 0)
-#endif
-
 // Per-submit wall-clock cap. Generous enough that even a fully-loaded
 // RPU still completes within bound but tight enough that a hung
 // firmware causes a fast FAIL rather than dragging CI to a halt.
 constexpr uint64_t kSubmitTimeoutNs = 2ull * 1'000'000'000ull;
 
 // ---------------------------------------------------------------------
-// DRM device discovery.
+// Device discovery.
 // ---------------------------------------------------------------------
 
-// Reads DRM_IOCTL_VERSION.name into @out; returns 0 or -errno.
-int drm_get_name(int fd, char *out, size_t out_sz);
+// Iterates /dev/amdrnpu.N entries, returns the first fd opened
+// O_RDWR|O_CLOEXEC. @out_path is populated on success. Returns -1 on
+// failure (caller should GTEST_SKIP).
+int open_amdrnpu_device(char *out_path = nullptr, size_t out_sz = 0);
 
-// Iterates /dev/dri/cardN entries, returns the first fd whose driver
-// name is AMDRNPU_DRIVER_NAME. @out_path is populated on success.
-// Returns -1 on failure (caller should GTEST_SKIP).
-int open_amdrnpu_card(char *out_path = nullptr, size_t out_sz = 0);
+// Cheap fd-liveness probe: 0 if @fd is a valid open descriptor,
+// -errno (e.g. -EBADF after close) otherwise. Used to assert RAII
+// close semantics without leaning on any device ioctl.
+int probe_fd(int fd);
 
 // ---------------------------------------------------------------------
 // Time helpers.
@@ -167,77 +157,86 @@ int open_amdrnpu_card(char *out_path = nullptr, size_t out_sz = 0);
 uint64_t now_ns();
 
 // ---------------------------------------------------------------------
-// Wire-protocol primitives. Each wraps one ioctl directly; the
-// raw-ioctl style (rather than going through libamdrnpu) is
-// what lets the suite probe negative paths and bound-checks that
-// libamdrnpu guards against on the userspace side.
+// Wire-protocol primitives. Each wraps one libamdrnpu call so the
+// per-test call sites stay small and every op has a single failure
+// point. Return convention: 0 on success, negative errno on failure.
 // ---------------------------------------------------------------------
 
-// AMDRNPU_CMD_SUBMIT. @args may be null when @num_args == 0. Returns 0
-// on success and writes the kernel-allocated syncobj handle.
+// amdrnpu_cmd_submit(). @args may be null when @num_args == 0. Returns
+// 0 on success and writes the completion sync_file fd into @out_handle
+// (the rest of the suite treats it as an opaque "syncobj" handle).
 int do_cmd_submit(int fd, uint32_t command_op,
 		  const struct amdrnpu_arg *args, uint32_t num_args,
 		  uint32_t *out_handle);
 
-// DRM_IOCTL_SYNCOBJ_WAIT with @timeout_ns from now. Does NOT destroy
-// the syncobj (caller manages lifecycle).
+// amdrnpu_syncobj_wait_complete() with @timeout_ns. Returns 0 once the
+// fence is signalled (including signalled-with-error -- callers inspect
+// status separately), -ETIMEDOUT on deadline, negative errno on error.
+// Does NOT close the handle (caller manages lifecycle).
 int do_syncobj_wait(int fd, uint32_t handle, uint64_t timeout_ns);
 
-// DRM_IOCTL_SYNCOBJ_DESTROY.
+// Release a completion handle (close the sync_file fd).
 int do_syncobj_destroy(int fd, uint32_t handle);
 
-// AMDRNPU_BUF_ALLOC.
+// amdrnpu_buf_alloc(). Writes the driver's per-file import handle.
 int do_buf_alloc(int fd, uint32_t mtype, uint64_t size, uint32_t *out_handle);
 
-// DRM_IOCTL_GEM_CLOSE.
+// amdrnpu_buf_close() -- drops the import handle for @handle.
 int do_gem_close(int fd, uint32_t handle);
 
-// DRM_IOCTL_MODE_MAP_DUMB -- gets the mmap offset for @handle.
-int do_map_dumb(int fd, uint32_t handle, uint64_t *out_offset);
+// amdrnpu_buf_mmap() -- maps the whole BO for @handle R/W SHARED and
+// writes the mapping into @out_map. Pair with do_buf_munmap().
+int do_buf_mmap(int fd, uint32_t handle, uint64_t size, void **out_map);
 
-// AMDRNPU_BUF_SYNC. length=0 means "@offset..end".
+// amdrnpu_buf_munmap() -- undo do_buf_mmap().
+void do_buf_munmap(void *addr, uint64_t length);
+
+// amdrnpu_buf_sync(). @offset/@length are reserved (the underlying
+// DMA_BUF_IOCTL_SYNC is whole-buffer) and kept only so call sites read
+// intent-first.
 int do_buf_sync(int fd, uint32_t handle, uint32_t direction,
 		uint64_t offset, uint64_t length);
 
-// DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD + EXPORT_SYNC_FILE. Caller owns @out_sf_fd.
+// amdrnpu_syncobj_to_fence_fd() -- dups the completion fd. Caller owns
+// @out_sf_fd.
 int do_syncobj_to_fence_fd(int fd, uint32_t handle, int *out_sf_fd);
 
-// Non-blocking fence_status: exports a sync_file fd, asks
-// SYNC_IOC_FILE_INFO, closes. status semantics:
+// Non-blocking fence status via amdrnpu_syncobj_fence_status():
 //   >0 signaled-ok (typically 1)
 //   =0 still pending
 //   <0 dma_fence error (e.g. -EREMOTEIO)
 int do_syncobj_fence_status(int fd, uint32_t handle, int32_t *out_status);
 
-// Loop fence_status until terminal or @max_wall_ns elapses. Sleeps
-// @interval_ns between probes; 0 means sched_yield(). Does NOT destroy
-// (subtests inspect status after this returns).
+// amdrnpu_syncobj_wait_busy_poll(). NOTE: this API is OBSOLETE and
+// delegates to wait_complete (there is no way to query command status
+// ahead of the response message); the @interval_ns arg is accepted for
+// source compatibility but ignored. Does NOT close the handle.
 int do_syncobj_busy_poll(int fd, uint32_t handle,
 			 uint64_t max_wall_ns, uint64_t interval_ns,
 			 int32_t *out_status);
 
 // ---------------------------------------------------------------------
 // EL0 userspace dcache invalidate -- only for the inflight-pin subtest
-// where the GEM handle was already GEM_CLOSE'd before the syncobj
-// signaled, so AMDRNPU_BUF_SYNC is unreachable. No-op on non-arm64.
+// where the import handle was already closed before the fence
+// signaled, so amdrnpu_buf_sync() is unreachable. No-op on non-arm64.
 // ---------------------------------------------------------------------
 void uspace_dcache_invalidate(const void *vaddr, size_t length);
 
 // ---------------------------------------------------------------------
-// gtest fixture: opens the amdrnpu DRM card, skips if missing.
+// gtest fixture: opens the amdrnpu char device, skips if missing.
 //
-// Inherit from this fixture in any TEST_F that needs an open card fd.
+// Inherit from this fixture in any TEST_F that needs an open device fd.
 // Pure-discovery / negative tests that want to probe without a working
-// device can use raw TEST() + open_amdrnpu_card() directly.
+// device can use raw TEST() + open_amdrnpu_device() directly.
 // ---------------------------------------------------------------------
 class AmdrnpuTest : public ::testing::Test {
 protected:
 	void SetUp() override
 	{
 		char path[PATH_MAX] = {};
-		fd_ = open_amdrnpu_card(path, sizeof(path));
+		fd_ = open_amdrnpu_device(path, sizeof(path));
 		if (fd_ < 0)
-			GTEST_SKIP() << "amdrnpu DRM card not found; "
+			GTEST_SKIP() << "no /dev/amdrnpu.N found; "
 				     << "is amdrnpu.ko loaded and the "
 				     << "rpmsg channel bound?";
 		card_path_ = path;

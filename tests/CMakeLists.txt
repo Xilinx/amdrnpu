@@ -37,12 +37,11 @@
 #   - Negative API tests (no amdrnpu_lifecycle equivalent)
 #     -> AmdrnpuError.*, AmdrnpuDevice.MultipleOpenClose
 #
-# The gtest harness is libdrm-free for the same reason the old smoke
-# binary was: it talks the kernel UAPI surface (drm/drm.h,
-# drm/drm_mode.h, linux/sync_file.h, this repo's
-# amdrnpu/amdrnpu.h) directly, so the suite cross-builds
-# against any sysroot that ships kernel UAPI headers. The only
-# additional requirement vs the old C smoke binary is a C++17
+# The gtest harness drives the device through libamdrnpu (linked into
+# amdrnpu_unittest), which talks the amdrnpu char-device UAPI
+# (amdrnpu/amdrnpu.h) -- no DRM/libdrm headers. So the suite
+# cross-builds against any sysroot that ships the amdrnpu UAPI header.
+# The only additional requirement vs the old C smoke binary is a C++17
 # toolchain (libstdc++ <chrono>, <thread>, <atomic>, <filesystem>),
 # which is why build.sh keeps the unittests gated behind -unit_tests.
 #

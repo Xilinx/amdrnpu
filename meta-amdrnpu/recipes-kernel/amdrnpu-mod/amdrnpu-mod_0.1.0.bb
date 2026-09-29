@@ -1,9 +1,9 @@
-SUMMARY = "AMD amdrnpu out-of-tree DRM/RPMsg kernel module"
-DESCRIPTION = "Platform driver that registers a DRM render node \
-(driver name 'amdrnpu') and an RPMsg endpoint per amd,amdrnpu \
-device-tree node, exposing AMDRNPU_BUF_ALLOC and AMDRNPU_CMD_SUBMIT (magic \
-'R') plus standard DRM syncobj/PRIME/GEM ioctls. Source lives under \
-drivers/accel/tessai-agent in the amdrnpu repository."
+SUMMARY = "AMD amdrnpu out-of-tree rpmsg char-device kernel module"
+DESCRIPTION = "Lightweight rpmsg driver that binds to the 'amdrnpu' RPMsg \
+channel and exposes a miscdevice (/dev/amdrnpu.N) with a small custom ioctl \
+surface (magic 'R'): dma-buf import/destroy and command submit, with \
+completion reported as a sync_file fd. Source lives under \
+drivers/rpmsg/amdrnpu in the amdrnpu repository."
 HOMEPAGE = "https://gitenterprise.xilinx.com/PhysicalAI/tessai-agent"
 SECTION = "kernel/modules"
 
@@ -17,7 +17,7 @@ inherit module externalsrc
 # Build the module straight from the in-tree source. AMDRNPU_SRC is
 # defined in the layer's conf/layer.conf and points at the repository
 # root by default.
-EXTERNALSRC = "${AMDRNPU_SRC}/drivers/accel/tessai-agent"
+EXTERNALSRC = "${AMDRNPU_SRC}/drivers/rpmsg/amdrnpu"
 EXTERNALSRC_BUILD = "${EXTERNALSRC}"
 
 S = "${EXTERNALSRC}"
@@ -29,9 +29,9 @@ EXTRA_OEMAKE += "KDIR=${STAGING_KERNEL_DIR}"
 
 RPROVIDES:${PN} += "kernel-module-amdrnpu"
 
-# amdrnpu.ko probes only when matching device-tree nodes
-# (compatible = "amd,amdrnpu") exist with valid bank carveouts and
-# an amd,remoteproc phandle. Until the platform DT carries those nodes,
-# autoload would just sit idle. Leave autoload off; load manually after
-# DT integration is verified.
+# amdrnpu.ko has no device-tree binding of its own: it registers an rpmsg
+# driver and only creates a /dev/amdrnpu.N node once RPU firmware advertises
+# the "amdrnpu" RPMsg channel and the driver binds to it. Autoloading is
+# harmless (it just waits for a channel), but is left off pending bring-up
+# verification; load manually or enable below.
 # KERNEL_MODULE_AUTOLOAD += "amdrnpu"

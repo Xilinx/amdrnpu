@@ -3,23 +3,23 @@
  * amdrnpu_inout_example - end-to-end in/out buffer test for amdrnpu.
  *
  * Flow:
- *   1. Allocate input and output RPU BOs (AMDRNPU_MEMORY_RPU / bank@0 carveout).
+ *   1. Allocate input and output RPU buffers (AMDRNPU_MEMORY_RPU).
  *   2. mmap + fill input, sync to device.
  *   3. mmap + zero output, sync to device.
  *   4. Submit AMDRNPU_OP_COPY_IN_OUT (firmware copies in -> out).
- *   5. Wait on syncobj, sync output from device, verify bytes match input.
+ *   5. Wait on completion, sync output from device, verify bytes match input.
  *
  * Prerequisites on VEK385 (system-top-rpu-enlarged.dtb + rebuilt rpu_fw):
  *   - RPU firmware registers RPMsg channel "amdrnpu" (amdrnpu_ept.c).
  *   - OpenAMP rsctbl/vrings match DT: 0x9800000 / 0x9860000 / 0x9864000 / 0x9868000.
- *   - amdrnpu driver loaded; DT node amd,amdrnpu with bank@0
- *     memory-region bound (by numeric phandle 0x500 in the official
- *     Versal-net layout) to rpu_gem_cma@20000000 (0x20000000, 512 MiB
- *     reusable shared-dma-pool + linux,cma-default).
- *   - Open /dev/dri/cardN for amdrnpu (MODE_MAP_DUMB requires card, not renderD*).
+ *   - amdrnpu driver loaded and bound to the "amdrnpu" RPMsg channel; the
+ *     RPU buffers must come from an RPU-reachable, contiguous dma-buf heap
+ *     (e.g. rpu_gem_cma@20000000 on the Versal-net layout).
+ *   - Open /dev/amdrnpu.N (the driver is a miscdevice; CPU mapping is done
+ *     on the buffer's dma-buf via amdrnpu_buf_mmap()).
  *
  * Usage:
- *   amdrnpu_inout_example [--device /dev/dri/cardN]
+ *   amdrnpu_inout_example [--device /dev/amdrnpu.N]
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -35,8 +35,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-
-#include <xf86drm.h>
 
 #include <amdrnpu/amdrnpu.h>
 #include <amdrnpu/amdrnpu_lib.h>
@@ -55,21 +53,14 @@ static void fail(const char *what, int rc)
 	g_fail = 1;
 }
 
-static int drm_is_amdrnpu(int fd)
+/*
+ * Scan /dev/amdrnpu.* and open the lowest-numbered node. The driver is a
+ * miscdevice, so the node name IS the identity -- there is no name/version
+ * ioctl to probe. Returns fd >= 0 on success, -1 if none.
+ */
+static int open_amdrnpu_node(char *path_out, size_t path_sz)
 {
-	drmVersionPtr v = drmGetVersion(fd);
-	int ok = 0;
-
-	if (!v)
-		return 0;
-	ok = (strcmp(v->name, AMDRNPU_DRIVER_NAME) == 0);
-	drmFreeVersion(v);
-	return ok;
-}
-
-static int open_amdrnpu_card(char *path_out, size_t path_sz)
-{
-	DIR *dir = opendir("/dev/dri");
+	DIR *dir = opendir("/dev");
 	struct dirent *e;
 	long best = LONG_MAX;
 	int best_fd = -1;
@@ -79,31 +70,26 @@ static int open_amdrnpu_card(char *path_out, size_t path_sz)
 		return -1;
 
 	while ((e = readdir(dir)) != NULL) {
-		long m;
+		long n;
 		int fd;
 		char p[PATH_MAX];
 
-		if (strncmp(e->d_name, "card", 4) != 0)
+		if (strncmp(e->d_name, "amdrnpu.", 8) != 0)
 			continue;
-		m = strtol(e->d_name + 4, NULL, 10);
-		if (m < 0 || m >= best)
+		if (e->d_name[8] < '0' || e->d_name[8] > '9')
 			continue;
-		snprintf(p, sizeof(p), "/dev/dri/%s", e->d_name);
+		n = strtol(e->d_name + 8, NULL, 10);
+		if (n < 0 || n >= best)
+			continue;
+		snprintf(p, sizeof(p), "/dev/%s", e->d_name);
 		fd = open(p, O_RDWR | O_CLOEXEC);
-		if (fd < 0 || !drm_is_amdrnpu(fd)) {
-			if (fd >= 0)
-				close(fd);
+		if (fd < 0)
 			continue;
-		}
-		if (m < best) {
-			if (best_fd >= 0)
-				close(best_fd);
-			best = m;
-			best_fd = fd;
-			snprintf(best_path, sizeof(best_path), "%s", p);
-		} else {
-			close(fd);
-		}
+		if (best_fd >= 0)
+			close(best_fd);
+		best = n;
+		best_fd = fd;
+		snprintf(best_path, sizeof(best_path), "%s", p);
 	}
 	closedir(dir);
 
@@ -152,9 +138,9 @@ int main(int argc, char **argv)
 			return 1;
 		}
 	} else {
-		fd = open_amdrnpu_card(dev_path, sizeof(dev_path));
+		fd = open_amdrnpu_node(dev_path, sizeof(dev_path));
 		if (fd < 0) {
-			fprintf(stderr, "no amdrnpu card under /dev/dri/card*\n");
+			fprintf(stderr, "no amdrnpu node under /dev/amdrnpu.*\n");
 			return 1;
 		}
 	}
@@ -207,14 +193,14 @@ int main(int argc, char **argv)
 	args[1].size = 0;
 	args[1].value = TEST_BUF_SIZE;
 	args[2].size = TEST_BUF_SIZE;
-	args[2].bo.drm_buffer_handle = (int32_t)in_hd;
+	args[2].bo.buffer_handle = (int32_t)in_hd;
 	args[2].bo.offset = 0;
 	args[3].size = 0;
 	args[3].value = OUTPUT_BO_TAG;
 	args[4].size = 0;
 	args[4].value = TEST_BUF_SIZE;
 	args[5].size = TEST_BUF_SIZE;
-	args[5].bo.drm_buffer_handle = (int32_t)out_hd;
+	args[5].bo.buffer_handle = (int32_t)out_hd;
 	args[5].bo.offset = 0;
 
 	memset(&hdr, 0, sizeof(hdr));

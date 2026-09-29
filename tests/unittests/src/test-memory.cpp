@@ -46,12 +46,9 @@ TEST_F(AmdrnpuMemory, BufMmapAndMemsetRpuBank)
 	uint32_t bo = 0;
 	ASSERT_EQ(do_buf_alloc(fd_, AMDRNPU_MEMORY_RPU, kFwRspBoSize, &bo), 0);
 
-	uint64_t off = 0;
-	ASSERT_EQ(do_map_dumb(fd_, bo, &off), 0);
-
-	void *p = ::mmap(nullptr, kFwRspBoSize, PROT_READ | PROT_WRITE,
-			 MAP_SHARED, fd_, static_cast<off_t>(off));
-	ASSERT_NE(p, MAP_FAILED);
+	void *p = nullptr;
+	ASSERT_EQ(do_buf_mmap(fd_, bo, kFwRspBoSize, &p), 0);
+	ASSERT_NE(p, nullptr);
 
 	// Touch every page so the page-fault path actually fires.
 	std::memset(p, 0xA5, kFwRspBoSize);
@@ -60,7 +57,7 @@ TEST_F(AmdrnpuMemory, BufMmapAndMemsetRpuBank)
 	EXPECT_EQ(static_cast<uint8_t *>(p)[0], 0xA5);
 	EXPECT_EQ(static_cast<uint8_t *>(p)[kFwRspBoSize - 1], 0xA5);
 
-	EXPECT_EQ(::munmap(p, kFwRspBoSize), 0);
+	do_buf_munmap(p, kFwRspBoSize);
 	EXPECT_EQ(do_gem_close(fd_, bo), 0);
 }
 
@@ -150,12 +147,9 @@ TEST_F(AmdrnpuMemory, BufSyncPartialRoundTrip)
 	uint32_t bo = 0;
 	ASSERT_EQ(do_buf_alloc(fd_, AMDRNPU_MEMORY_RPU, bo_size, &bo), 0);
 
-	uint64_t mmap_off = 0;
-	ASSERT_EQ(do_map_dumb(fd_, bo, &mmap_off), 0);
-
-	void *map = ::mmap(nullptr, bo_size, PROT_READ | PROT_WRITE,
-			   MAP_SHARED, fd_, static_cast<off_t>(mmap_off));
-	ASSERT_NE(map, MAP_FAILED);
+	void *map = nullptr;
+	ASSERT_EQ(do_buf_mmap(fd_, bo, bo_size, &map), 0);
+	ASSERT_NE(map, nullptr);
 	uint8_t *base = static_cast<uint8_t *>(map);
 
 	// Sentinel fill: 0xCC for the entire first page (never synced),
@@ -187,7 +181,7 @@ TEST_F(AmdrnpuMemory, BufSyncPartialRoundTrip)
 
 	std::array<struct amdrnpu_arg, 3> args{};
 	args[0].size  = static_cast<uint32_t>(winlen);
-	args[0].bo.drm_buffer_handle = static_cast<int32_t>(bo);
+	args[0].bo.buffer_handle = static_cast<int32_t>(bo);
 	args[0].bo.offset = 0;
 	args[1].size  = 0;
 	args[1].value = winoff;
@@ -244,7 +238,7 @@ TEST_F(AmdrnpuMemory, BufSyncPartialRoundTrip)
 		}
 	}
 	if (matched != 4 && window_untouched) {
-		EXPECT_EQ(::munmap(map, bo_size), 0);
+		do_buf_munmap(map, bo_size);
 		EXPECT_EQ(do_gem_close(fd_, bo), 0);
 		GTEST_SKIP() << "RPU endpoint does not recognize 'RGNE' "
 				"(AMDRNPU_FW_OP_ECHO_REGION) -- rebuild "
@@ -314,7 +308,7 @@ TEST_F(AmdrnpuMemory, BufSyncPartialRoundTrip)
 		<< std::hex << static_cast<unsigned>(base[winoff + winlen - 1])
 		<< " (expected 0xAA pad from fw_echo_region)";
 
-	EXPECT_EQ(::munmap(map, bo_size), 0);
+	do_buf_munmap(map, bo_size);
 	EXPECT_EQ(do_gem_close(fd_, bo), 0);
 }
 
@@ -330,17 +324,14 @@ TEST_F(AmdrnpuMemory, BufMmapFillVerifyPattern)
 	const size_t size = KB(64);
 	ASSERT_EQ(do_buf_alloc(fd_, AMDRNPU_MEMORY_RPU, size, &bo), 0);
 
-	uint64_t off = 0;
-	ASSERT_EQ(do_map_dumb(fd_, bo, &off), 0);
-
-	void *p = ::mmap(nullptr, size, PROT_READ | PROT_WRITE,
-			 MAP_SHARED, fd_, static_cast<off_t>(off));
-	ASSERT_NE(p, MAP_FAILED);
+	void *p = nullptr;
+	ASSERT_EQ(do_buf_mmap(fd_, bo, size, &p), 0);
+	ASSERT_NE(p, nullptr);
 
 	fill_buffer32(p, size);
 	EXPECT_TRUE(verify_buffer32(p, size));
 
-	EXPECT_EQ(::munmap(p, size), 0);
+	do_buf_munmap(p, size);
 	EXPECT_EQ(do_gem_close(fd_, bo), 0);
 }
 

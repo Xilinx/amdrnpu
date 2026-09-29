@@ -10,9 +10,13 @@
 // firmware lives here; fault-injection (REMI/NOTS/CANC/BADC) is in
 // test-fault.cpp because those require the RPU fault opcodes to be
 // recognized by the slave.
+//
+// These drive libamdrnpu, so the negatives assert the lib's contract
+// (0 / -errno return convention) rather than raw ioctl errnos.
 
 #include "common.h"
 
+#include <array>
 #include <atomic>
 #include <thread>
 
@@ -20,41 +24,32 @@ using namespace amdrnpu_test;
 
 class AmdrnpuError : public AmdrnpuTest {};
 
-// ---- AMDRNPU_BUF_ALLOC negative cases ------------------------------
+// ---- buffer alloc negative cases -----------------------------------
 
 TEST_F(AmdrnpuError, BufAllocInvalidMemoryType)
 {
-	// Driver should reject memory_type values outside AMDRNPU_MEMORY_*.
-	struct amdrnpu_buf_alloc a {};
-	a.memory_type = 0xDEADBEEFu;
-	a.size = 4096;
-	EXPECT_LT(::ioctl(fd_, AMDRNPU_BUF_ALLOC, &a), 0);
-	EXPECT_EQ(errno, EINVAL);
+	// memory_type values outside AMDRNPU_MEMORY_* are rejected before
+	// any ioctl is issued.
+	uint32_t bo = 0;
+	EXPECT_EQ(do_buf_alloc(fd_, 0xDEADBEEFu, 4096, &bo), -EINVAL);
 }
 
 TEST_F(AmdrnpuError, BufAllocZeroSize)
 {
-	// size=0 has no defensible meaning; driver caps at >0.
-	struct amdrnpu_buf_alloc a {};
-	a.memory_type = AMDRNPU_MEMORY_RPU;
-	a.size = 0;
-	EXPECT_LT(::ioctl(fd_, AMDRNPU_BUF_ALLOC, &a), 0);
-	EXPECT_EQ(errno, EINVAL);
+	// size=0 has no defensible meaning; the lib rejects it up front.
+	uint32_t bo = 0;
+	EXPECT_EQ(do_buf_alloc(fd_, AMDRNPU_MEMORY_RPU, 0, &bo), -EINVAL);
 }
 
-// ---- AMDRNPU_BUF_SYNC negative cases -------------------------------
+// ---- buffer sync negative cases ------------------------------------
 
 TEST_F(AmdrnpuError, BufSyncInvalidHandle)
 {
-	// Bogus GEM handle should produce ENOENT (or similar non-zero
-	// errno -- the assertion is just "fails cleanly, doesn't crash
-	// the kernel").
-	struct amdrnpu_buf_sync s {};
-	s.drm_handle = 0xDEADu;
-	s.direction  = AMDRNPU_BUF_SYNC_TO_DEVICE;
-	s.offset     = 0;
-	s.length     = 4096;
-	EXPECT_LT(::ioctl(fd_, AMDRNPU_BUF_SYNC, &s), 0);
+	// Unknown handle isn't in the lib's registry -> -ENOENT (the
+	// assertion is just "fails cleanly, doesn't crash the kernel").
+	EXPECT_LT(do_buf_sync(fd_, 0xDEADu, AMDRNPU_BUF_SYNC_TO_DEVICE,
+			      0, 4096),
+		  0);
 }
 
 TEST_F(AmdrnpuError, BufSyncInvalidDirection)
@@ -63,80 +58,49 @@ TEST_F(AmdrnpuError, BufSyncInvalidDirection)
 	uint32_t bo = 0;
 	ASSERT_EQ(do_buf_alloc(fd_, AMDRNPU_MEMORY_RPU, kFwRspBoSize, &bo), 0);
 
-	struct amdrnpu_buf_sync s {};
-	s.drm_handle = bo;
-	s.direction  = 0xFFu;  // not TO_DEVICE/FROM_DEVICE
-	s.offset     = 0;
-	s.length     = 0;
-	EXPECT_LT(::ioctl(fd_, AMDRNPU_BUF_SYNC, &s), 0);
-	EXPECT_EQ(errno, EINVAL);
+	// 0xFF is neither TO_DEVICE nor FROM_DEVICE.
+	EXPECT_EQ(do_buf_sync(fd_, bo, 0xFFu, 0, 0), -EINVAL);
 
 	EXPECT_EQ(do_gem_close(fd_, bo), 0);
 }
 
-TEST_F(AmdrnpuError, BufSyncOffsetBeyondEnd)
+// ---- buffer close negative case ------------------------------------
+
+TEST_F(AmdrnpuError, BufCloseInvalidHandle)
 {
-	uint32_t bo = 0;
-	ASSERT_EQ(do_buf_alloc(fd_, AMDRNPU_MEMORY_RPU, kFwRspBoSize, &bo), 0);
-
-	struct amdrnpu_buf_sync s {};
-	s.drm_handle = bo;
-	s.direction  = AMDRNPU_BUF_SYNC_TO_DEVICE;
-	s.offset     = kFwRspBoSize + 1;
-	s.length     = 1;
-	EXPECT_LT(::ioctl(fd_, AMDRNPU_BUF_SYNC, &s), 0);
-
-	EXPECT_EQ(do_gem_close(fd_, bo), 0);
+	// Closing a handle the lib never handed out -> -ENOENT.
+	EXPECT_LT(do_gem_close(fd_, 0xDEADu), 0);
 }
 
-// ---- GEM_CLOSE negative case --------------------------------------
+// ---- cmd submit negative case --------------------------------------
 
-TEST_F(AmdrnpuError, GemCloseInvalidHandle)
+// num_args > 0 with a NULL args pointer is a caller bug the lib rejects
+// before touching the driver. This is the libamdrnpu analogue of the
+// old raw "userspace lies about num_args" canary.
+TEST_F(AmdrnpuError, CmdSubmitNullArgsWithCount)
 {
-	struct drm_gem_close c {};
-	c.handle = 0xDEADu;
-	EXPECT_LT(::ioctl(fd_, DRM_IOCTL_GEM_CLOSE, &c), 0);
-	EXPECT_EQ(errno, EINVAL);
+	uint32_t syncobj = 0;
+	EXPECT_EQ(do_cmd_submit(fd_, 0xCAFEBABEu, nullptr, 2, &syncobj),
+		  -EINVAL);
 }
 
-// ---- AMDRNPU_CMD_SUBMIT negative case ------------------------------
-
-// num_args claims 2 but we only allocate enough for 0. amdrnpu_cmd's
-// copy_from_user should EFAULT out of bounds without dereferencing
-// the missing tail. This is the "userspace lies about size" canary.
-TEST_F(AmdrnpuError, CmdSubmitLiesAboutNumArgsTrailingBytes)
-{
-	// Hand-rolled buffer: 1 struct + zero args, but num_args lies.
-	struct amdrnpu_cmd_submit hdr {};
-	hdr.command_op = 0xCAFEBABEu;
-	hdr.num_args   = 2;
-	// Don't allocate the trailing args. The driver's
-	// copy_from_user(args, user_ptr, num_args * sizeof(arg)) on a
-	// short userspace buffer should EFAULT cleanly.
-	int rc = ::ioctl(fd_, AMDRNPU_CMD_SUBMIT, &hdr);
-	// We don't assert which errno -- different kernels return
-	// EFAULT vs EINVAL -- only that the call fails.
-	EXPECT_LT(rc, 0);
-}
-
-// ---- syncobj negative cases ---------------------------------------
+// ---- completion-handle negative cases ------------------------------
 
 TEST_F(AmdrnpuError, SyncobjWaitOnInvalidHandle)
 {
-	uint64_t handles64 = 0xDEADu;
-	struct drm_syncobj_wait w {};
-	w.handles        = reinterpret_cast<uint64_t>(&handles64);
-	w.timeout_nsec   = static_cast<int64_t>(now_ns() + 100'000'000ull);
-	w.count_handles  = 1;
-	w.flags          = DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT;
-	EXPECT_LT(::ioctl(fd_, DRM_IOCTL_SYNCOBJ_WAIT, &w), 0);
+	// A completion handle is a sync_file fd; an fd we never opened
+	// polls as POLLNVAL, which the lib maps to a negative return.
+	int32_t status = 0;
+	EXPECT_LT(amdrnpu_syncobj_wait_complete(fd_, 0x7FFFFFFEu,
+						10'000'000 /* 10ms */,
+						&status),
+		  0);
 }
 
 TEST_F(AmdrnpuError, SyncobjDestroyTwiceFails)
 {
-	// First submit -> get a real handle -> destroy it -> destroy
-	// again should fail. Validates the syncobj idr is actually
-	// freed on first destroy.
+	// First submit -> get a real completion handle -> release it ->
+	// release again should fail (the fd is already closed).
 	uint32_t syncobj = 0;
 	ASSERT_EQ(do_cmd_submit(fd_, 0xBAADF00Du, nullptr, 0, &syncobj), 0);
 	ASSERT_EQ(do_syncobj_wait(fd_, syncobj, kSubmitTimeoutNs), 0);
@@ -144,22 +108,22 @@ TEST_F(AmdrnpuError, SyncobjDestroyTwiceFails)
 	EXPECT_LT(do_syncobj_destroy(fd_, syncobj), 0);
 }
 
-// ---- open negative ------------------------------------------------
+// ---- open negative -------------------------------------------------
 
-TEST(AmdrnpuErrorNegative, OpenNonexistentDriPath)
+TEST(AmdrnpuErrorNegative, OpenNonexistentDevicePath)
 {
-	// /dev/dri/card99 doesn't exist on any amdrnpu host.
-	int fd = ::open("/dev/dri/card99", O_RDWR | O_CLOEXEC);
+	// /dev/amdrnpu.99 doesn't exist on any amdrnpu host.
+	int fd = ::open("/dev/amdrnpu.99", O_RDWR | O_CLOEXEC);
 	EXPECT_LT(fd, 0);
 	if (fd >= 0)
 		::close(fd);
 }
 
-// ---- multi-threaded variant ---------------------------------------
+// ---- multi-threaded variant ----------------------------------------
 
-// Pound BUF_ALLOC + GEM_CLOSE in a tight loop across threads. Catches
-// races in the per-file xa allocation / freeing paths (we've seen
-// "BO leaked after GEM_CLOSE" regressions in this kind of stress).
+// Pound buf_alloc + buf_close in a tight loop across threads. Catches
+// races in the per-file import allocation / freeing paths (we've seen
+// "BO leaked after close" regressions in this kind of stress).
 TEST_F(AmdrnpuError, BufAllocCloseStressMultiThreaded)
 {
 	constexpr int kNumThreads = 4;

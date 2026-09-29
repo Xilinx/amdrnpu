@@ -199,6 +199,25 @@ endif()
 # ---- utest_common helper lib ----------------------------------------
 add_subdirectory(common)
 
+# ---- libamdrnpu (device access layer under test) --------------------
+# The suite drives the char-driver UAPI exclusively through libamdrnpu
+# (amdrnpu_buf_*, amdrnpu_cmd_submit, amdrnpu_syncobj_*), so build+link
+# it here. We pull in the lib source tree (repo lib/) and link the
+# STATIC archive: that folds the lib (and its private libdrm dep)
+# straight into amdrnpu_unittest, so the deployed test binary is
+# self-contained -- no libamdrnpu.so to stage onto the board alongside
+# it. Examples and the shared lib are off; we only need the archive.
+# The `amdrnpu`/`amdrnpu_static` targets export their public include
+# dirs (lib/include + the UAPI dir) as PUBLIC usage requirements, so
+# linking is all that's needed for <amdrnpu/amdrnpu_lib.h> to resolve.
+if(NOT TARGET amdrnpu_static)
+	set(AMDRNPU_LIB_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+	set(AMDRNPU_LIB_BUILD_STATIC   ON  CACHE BOOL "" FORCE)
+	set(AMDRNPU_LIB_BUILD_SHARED   OFF CACHE BOOL "" FORCE)
+	add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../lib
+		"${CMAKE_BINARY_DIR}/amdrnpu_lib_build")
+endif()
+
 # ---- the test binary ------------------------------------------------
 file(GLOB AMDRNPU_UNITTEST_SRCS
 	"${CMAKE_CURRENT_SOURCE_DIR}/src/test-*.cpp"
@@ -221,6 +240,7 @@ target_compile_options(amdrnpu_unittest PRIVATE
 find_package(Threads REQUIRED)
 target_link_libraries(amdrnpu_unittest
 	PRIVATE
+		amdrnpu::amdrnpu_static
 		utest_common
 		gtest
 		gtest_main

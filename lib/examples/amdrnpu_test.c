@@ -5,25 +5,24 @@
  * Each subcommand prints a short "Sending ..." banner and a one-line result.
  *
  * Usage:
- *   amdrnpu_test [--device /dev/dri/cardN] <command> [args...]
+ *   amdrnpu_test [--device /dev/amdrnpu.N] <command> [args...]
  *
- * If --device is omitted the CLI scans /dev/dri/card* and picks the lowest
- * numbered minor whose DRM driver name matches "amdrnpu" (see
- * AMDRNPU_DRIVER_NAME).  Pass --device explicitly to a render node
- * (renderD*) for command submission paths that don't need MODE_MAP_DUMB.
+ * If --device is omitted the CLI scans /dev/amdrnpu.* and picks the
+ * lowest-numbered node.  The driver is a miscdevice, so the node name is the
+ * identity -- there is no name/version ioctl to probe.
  *
  * Commands:
- *   device                                    # print which DRM device matches
- *   buf_alloc <rpu|device> <size>             # AMDRNPU_BUF_ALLOC then close
+ *   device                                    # print which node was opened
+ *   buf_alloc <rpu|device> <size>             # alloc+import a buffer then close
  *   cmd_submit <op_hex> [scalar:<u64> |
  *              buf:<handle>:<offset>]...      # one-shot AMDRNPU_CMD_SUBMIT
  *   syncobj_wait <handle> [timeout_ns=2e9]    # wait + report fence status
  *   fw_echo <v1_hex> <v2_hex>                 # full RPU-firmware echo flow
  *   lifecycle                                 # alloc + no-op submit + wait
  *
- * Note about handle scoping: GEM and syncobj handles are scoped to the DRM
- * file descriptor that created them.  cmd_submit and syncobj_wait that are
- * given handles from a prior invocation will fail because the handles are
+ * Note about handle scoping: buffer handles and completion (sync_file) fds are
+ * scoped to the device fd that created them.  cmd_submit and syncobj_wait that
+ * are given handles from a prior invocation will fail because the handles are
  * not valid in the new fd.  Use fw_echo or lifecycle for in-process flows.
  */
 
@@ -42,9 +41,6 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-#include <drm/drm_mode.h>
-#include <xf86drm.h>
-
 #include <amdrnpu/amdrnpu.h>
 #include <amdrnpu/amdrnpu_lib.h>
 
@@ -52,7 +48,7 @@
 #define AMDRNPU_FW_ECHO_OP	0x42424242u
 /* Must match AMDRNPU_TEXT_MAX in firmware amdrnpu_ept.c. */
 #define AMDRNPU_FW_RSP_TEXT_MAX	400u
-/* Response BO sized for one DRM page (also covers the ASCII reply header). */
+/* Response BO sized for one page (also covers the ASCII reply header). */
 #define AMDRNPU_FW_RSP_BO_SIZE	4096u
 /* Optional last-arg device-bank GEM (no host mmap; RPU may consume the dma_addr). */
 #define AMDRNPU_FW_EXTRA_BO_SIZE	256u
@@ -140,7 +136,7 @@ static int parse_arg_token(const char *tok, struct amdrnpu_arg *out)
 		 * to it. Use 1 to mean "minimum valid buffer slice".
 		 */
 		out->size = 1;
-		out->bo.drm_buffer_handle = (int32_t)handle;
+		out->bo.buffer_handle = (int32_t)handle;
 		out->bo.offset = offset;
 		return 0;
 	}
@@ -149,68 +145,48 @@ static int parse_arg_token(const char *tok, struct amdrnpu_arg *out)
 }
 
 /* ------------------------------------------------------------------ */
-/* DRM device discovery                                                */
+/* device discovery                                                    */
 /* ------------------------------------------------------------------ */
 
-static int drm_fd_is_amdrnpu(int fd)
-{
-	drmVersionPtr v = drmGetVersion(fd);
-	int yes = 0;
-
-	if (!v)
-		return 0;
-	yes = (strcmp(v->name, AMDRNPU_DRIVER_NAME) == 0);
-	drmFreeVersion(v);
-	return yes;
-}
-
 /*
- * Scan /dev/dri/card* (primary nodes only — rendering subcommands plus
- * MODE_MAP_DUMB), pick the lowest minor whose driver name is "amdrnpu".
- * Returns fd >= 0 on success, -1 if no match. Optionally writes the path
- * into @out_path (must be at least PATH_MAX bytes).
+ * Scan /dev/amdrnpu.* and pick the lowest-numbered node. The driver is a
+ * miscdevice, so the node name IS the identity -- there is no name/version
+ * ioctl to probe. Returns fd >= 0 on success, -1 if no match. Optionally
+ * writes the path into @out_path (must be at least PATH_MAX bytes).
  */
-static int open_primary_amdrnpu(char *out_path, size_t out_sz)
+static int open_amdrnpu_scan(char *out_path, size_t out_sz)
 {
 	DIR *dir;
 	struct dirent *e;
-	long best_minor = LONG_MAX;
+	long best = LONG_MAX;
 	int best_fd = -1;
 	char best_path[PATH_MAX] = {0};
 
-	dir = opendir("/dev/dri");
+	dir = opendir("/dev");
 	if (!dir)
 		return -1;
 
 	while ((e = readdir(dir)) != NULL) {
-		long m;
+		long n;
 		int fd;
 		char p[PATH_MAX];
 
-		if (strncmp(e->d_name, "card", 4) != 0)
+		if (strncmp(e->d_name, "amdrnpu.", 8) != 0)
 			continue;
-		if (!isdigit((unsigned char)e->d_name[4]))
+		if (!isdigit((unsigned char)e->d_name[8]))
 			continue;
-		m = strtol(e->d_name + 4, NULL, 10);
-		if (m < 0 || m > 4095)
+		n = strtol(e->d_name + 8, NULL, 10);
+		if (n < 0 || n >= best)
 			continue;
-		snprintf(p, sizeof(p), "/dev/dri/%s", e->d_name);
+		snprintf(p, sizeof(p), "/dev/%s", e->d_name);
 		fd = open(p, O_RDWR | O_CLOEXEC);
 		if (fd < 0)
 			continue;
-		if (!drm_fd_is_amdrnpu(fd)) {
-			close(fd);
-			continue;
-		}
-		if (m < best_minor) {
-			if (best_fd >= 0)
-				close(best_fd);
-			best_minor = m;
-			best_fd = fd;
-			snprintf(best_path, sizeof(best_path), "%s", p);
-		} else {
-			close(fd);
-		}
+		if (best_fd >= 0)
+			close(best_fd);
+		best = n;
+		best_fd = fd;
+		snprintf(best_path, sizeof(best_path), "%s", p);
 	}
 	closedir(dir);
 
@@ -220,8 +196,8 @@ static int open_primary_amdrnpu(char *out_path, size_t out_sz)
 }
 
 /*
- * Open the user-supplied device path, validating that the DRM driver name
- * matches "amdrnpu". When path is NULL, fall back to primary card scan.
+ * Open the user-supplied device path, or fall back to a /dev/amdrnpu.* scan
+ * when path is NULL.
  */
 static int open_amdrnpu_device(const char *path, char *opened_path, size_t sz)
 {
@@ -233,27 +209,14 @@ static int open_amdrnpu_device(const char *path, char *opened_path, size_t sz)
 			fprintf(stderr, "open(%s): %s\n", path, strerror(errno));
 			return -1;
 		}
-		if (!drm_fd_is_amdrnpu(fd)) {
-			drmVersionPtr v = drmGetVersion(fd);
-
-			fprintf(stderr,
-				"%s is not %s (drm name=\"%s\")\n",
-				path, AMDRNPU_DRIVER_NAME,
-				v ? v->name : "?");
-			if (v)
-				drmFreeVersion(v);
-			close(fd);
-			return -1;
-		}
 		if (opened_path && sz > 0)
 			snprintf(opened_path, sz, "%s", path);
 		return fd;
 	}
-	fd = open_primary_amdrnpu(opened_path, sz);
+	fd = open_amdrnpu_scan(opened_path, sz);
 	if (fd < 0)
 		fprintf(stderr,
-			"no /dev/dri/card* matches driver \"%s\"; pass --device explicitly\n",
-			AMDRNPU_DRIVER_NAME);
+			"no /dev/amdrnpu.* node found; pass --device explicitly\n");
 	return fd;
 }
 
@@ -263,7 +226,7 @@ static int open_amdrnpu_device(const char *path, char *opened_path, size_t sz)
 
 static int do_device(const char *opened_path)
 {
-	printf("amdrnpu DRM device: %s\n", opened_path);
+	printf("amdrnpu device: %s\n", opened_path);
 	return 0;
 }
 
@@ -281,12 +244,12 @@ static int do_buf_alloc(int fd, int argc, char **argv)
 		return 2;
 	size = parse_u64(argv[1]);
 
-	printf("Sending AMDRNPU_BUF_ALLOC type=%s size=%" PRIu64 "\n",
+	printf("buf_alloc type=%s size=%" PRIu64 "\n",
 	       memory_type_str(mtype), size);
 	rc = amdrnpu_buf_alloc(fd, mtype, size, &handle);
 	if (rc)
 		return report("buf_alloc", rc);
-	printf("  -> drm_handle=%u\n", handle);
+	printf("  -> buffer_handle=%u\n", handle);
 	rc = amdrnpu_buf_close(fd, handle);
 	if (rc)
 		return report("buf_close (cleanup)", rc);
@@ -344,7 +307,7 @@ static int do_syncobj_wait(int fd, int argc, char **argv)
 	if (argc >= 2)
 		timeout_ns = (int64_t)strtoll(argv[1], NULL, 0);
 
-	printf("Sending DRM_SYNCOBJ_WAIT handle=%u timeout_ns=%" PRId64 "\n",
+	printf("Waiting on completion handle=%u timeout_ns=%" PRId64 "\n",
 	       handle, timeout_ns);
 	rc = amdrnpu_syncobj_wait_complete(fd, handle, timeout_ns, &status);
 	if (rc)
@@ -364,13 +327,12 @@ static int do_syncobj_wait(int fd, int argc, char **argv)
  * exercises both bank dma_addr resolution paths.
  *
  * Cleanup is best-effort: we tear down both BOs even on failure so we
- * don't leak DRM handles between runs.
+ * don't leak buffer handles between runs.
  */
 static int do_fw_echo(int fd, int argc, char **argv)
 {
 	uint32_t rsp_bo = 0, extra_bo = 0;
 	void *map = MAP_FAILED;
-	struct drm_mode_map_dumb md = {0};
 	struct amdrnpu_arg args[4];
 	struct amdrnpu_cmd_submit hdr;
 	uint64_t v1, v2;
@@ -400,35 +362,24 @@ static int do_fw_echo(int fd, int argc, char **argv)
 	if (rc) { ret = report("buf_alloc(device)", rc); goto out; }
 	printf("      -> extra_bo=%u\n", extra_bo);
 
-	/* MODE_MAP_DUMB only passes drm_ioctl_permit() on primary card nodes.
-	 * If the user opened a renderD* node, this ioctl will fail with EACCES.
+	/* CPU-map the response BO via the library (mmap on the buffer's
+	 * dma-buf).  offset=0, length=0 maps the whole allocation.
 	 */
-	md.handle = rsp_bo;
-	if (drmIoctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &md)) {
-		fprintf(stderr,
-			"DRM_IOCTL_MODE_MAP_DUMB(rsp_bo=%u): %s%s\n",
-			rsp_bo, strerror(errno),
-			errno == EACCES ?
-			" (open /dev/dri/cardN, not renderD*)" : "");
-		ret = 1;
-		goto out;
-	}
-	map = mmap(NULL, AMDRNPU_FW_RSP_BO_SIZE, PROT_READ | PROT_WRITE,
-		   MAP_SHARED, fd, (off_t)md.offset);
-	if (map == MAP_FAILED) {
-		perror("mmap rsp_bo");
-		ret = 1;
+	rc = amdrnpu_buf_mmap(fd, rsp_bo, 0, 0, 0, &map);
+	if (rc) {
+		ret = report("buf_mmap(rsp_bo)", rc);
+		map = MAP_FAILED;
 		goto out;
 	}
 	memset(map, 0x0a, AMDRNPU_FW_RSP_BO_SIZE);
 	printf("[3/8] mmap rsp_bo + canary (0x0a)\n");
 
 	/*
-	 * Bank BOs are allocated with dma_alloc_noncoherent() so the
-	 * APU CPU-side mapping is cacheable.  Any range the device will
-	 * read must be flushed from CPU caches first, otherwise the RPU
-	 * could observe stale (un-flushed) bytes when it inspects the
-	 * buffer.  length=0 means "from offset through end-of-buffer".
+	 * The buffers come from a cacheable dma-buf heap, so the APU
+	 * CPU-side mapping is cacheable.  Any range the device will read
+	 * must be flushed from CPU caches first (DMA_BUF_IOCTL_SYNC via
+	 * amdrnpu_buf_sync_to_device), otherwise the RPU could observe
+	 * stale (un-flushed) bytes when it inspects the buffer.
 	 *
 	 * rsp_bo: flush the 0x0a canary so the RPU sees it before it
 	 *         overwrites the buffer with the ASCII reply.
@@ -436,9 +387,8 @@ static int do_fw_echo(int fd, int argc, char **argv)
 	 * extra_bo: the current FW_ECHO opcode does not actually inspect
 	 *         this buffer, but we sync it anyway so this example
 	 *         stays a faithful template for ops that DO read their
-	 *         "extra" / scratch BOs.  The buffer holds whatever
-	 *         dma_alloc_noncoherent() left in cache; the sync is a
-	 *         no-op on contents but exercises the contract.
+	 *         "extra" / scratch BOs.  The sync is a no-op on contents
+	 *         but exercises the contract.
 	 */
 	printf("[4/8] buf_sync TO_DEVICE (rsp_bo canary + extra_bo)\n");
 	rc = amdrnpu_buf_sync_to_device(fd, rsp_bo, 0, 0);
@@ -448,14 +398,14 @@ static int do_fw_echo(int fd, int argc, char **argv)
 
 	memset(args, 0, sizeof(args));
 	args[0].size = AMDRNPU_FW_RSP_TEXT_MAX;
-	args[0].bo.drm_buffer_handle = (int32_t)rsp_bo;
+	args[0].bo.buffer_handle = (int32_t)rsp_bo;
 	args[0].bo.offset = 0;
 	args[1].size = 0;
 	args[1].value = v1;
 	args[2].size = 0;
 	args[2].value = v2;
 	args[3].size = AMDRNPU_FW_EXTRA_BO_SIZE;
-	args[3].bo.drm_buffer_handle = (int32_t)extra_bo;
+	args[3].bo.buffer_handle = (int32_t)extra_bo;
 	args[3].bo.offset = 0;
 
 	memset(&hdr, 0, sizeof(hdr));
@@ -517,7 +467,7 @@ static int do_fw_echo(int fd, int argc, char **argv)
 
 out:
 	if (map != MAP_FAILED)
-		munmap(map, AMDRNPU_FW_RSP_BO_SIZE);
+		amdrnpu_buf_munmap(map, AMDRNPU_FW_RSP_BO_SIZE);
 	if (extra_bo)
 		(void)amdrnpu_buf_close(fd, extra_bo);
 	if (rsp_bo)
@@ -592,19 +542,19 @@ out:
 static void usage(const char *prog)
 {
 	fprintf(stderr,
-		"Usage: %s [--device /dev/dri/cardN] <command> [args...]\n"
+		"Usage: %s [--device /dev/amdrnpu.N] <command> [args...]\n"
 		"\n"
 		"Commands:\n"
-		"  device                                       print which DRM device matches\n"
-		"  buf_alloc <rpu|device> <size>                AMDRNPU_BUF_ALLOC then close\n"
+		"  device                                       print which node was opened\n"
+		"  buf_alloc <rpu|device> <size>                alloc+import a buffer then close\n"
 		"  cmd_submit <op_hex> [scalar:U64 | buf:H:O]   one-shot AMDRNPU_CMD_SUBMIT\n"
-		"  syncobj_wait <handle> [timeout_ns=2e9]       DRM_SYNCOBJ_WAIT + fence status\n"
+		"  syncobj_wait <handle> [timeout_ns=2e9]       wait on completion + fence status\n"
 		"  fw_echo <v1_hex> <v2_hex>                    full RPU-firmware echo flow\n"
 		"  lifecycle                                    alloc + no-op submit + wait\n"
 		"\n"
-		"If --device is omitted the CLI scans /dev/dri/card* for the\n"
-		"node whose driver name is \"%s\".\n",
-		prog, AMDRNPU_DRIVER_NAME);
+		"If --device is omitted the CLI scans /dev/amdrnpu.* and opens the\n"
+		"lowest-numbered node.\n",
+		prog);
 }
 
 int main(int argc, char **argv)

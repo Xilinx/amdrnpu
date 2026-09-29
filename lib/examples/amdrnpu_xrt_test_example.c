@@ -19,7 +19,7 @@
  * Usage:
  *   amdrnpu_xrt_test_example [OPTIONS]
  *
- *   --device PATH        DRM card node (auto-detected if omitted)
+ *   --device PATH        /dev/amdrnpu.N node (auto-detected if omitted)
  *   --iterations N       Inference iterations (default 1)
  *   --elf-file PATH      Load ELF into RPU BO from file
  *   --elf-pa PA          Pre-loaded ELF physical address (hex)
@@ -47,9 +47,6 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include <drm/drm_mode.h>
-#include <xf86drm.h>
-
 #include <amdrnpu/amdrnpu.h>
 #include <amdrnpu/amdrnpu_lib.h>
 
@@ -67,21 +64,14 @@ static void fail(const char *what, int rc)
 	g_fail = 1;
 }
 
-static int drm_is_amdrnpu(int fd)
+/*
+ * Scan /dev/amdrnpu.* and open the lowest-numbered node. The driver is a
+ * miscdevice, so the node name IS the identity -- there is no name/version
+ * ioctl to probe. Returns fd >= 0 on success, -1 if none.
+ */
+static int open_amdrnpu_node(char *path_out, size_t path_sz)
 {
-	drmVersionPtr v = drmGetVersion(fd);
-	int ok = 0;
-
-	if (!v)
-		return 0;
-	ok = (strcmp(v->name, AMDRNPU_DRIVER_NAME) == 0);
-	drmFreeVersion(v);
-	return ok;
-}
-
-static int open_amdrnpu_card(char *path_out, size_t path_sz)
-{
-	DIR *dir = opendir("/dev/dri");
+	DIR *dir = opendir("/dev");
 	struct dirent *e;
 	long best = LONG_MAX;
 	int best_fd = -1;
@@ -91,31 +81,26 @@ static int open_amdrnpu_card(char *path_out, size_t path_sz)
 		return -1;
 
 	while ((e = readdir(dir)) != NULL) {
-		long m;
+		long n;
 		int fd;
 		char p[PATH_MAX];
 
-		if (strncmp(e->d_name, "card", 4) != 0)
+		if (strncmp(e->d_name, "amdrnpu.", 8) != 0)
 			continue;
-		m = strtol(e->d_name + 4, NULL, 10);
-		if (m < 0 || m >= best)
+		if (e->d_name[8] < '0' || e->d_name[8] > '9')
 			continue;
-		snprintf(p, sizeof(p), "/dev/dri/%s", e->d_name);
+		n = strtol(e->d_name + 8, NULL, 10);
+		if (n < 0 || n >= best)
+			continue;
+		snprintf(p, sizeof(p), "/dev/%s", e->d_name);
 		fd = open(p, O_RDWR | O_CLOEXEC);
-		if (fd < 0 || !drm_is_amdrnpu(fd)) {
-			if (fd >= 0)
-				close(fd);
+		if (fd < 0)
 			continue;
-		}
-		if (m < best) {
-			if (best_fd >= 0)
-				close(best_fd);
-			best = m;
-			best_fd = fd;
-			snprintf(best_path, sizeof(best_path), "%s", p);
-		} else {
-			close(fd);
-		}
+		if (best_fd >= 0)
+			close(best_fd);
+		best = n;
+		best_fd = fd;
+		snprintf(best_path, sizeof(best_path), "%s", p);
 	}
 	closedir(dir);
 
@@ -167,7 +152,7 @@ static void print_usage(const char *prog)
 	fprintf(stderr,
 		"Usage: %s [OPTIONS]\n"
 		"\n"
-		"  --device PATH        DRM card node (auto-detected)\n"
+		"  --device PATH        /dev/amdrnpu.N node (auto-detected)\n"
 		"  --iterations N       Inference iterations (default %u)\n"
 		"  --elf-file PATH      ELF from file into RPU BO\n"
 		"  --elf-pa PA          Pre-loaded ELF physical address\n"
@@ -273,7 +258,7 @@ static int parse_cli(int argc, char **argv, struct cli_opts *o)
 }
 
 /* Load a file into an RPU BO; returns 0 on success. */
-static int load_file_to_rpu_bo(int drm_fd, const char *path,
+static int load_file_to_rpu_bo(int fd, const char *path,
 				uint32_t *out_bo, void **out_map,
 				uint64_t *out_file_sz, uint64_t *out_alloc_sz)
 {
@@ -296,14 +281,14 @@ static int load_file_to_rpu_bo(int drm_fd, const char *path,
 	file_sz  = (uint64_t)st.st_size;
 	alloc_sz = (file_sz + 4095ULL) & ~4095ULL;
 
-	rc = amdrnpu_buf_alloc(drm_fd, AMDRNPU_MEMORY_RPU, alloc_sz, &bo);
+	rc = amdrnpu_buf_alloc(fd, AMDRNPU_MEMORY_RPU, alloc_sz, &bo);
 	if (rc) {
 		fprintf(stderr, "buf_alloc(%s, %llu): %s\n", path,
 			(unsigned long long)alloc_sz, strerror(-rc));
 		return rc;
 	}
 
-	rc = amdrnpu_buf_mmap(drm_fd, bo, alloc_sz, 0, alloc_sz, &map);
+	rc = amdrnpu_buf_mmap(fd, bo, alloc_sz, 0, alloc_sz, &map);
 	if (rc) {
 		fprintf(stderr, "buf_mmap(%s): %s\n", path, strerror(-rc));
 		goto err;
@@ -326,7 +311,7 @@ static int load_file_to_rpu_bo(int drm_fd, const char *path,
 	if (alloc_sz > file_sz)
 		memset((char *)map + file_sz, 0, alloc_sz - file_sz);
 
-	rc = amdrnpu_buf_sync_to_device(drm_fd, bo, 0, 0);
+	rc = amdrnpu_buf_sync_to_device(fd, bo, 0, 0);
 	if (rc) {
 		fprintf(stderr, "buf_sync_to_device(%s): %s\n", path,
 			strerror(-rc));
@@ -342,7 +327,7 @@ static int load_file_to_rpu_bo(int drm_fd, const char *path,
 err_unmap:
 	amdrnpu_buf_munmap(map, alloc_sz);
 err:
-	amdrnpu_buf_close(drm_fd, bo);
+	amdrnpu_buf_close(fd, bo);
 	return rc;
 }
 
@@ -403,10 +388,10 @@ int main(int argc, char **argv)
 		if (fd < 0) { perror(opts.device); return 1; }
 		snprintf(opened_path, sizeof(opened_path), "%s", opts.device);
 	} else {
-		fd = open_amdrnpu_card(opened_path, sizeof(opened_path));
+		fd = open_amdrnpu_node(opened_path, sizeof(opened_path));
 		if (fd < 0) {
 			fprintf(stderr,
-				"no amdrnpu card under /dev/dri/card*\n");
+				"no amdrnpu node under /dev/amdrnpu.*\n");
 			return 1;
 		}
 	}
@@ -429,7 +414,7 @@ int main(int argc, char **argv)
 		printf("elf-file:   %s → BO=%u size=%" PRIu64 "\n",
 		       opts.elf_file, elf_bo, elf_file_sz);
 		args[1].size                 = elf_alloc_sz;
-		args[1].bo.drm_buffer_handle = (int32_t)elf_bo;
+		args[1].bo.buffer_handle = (int32_t)elf_bo;
 		args[1].bo.offset            = 0;
 		args[2].size  = 0;
 		args[2].value = elf_file_sz;
@@ -467,7 +452,7 @@ int main(int argc, char **argv)
 			printf("arg[%u]:     %s → BO=%u size=%" PRIu64 "\n",
 			       i, ks->path, kbo[i].handle, fsz);
 			ta->size                 = asz;
-			ta->bo.drm_buffer_handle = (int32_t)kbo[i].handle;
+			ta->bo.buffer_handle = (int32_t)kbo[i].handle;
 			ta->bo.offset            = 0;
 		} else {
 			printf("arg[%u]:     PA=0x%08" PRIx64 " size=%" PRIu64 "\n",
@@ -481,26 +466,18 @@ int main(int argc, char **argv)
 	uint32_t num_args = APU_XRT_TEST_RESULT_ARG_IDX + 1;
 
 	if (opts.want_result) {
-		struct drm_mode_map_dumb md = {0};
-
 		rc = amdrnpu_buf_alloc(fd, AMDRNPU_MEMORY_RPU,
 					    APU_XRT_TEST_RESULT_SIZE,
 					    &result_bo);
 		if (rc) { fail("buf_alloc(result)", rc); goto out; }
 
-		md.handle = result_bo;
-		if (drmIoctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &md)) {
-			fprintf(stderr, "MODE_MAP_DUMB(result): %s\n",
-				strerror(errno));
-			g_fail = 1;
-			goto out;
-		}
-		result_map = mmap(NULL, APU_XRT_TEST_RESULT_SIZE,
-				  PROT_READ | PROT_WRITE, MAP_SHARED,
-				  fd, (off_t)md.offset);
-		if (result_map == MAP_FAILED) {
-			perror("mmap result_bo");
-			g_fail = 1;
+		/* CPU-map via the library (mmap on the buffer's dma-buf);
+		 * offset=0, length=0 maps the whole allocation.
+		 */
+		rc = amdrnpu_buf_mmap(fd, result_bo, 0, 0, 0, &result_map);
+		if (rc) {
+			fail("buf_mmap(result)", rc);
+			result_map = MAP_FAILED;
 			goto out;
 		}
 		memset(result_map, 0, APU_XRT_TEST_RESULT_SIZE);
@@ -509,7 +486,7 @@ int main(int argc, char **argv)
 
 		args[APU_XRT_TEST_RESULT_ARG_IDX].size                 =
 			APU_XRT_TEST_RESULT_SIZE;
-		args[APU_XRT_TEST_RESULT_ARG_IDX].bo.drm_buffer_handle =
+		args[APU_XRT_TEST_RESULT_ARG_IDX].bo.buffer_handle =
 			(int32_t)result_bo;
 		args[APU_XRT_TEST_RESULT_ARG_IDX].bo.offset            = 0;
 		printf("result BO:  handle=%u (%zu bytes)\n",
@@ -564,7 +541,7 @@ int main(int argc, char **argv)
 
 out:
 	if (result_map && result_map != MAP_FAILED)
-		munmap(result_map, APU_XRT_TEST_RESULT_SIZE);
+		amdrnpu_buf_munmap(result_map, APU_XRT_TEST_RESULT_SIZE);
 	if (result_bo)
 		amdrnpu_buf_close(fd, result_bo);
 	for (uint32_t i = 0; i < opts.n_kargs; ++i) {

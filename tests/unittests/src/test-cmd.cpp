@@ -41,19 +41,16 @@ TEST_F(AmdrnpuCmd, FwEchoWriteback)
 	uint32_t bo = 0;
 	ASSERT_EQ(do_buf_alloc(fd_, AMDRNPU_MEMORY_RPU, kFwRspBoSize, &bo), 0);
 
-	uint64_t off = 0;
-	ASSERT_EQ(do_map_dumb(fd_, bo, &off), 0);
-
-	void *map = ::mmap(nullptr, kFwRspBoSize, PROT_READ | PROT_WRITE,
-			   MAP_SHARED, fd_, static_cast<off_t>(off));
-	ASSERT_NE(map, MAP_FAILED);
+	void *map = nullptr;
+	ASSERT_EQ(do_buf_mmap(fd_, bo, kFwRspBoSize, &map), 0);
+	ASSERT_NE(map, nullptr);
 	std::memset(map, 0x0a, kFwRspBoSize);  // canary fill
 
 	ASSERT_EQ(do_buf_sync(fd_, bo, AMDRNPU_BUF_SYNC_TO_DEVICE, 0, 0), 0);
 
 	std::array<struct amdrnpu_arg, 3> args{};
 	args[0].size = kFwRspTextMax;
-	args[0].bo.drm_buffer_handle = static_cast<int32_t>(bo);
+	args[0].bo.buffer_handle = static_cast<int32_t>(bo);
 	args[0].bo.offset = 0;
 	args[1].size  = 0;
 	args[1].value = 0xCAFEF00DDEADBEEFull;
@@ -89,7 +86,7 @@ TEST_F(AmdrnpuCmd, FwEchoWriteback)
 	EXPECT_EQ(rpu_nargs, 3u);
 
 	(void)do_syncobj_destroy(fd_, syncobj);
-	::munmap(map, kFwRspBoSize);
+	do_buf_munmap(map, kFwRspBoSize);
 	(void)do_gem_close(fd_, bo);
 }
 
@@ -287,12 +284,9 @@ TEST_F(AmdrnpuCmd, DeviceShmemAddrRoundTrip)
 	ASSERT_EQ(do_buf_alloc(fd_, AMDRNPU_MEMORY_RPU, kFwRspBoSize,
 			       &ack_bo), 0);
 
-	uint64_t ack_off = 0;
-	ASSERT_EQ(do_map_dumb(fd_, ack_bo, &ack_off), 0);
-
-	void *ack_map = ::mmap(nullptr, kFwRspBoSize, PROT_READ | PROT_WRITE,
-			       MAP_SHARED, fd_, static_cast<off_t>(ack_off));
-	ASSERT_NE(ack_map, MAP_FAILED);
+	void *ack_map = nullptr;
+	ASSERT_EQ(do_buf_mmap(fd_, ack_bo, kFwRspBoSize, &ack_map), 0);
+	ASSERT_NE(ack_map, nullptr);
 	uint8_t *ack_base = static_cast<uint8_t *>(ack_map);
 
 	// 0xCC fill: any byte outside the banner the RPU writes MUST
@@ -328,10 +322,10 @@ TEST_F(AmdrnpuCmd, DeviceShmemAddrRoundTrip)
 		      "logic if you ever raise the top entry past 4 GiB - 1");
 	std::array<struct amdrnpu_arg, 3> args{};
 	args[0].size = kFwDappBannerMax;
-	args[0].bo.drm_buffer_handle = static_cast<int32_t>(ack_bo);
+	args[0].bo.buffer_handle = static_cast<int32_t>(ack_bo);
 	args[0].bo.offset = 0;
 	args[1].size = static_cast<uint32_t>(device_bo_size);
-	args[1].bo.drm_buffer_handle = static_cast<int32_t>(dev_bo);
+	args[1].bo.buffer_handle = static_cast<int32_t>(dev_bo);
 	args[1].bo.offset = 0;
 	args[2].size  = 0;
 	args[2].value = device_bo_size;
@@ -427,7 +421,7 @@ TEST_F(AmdrnpuCmd, DeviceShmemAddrRoundTrip)
 			<< "RPU wrote past kFwDappBannerMax at offset " << i;
 	}
 
-	::munmap(ack_map, kFwRspBoSize);
+	do_buf_munmap(ack_map, kFwRspBoSize);
 	(void)do_gem_close(fd_, ack_bo);
 	(void)do_gem_close(fd_, dev_bo);
 }

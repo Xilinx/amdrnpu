@@ -22,9 +22,6 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(LIBDRM REQUIRED libdrm)
-
 # USDT/SDT static trace markers (perf-consumable) require systemtap's
 # <sys/sdt.h>. Optional: without it the AMDRNPU_TRACE* macros compile to no-ops.
 include(CheckIncludeFile)
@@ -46,11 +43,8 @@ function(_amdrnpu_lib_configure_target tgt)
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
             $<BUILD_INTERFACE:${AMDRNPU_UAPI_DIR}>
             $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
-        PRIVATE
-            ${LIBDRM_INCLUDE_DIRS}
     )
-    target_link_libraries(${tgt} PRIVATE ${LIBDRM_LIBRARIES})
-    target_compile_options(${tgt} PRIVATE ${LIBDRM_CFLAGS_OTHER} -Wall -Wextra)
+    target_compile_options(${tgt} PRIVATE -Wall -Wextra)
     if(AMDRNPU_HAVE_SDT)
         target_compile_definitions(${tgt} PRIVATE AMDRNPU_HAVE_SDT)
     endif()
@@ -110,9 +104,6 @@ if(AMDRNPU_LIB_BUILD_EXAMPLES AND _installed_targets)
 	foreach(_exe IN LISTS _tess_examples)
 		add_executable(${_exe} examples/${_exe}.c)
 		target_link_libraries(${_exe} PRIVATE ${_example_tess_lib})
-		target_include_directories(${_exe} PRIVATE ${LIBDRM_INCLUDE_DIRS})
-		target_link_libraries(${_exe} PRIVATE ${LIBDRM_LIBRARIES})
-		target_compile_options(${_exe} PRIVATE ${LIBDRM_CFLAGS_OTHER})
 		if(NOT AMDRNPU_LINK_EXAMPLES_STATIC AND TARGET amdrnpu)
 			target_link_options(${_exe} PRIVATE "-Wl,-rpath,\$ORIGIN/../amdrnpu-lib")
 		endif()

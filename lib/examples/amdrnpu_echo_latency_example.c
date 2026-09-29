@@ -13,7 +13,7 @@
  *
  * Usage:
  *   amdrnpu_echo_latency_example [options]
- *     --device /dev/dri/cardN   target node (default: scan for "amdrnpu")
+ *     --device /dev/amdrnpu.N   target node (default: scan /dev/amdrnpu.*)
  *     --iterations N            measured round-trips (default 1000)
  *     --busy-poll               poll the fence instead of a blocking wait
  *     --timeout S               per-op wait deadline in seconds (default 5)
@@ -38,8 +38,6 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
-
-#include <xf86drm.h>
 
 #include <amdrnpu/amdrnpu.h>
 #include <amdrnpu/amdrnpu_lib.h>
@@ -88,62 +86,47 @@ static int echo_wait_busy_poll(int fd, uint32_t handle, int64_t timeout_ns,
 }
 
 /* ------------------------------------------------------------------ */
-/* DRM device discovery (mirrors amdrnpu_test.c)                  */
+/* device discovery (mirrors amdrnpu_test.c)                           */
 /* ------------------------------------------------------------------ */
 
-static int drm_fd_is_amdrnpu(int fd)
-{
-	drmVersionPtr v = drmGetVersion(fd);
-	int yes = 0;
-
-	if (!v)
-		return 0;
-	yes = (strcmp(v->name, AMDRNPU_DRIVER_NAME) == 0);
-	drmFreeVersion(v);
-	return yes;
-}
-
-static int open_primary_amdrnpu(char *out_path, size_t out_sz)
+/*
+ * Scan /dev/amdrnpu.* and open the lowest-numbered node. The driver is a
+ * miscdevice, so the node name IS the identity -- there is no name/version
+ * ioctl to probe.
+ */
+static int open_amdrnpu_scan(char *out_path, size_t out_sz)
 {
 	DIR *dir;
 	struct dirent *e;
-	long best_minor = LONG_MAX;
+	long best = LONG_MAX;
 	int best_fd = -1;
 	char best_path[PATH_MAX] = {0};
 
-	dir = opendir("/dev/dri");
+	dir = opendir("/dev");
 	if (!dir)
 		return -1;
 
 	while ((e = readdir(dir)) != NULL) {
-		long m;
+		long n;
 		int fd;
 		char p[PATH_MAX];
 
-		if (strncmp(e->d_name, "card", 4) != 0)
+		if (strncmp(e->d_name, "amdrnpu.", 8) != 0)
 			continue;
-		if (!isdigit((unsigned char)e->d_name[4]))
+		if (!isdigit((unsigned char)e->d_name[8]))
 			continue;
-		m = strtol(e->d_name + 4, NULL, 10);
-		if (m < 0 || m > 4095)
+		n = strtol(e->d_name + 8, NULL, 10);
+		if (n < 0 || n >= best)
 			continue;
-		snprintf(p, sizeof(p), "/dev/dri/%s", e->d_name);
+		snprintf(p, sizeof(p), "/dev/%s", e->d_name);
 		fd = open(p, O_RDWR | O_CLOEXEC);
 		if (fd < 0)
 			continue;
-		if (!drm_fd_is_amdrnpu(fd)) {
-			close(fd);
-			continue;
-		}
-		if (m < best_minor) {
-			if (best_fd >= 0)
-				close(best_fd);
-			best_minor = m;
-			best_fd = fd;
-			snprintf(best_path, sizeof(best_path), "%s", p);
-		} else {
-			close(fd);
-		}
+		if (best_fd >= 0)
+			close(best_fd);
+		best = n;
+		best_fd = fd;
+		snprintf(best_path, sizeof(best_path), "%s", p);
 	}
 	closedir(dir);
 
@@ -162,26 +145,14 @@ static int open_amdrnpu_device(const char *path, char *opened_path, size_t sz)
 			fprintf(stderr, "open(%s): %s\n", path, strerror(errno));
 			return -1;
 		}
-		if (!drm_fd_is_amdrnpu(fd)) {
-			drmVersionPtr v = drmGetVersion(fd);
-
-			fprintf(stderr, "%s is not %s (drm name=\"%s\")\n",
-				path, AMDRNPU_DRIVER_NAME,
-				v ? v->name : "?");
-			if (v)
-				drmFreeVersion(v);
-			close(fd);
-			return -1;
-		}
 		if (opened_path && sz > 0)
 			snprintf(opened_path, sz, "%s", path);
 		return fd;
 	}
-	fd = open_primary_amdrnpu(opened_path, sz);
+	fd = open_amdrnpu_scan(opened_path, sz);
 	if (fd < 0)
 		fprintf(stderr,
-			"no /dev/dri/card* matches driver \"%s\"; pass --device\n",
-			AMDRNPU_DRIVER_NAME);
+			"no /dev/amdrnpu.* node found; pass --device\n");
 	return fd;
 }
 
@@ -241,12 +212,12 @@ static void usage(const char *prog)
 {
 	fprintf(stderr,
 		"Usage: %s [options]\n"
-		"  --device /dev/dri/cardN   target node (default: scan for \"%s\")\n"
+		"  --device /dev/amdrnpu.N   target node (default: scan /dev/amdrnpu.*)\n"
 		"  --iterations N            measured round-trips (default %u)\n"
 		"  --busy-poll               poll the fence instead of blocking wait\n"
 		"  --timeout S               per-op wait deadline, seconds (default %u)\n"
 		"  --op 0xVAL                command opcode (default 0x%08x)\n",
-		prog, AMDRNPU_DRIVER_NAME, DEFAULT_ITERATIONS,
+		prog, DEFAULT_ITERATIONS,
 		DEFAULT_TIMEOUT_SEC, AMDRNPU_FW_ECHO_OP);
 }
 

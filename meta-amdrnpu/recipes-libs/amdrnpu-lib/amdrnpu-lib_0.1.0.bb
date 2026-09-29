@@ -1,8 +1,8 @@
 SUMMARY = "AMD amdrnpu userspace runtime library"
-DESCRIPTION = "Thin userspace wrapper around the amdrnpu DRM driver: \
-AMDRNPU_BUF_ALLOC and AMDRNPU_CMD_SUBMIT plus drm_syncobj completion \
-helpers. Lives under lib/ in the amdrnpu repository and \
-ships the amdrnpu_test CLI used to exercise every UAPI op."
+DESCRIPTION = "Thin userspace wrapper around the amdrnpu rpmsg char driver: \
+dma-buf import + AMDRNPU_CMD_SUBMIT plus sync_file completion helpers. \
+Lives under lib/ in the amdrnpu repository and ships the amdrnpu_test CLI \
+used to exercise every UAPI op."
 HOMEPAGE = "https://gitenterprise.xilinx.com/PhysicalAI/tessai-agent"
 SECTION = "libs"
 
@@ -23,10 +23,6 @@ EXTERNALSRC_BUILD = "${WORKDIR}/build"
 
 S = "${EXTERNALSRC}"
 B = "${EXTERNALSRC_BUILD}"
-
-# amdrnpu_lib.c calls into libdrm for syncobj / sync_file ioctls and
-# for DRM_IOCTL_GEM_CLOSE struct definitions.
-DEPENDS = "libdrm"
 
 # CMake exposes the UAPI dir explicitly so the lib does not have to
 # guess when built from a relocated source tree.

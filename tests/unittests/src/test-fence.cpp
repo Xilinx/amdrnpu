@@ -101,32 +101,32 @@ TEST_F(AmdrnpuFence, BusyPollSleepInterval)
 	(void)do_syncobj_destroy(fd_, syncobj);
 }
 
-// ---- in-flight pin survives early GEM_CLOSE -----------------------
+// ---- in-flight pin survives early buffer close --------------------
 
 // alloc -> mmap -> TO_DEVICE sync -> submit with BO in args[0] ->
-// GEM_CLOSE IMMEDIATELY -> wait -> verify writeback observable via
-// the surviving mmap. The mmap holds its own page reference (taken
-// by the VMA when mmap was issued) so it outlives the GEM handle.
+// close the buffer IMMEDIATELY -> wait -> verify writeback observable
+// via the surviving mmap. The mmap holds its own page reference (taken
+// by the VMA when mmap was issued) so it outlives the buffer handle.
 // The driver's bo_refs[] pin (taken during submit's ioctl handling)
-// keeps the underlying dma_alloc pages allocated past close. Documents
+// keeps the underlying dma-buf pages allocated past close. Documents
 // buffer-management.md §4 end-to-end.
 //
 // Lifetime contract for the post-close half (do_syncobj_wait ->
 // uspace_dcache_invalidate -> sscanf):
-//   - do_gem_close ONLY drops the BO handle from the per-fd idr;
-//     fd_ itself stays open for the rest of the test. This is the
-//     whole reason the in-flight pin is observable: subsequent
-//     ioctls on the same fd (e.g. DRM_IOCTL_SYNCOBJ_WAIT) continue
-//     to work. Even hypothetically -- if fd_ were also closed --
-//     none of the lines below crash: the wait is an ioctl that
-//     fails with -EBADF (caught by the EXPECT_EQ + early return
+//   - do_gem_close ONLY drops the buffer handle from the per-fd handle
+//     table; fd_ itself stays open for the rest of the test. This is
+//     the whole reason the in-flight pin is observable: subsequent
+//     waits on the completion (sync_file) fd continue to work. Even
+//     hypothetically -- if fd_ were also closed --
+//     none of the lines below crash: the wait operates on the
+//     completion fd (caught by the EXPECT_EQ + early return
 //     below), and uspace_dcache_invalidate + sscanf operate on the
 //     mmap pointer `map`, which doesn't touch fd_ at all and stays
 //     valid past fd close because the VMA holds its own page ref
 //     (mmap'd memory survives the file descriptor that minted it,
 //     by POSIX contract).
 //   - Post-wait we must invalidate userspace caches manually (the
-//     GEM handle is gone so AMDRNPU_BUF_SYNC is unreachable) -- arm64
+//     buffer handle is gone so amdrnpu_buf_sync is unreachable) -- arm64
 //     DC CIVAC over the mmap'd page, exactly what the kernel would
 //     have done on our behalf if we still had a handle.
 //
@@ -143,19 +143,16 @@ TEST_F(AmdrnpuFence, InflightPinSurvivesGemClose)
 	uint32_t bo = 0;
 	ASSERT_EQ(do_buf_alloc(fd_, AMDRNPU_MEMORY_RPU, kFwRspBoSize, &bo), 0);
 
-	uint64_t off = 0;
-	ASSERT_EQ(do_map_dumb(fd_, bo, &off), 0);
-
-	void *map = ::mmap(nullptr, kFwRspBoSize, PROT_READ | PROT_WRITE,
-			   MAP_SHARED, fd_, static_cast<off_t>(off));
-	ASSERT_NE(map, MAP_FAILED);
+	void *map = nullptr;
+	ASSERT_EQ(do_buf_mmap(fd_, bo, kFwRspBoSize, &map), 0);
+	ASSERT_NE(map, nullptr);
 	std::memset(map, 0x0a, kFwRspBoSize);
 
 	ASSERT_EQ(do_buf_sync(fd_, bo, AMDRNPU_BUF_SYNC_TO_DEVICE, 0, 0), 0);
 
 	std::array<struct amdrnpu_arg, 3> args{};
 	args[0].size = kFwRspTextMax;
-	args[0].bo.drm_buffer_handle = static_cast<int32_t>(bo);
+	args[0].bo.buffer_handle = static_cast<int32_t>(bo);
 	args[0].bo.offset = 0;
 	args[1].size  = 0;
 	args[1].value = 0xA0044001ull;
@@ -198,7 +195,7 @@ TEST_F(AmdrnpuFence, InflightPinSurvivesGemClose)
 		// downstream sscanf-mismatch red herring.
 		ADD_FAILURE() << "wait failed; skipping writeback check";
 		(void)do_syncobj_destroy(fd_, syncobj);
-		::munmap(map, kFwRspBoSize);
+		do_buf_munmap(map, kFwRspBoSize);
 		return;
 	}
 
@@ -225,7 +222,7 @@ TEST_F(AmdrnpuFence, InflightPinSurvivesGemClose)
 	EXPECT_EQ(rpu_nargs, 3u);
 
 	(void)do_syncobj_destroy(fd_, syncobj);
-	::munmap(map, kFwRspBoSize);
+	do_buf_munmap(map, kFwRspBoSize);
 }
 
 // RAII unique_fd must close the held fd at scope exit; a raw-int
@@ -245,19 +242,19 @@ TEST_F(AmdrnpuFence, UniqueFdClosesAtInnerScopeExit)
 	ASSERT_GE(fd_, 0);
 
 	int captured_fd = -1;
-	char name[64] = {};
 	{
 		char      path[PATH_MAX] = {};
-		unique_fd local{open_amdrnpu_card(path, sizeof(path))};
+		unique_fd local{open_amdrnpu_device(path, sizeof(path))};
 		ASSERT_GE(local.get(), 0);
 		captured_fd = local.get();
-		// Should successfully get the name of card0
-		ASSERT_EQ(drm_get_name(captured_fd, name, sizeof(name)), 0);
+		// The freshly-opened device fd is live.
+		ASSERT_EQ(probe_fd(captured_fd), 0);
 	}
 
 	ASSERT_GE(captured_fd, 0);
 
-	int  rc       = drm_get_name(captured_fd, name, sizeof(name));
+	// unique_fd's dtor closed it at scope exit; the raw int is now stale.
+	int  rc       = probe_fd(captured_fd);
 	SCOPED_TRACE(testing::Message()
 		     << "captured_fd=" << captured_fd << " rc=" << rc);
 	EXPECT_EQ(rc, -EBADF);

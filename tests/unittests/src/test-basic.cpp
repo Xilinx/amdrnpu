@@ -5,7 +5,7 @@
 // a BO, a sync_file, or a fault opcode lives here.
 //
 // Tests in this file:
-//   - AmdrnpuBasic.DriverNameIsAmdrnpu  (drm_get_name probe)
+//   - AmdrnpuBasic.DeviceNodeIsAmdrnpu  (/dev/amdrnpu.N discovery)
 //   - AmdrnpuBasic.NoopSubmit               (num_args=0 round trip)
 //   - AmdrnpuBasic.ScalarArgsSubmit         (scalar __u64 args)
 //   - AmdrnpuBasic.FwEchoOpSubmitScalarOnly (0x42424242 dispatch)
@@ -25,15 +25,17 @@ using namespace amdrnpu_test;
 // from AmdrnpuTest. Same idiom in every test-*.cpp here.
 class AmdrnpuBasic : public AmdrnpuTest {};
 
-TEST_F(AmdrnpuBasic, DriverNameIsAmdrnpu)
+TEST_F(AmdrnpuBasic, DeviceNodeIsAmdrnpu)
 {
-	// Sanity check the fixture: open_amdrnpu_card has already verified
-	// drm_get_name == AMDRNPU_DRIVER_NAME, but re-probe here so a
-	// regression in the discovery loop surfaces as a per-test failure
-	// instead of a fleet-wide GTEST_SKIP.
-	char name[64] = {};
-	ASSERT_EQ(drm_get_name(fd_, name, sizeof(name)), 0);
-	ASSERT_STREQ(name, AMDRNPU_DRIVER_NAME);
+	// The char driver has no name/version ioctl (it's a miscdevice,
+	// not DRM); its identity is the /dev node path. The fixture
+	// already opened it, so assert the discovered path is the
+	// expected /dev/amdrnpu.N so a regression in the discovery loop
+	// surfaces as a per-test failure instead of a fleet-wide
+	// GTEST_SKIP.
+	ASSERT_GE(fd_, 0);
+	EXPECT_EQ(card_path_.compare(0, 13, "/dev/amdrnpu."), 0)
+		<< "discovered device path: " << card_path_;
 }
 
 // ---- smallest possible round-trip ---------------------------------
@@ -107,17 +109,17 @@ TEST_F(AmdrnpuBasic, FwEchoOpSubmitScalarOnly)
 // front, skip in main if absent, then launch workers.
 TEST(AmdrnpuBasicStandalone, NoopSubmitMultiThreaded)
 {
-	int probe_fd = open_amdrnpu_card();
-	if (probe_fd < 0)
-		GTEST_SKIP() << "amdrnpu DRM card not found";
-	::close(probe_fd);
+	int probe = open_amdrnpu_device();
+	if (probe < 0)
+		GTEST_SKIP() << "no /dev/amdrnpu.N found";
+	::close(probe);
 
 	constexpr int kNumThreads = 4;
 	std::atomic<int> fails{0};
 	std::array<std::thread, kNumThreads> threads;
 	for (int i = 0; i < kNumThreads; ++i) {
 		threads[i] = std::thread([&] {
-			int fd = open_amdrnpu_card();
+			int fd = open_amdrnpu_device();
 			if (fd < 0) { ++fails; return; }
 			uint32_t syncobj = 0;
 			if (do_cmd_submit(fd, 0xC0FFEE00u, nullptr, 0,
