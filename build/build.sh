@@ -4,7 +4,7 @@
 # amdrnpu unified build orchestrator.
 #
 # Builds all deliverables, out-of-source, into build/<TYPE>/:
-#   - drivers/accel/amdrnpu/       -> amdrnpu.ko        (kernel module)
+#   - drivers/rpmsg/amdrnpu/       -> amdrnpu.ko        (kernel module)
 #   - lib/                        -> libamdrnpu.{so*,a}
 #   - lib/examples/               -> amdrnpu_test      (CLI)
 #                                    amdrnpu_inout_example (CLI;
@@ -51,7 +51,7 @@
 #                           files are symlinks back into the repo,
 #                           kbuild outputs (.o, .ko, .mod*, .cmd) are
 #                           real files in the mirror. The repo source
-#                           tree (drivers/accel/amdrnpu/) is never
+#                           tree (drivers/rpmsg/amdrnpu/) is never
 #                           written to. Same trick xdna-driver uses.
 #   build/<TYPE>/cmake-lib/ cmake out-of-source bookkeeping for lib/
 #   build/<TYPE>/*.log      build / cmake / strip-dirty logs
@@ -399,10 +399,10 @@ build_kmod() {
     cp -rs "$REPO/drivers" "$OUT/obj/"
     cp -rs "$REPO/include" "$OUT/obj/"
 
-    local MIRROR_M="$OUT/obj/drivers/accel/amdrnpu"
+    local MIRROR_M="$OUT/obj/drivers/rpmsg/amdrnpu"
 
     # Defensive: if the source tree had stale build artifacts (e.g. from
-    # a previous in-source `make -C drivers/accel/amdrnpu`), they
+    # a previous in-source `make -C drivers/rpmsg/amdrnpu`), they
     # show up as symlinks in the mirror. Delete them so kbuild creates
     # fresh real files in their place rather than writing through a
     # symlink back into the source.
