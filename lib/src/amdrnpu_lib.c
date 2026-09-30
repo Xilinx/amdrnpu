@@ -378,6 +378,86 @@ void amdrnpu_buf_munmap(void *addr, uint64_t length)
 	AMDRNPU_TRACE0(buf_munmap_exit);
 }
 
+/*
+ * Map [@offset, @offset + @length).  mmap(2) requires a page-aligned offset,
+ * so the mapped base may precede @offset; @out_ptr points at @offset.
+ */
+static int amdrnpu_buf_map_section(int fd, uint32_t handle, uint64_t offset,
+				   uint64_t length, void **out_base,
+				   uint64_t *out_map_len, void **out_ptr)
+{
+	uint64_t page_off, map_off, map_len;
+	long page;
+	void *map;
+	int ret;
+
+	if (length == 0 || length > SIZE_MAX || offset > UINT64_MAX - length)
+		return -EINVAL;
+
+	page = sysconf(_SC_PAGESIZE);
+	if (page <= 0)
+		return -EINVAL;
+
+	page_off = offset % (uint64_t)page;
+	map_off = offset - page_off;
+	map_len = page_off + length;
+	if (map_len > SIZE_MAX)
+		return -EINVAL;
+
+	ret = amdrnpu_buf_mmap(fd, handle, 0, map_off, map_len, &map);
+	if (ret)
+		return ret;
+
+	*out_base = map;
+	*out_map_len = map_len;
+	*out_ptr = (unsigned char *)map + page_off;
+	return 0;
+}
+
+int amdrnpu_buf_write(int fd, uint32_t handle, const void *src,
+		      uint64_t offset, uint64_t length)
+{
+	uint64_t map_len;
+	void *map, *dst;
+	int ret;
+
+	if (length == 0)
+		return 0;
+	if (!src)
+		return -EINVAL;
+
+	ret = amdrnpu_buf_map_section(fd, handle, offset, length,
+				      &map, &map_len, &dst);
+	if (ret)
+		return ret;
+
+	memcpy(dst, src, (size_t)length);
+	amdrnpu_buf_munmap(map, map_len);
+	return 0;
+}
+
+int amdrnpu_buf_read(int fd, uint32_t handle, void *dst, uint64_t offset,
+		     uint64_t length)
+{
+	uint64_t map_len;
+	void *map, *src;
+	int ret;
+
+	if (length == 0)
+		return 0;
+	if (!dst)
+		return -EINVAL;
+
+	ret = amdrnpu_buf_map_section(fd, handle, offset, length,
+				      &map, &map_len, &src);
+	if (ret)
+		return ret;
+
+	memcpy(dst, src, (size_t)length);
+	amdrnpu_buf_munmap(map, map_len);
+	return 0;
+}
+
 int amdrnpu_buf_sync(int fd, uint32_t handle, uint32_t direction,
 		     uint64_t offset, uint64_t length)
 {

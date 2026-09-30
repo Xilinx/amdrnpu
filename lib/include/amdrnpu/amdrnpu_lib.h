@@ -111,6 +111,39 @@ AMDRNPU_LIB_API int amdrnpu_buf_mmap(int fd, uint32_t handle,
 AMDRNPU_LIB_API void amdrnpu_buf_munmap(void *addr, uint64_t length);
 
 /**
+ * amdrnpu_buf_write - copy bytes from userspace into a buffer.
+ *
+ * @fd:		open /dev/amdrnpu.N descriptor (same as passed to buf_alloc).
+ * @handle:	handle from amdrnpu_buf_alloc().
+ * @src:	source userspace virtual address.
+ * @offset:	byte offset into the buffer at which to start writing.
+ * @length:	number of bytes to copy.  [@offset, @offset + @length) must lie
+ *		within the buffer.
+ *
+ * Copies bytes from userspace into a buffer with a temporary CPU mapping and
+ * memcpy().  Returns 0 on success or a negative errno.
+ */
+AMDRNPU_LIB_API int amdrnpu_buf_write(int fd, uint32_t handle,
+				      const void *src, uint64_t offset,
+				      uint64_t length);
+
+/**
+ * amdrnpu_buf_read - copy bytes from a buffer into userspace.
+ *
+ * @fd:		open /dev/amdrnpu.N descriptor (same as passed to buf_alloc).
+ * @handle:	handle from amdrnpu_buf_alloc().
+ * @dst:	destination userspace virtual address.
+ * @offset:	byte offset into the buffer at which to start reading.
+ * @length:	number of bytes to copy.  [@offset, @offset + @length) must lie
+ *		within the buffer.
+ *
+ * Copies bytes from a buffer into userspace with a temporary CPU mapping and
+ * memcpy().  Returns 0 on success or a negative errno.
+ */
+AMDRNPU_LIB_API int amdrnpu_buf_read(int fd, uint32_t handle, void *dst,
+				     uint64_t offset, uint64_t length);
+
+/**
  * amdrnpu_buf_sync - CPU cache maintenance around device DMA.
  *
  * @fd:		open /dev/amdrnpu.N descriptor (same as passed to buf_alloc).
