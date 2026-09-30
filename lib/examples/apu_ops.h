@@ -4,7 +4,8 @@
  *
  * APU → RPU_APP command opcodes that bridge amdrnpu wire commands
  * into the XRT Lite stack (RPU_APP → RPU_FW via the existing VE2 mgmt
- * transport). Keep lockstep with the APU gtest harness when one exists.
+ * transport). Keep lockstep with
+ * RPURuntime/tests/xrt_apu_rpu_test/src/apu_xrt_ops.h.
  *
  * Wire layout for every opcode:
  *   struct amdrnpu_wire_cmd { seq, command_op, flags, num_args, args[] }
@@ -38,30 +39,61 @@ extern "C" {
  */
 
 /*
- * APU_XRT_TEST — full XRT end-to-end run (mirrors xrt_test/src/main.cpp).
+ * APU_XRT_TEST — full XRT end-to-end run via descriptor buffer.
  *
- * args[] layout (uint64_t each):
- *   args[0]  = iteration count
- *   args[1]  = ELF physical address  (in rpu_gem_cma)
+ * Wire args[] layout (uint64_t each, num_args == APU_XRT_TEST_NUM_ARGS):
+ *   args[0]  = iteration count (top-level)
+ *   args[1]  = ELF physical address  (resolved from BO handle by driver)
  *   args[2]  = ELF size in bytes
- *   args[3]  = kernel arg[0] PA  (e.g. IFM; 0 = omit set_arg)
- *   args[4]  = kernel arg[1] PA  (e.g. OFM; 0 = omit set_arg)
- *   args[5]  = kernel arg[2] PA  (e.g. WTS; 0 = omit set_arg)
- *   ...      (up to 24 kernel args total, args[3..26])
- *   args[27] = result writeback PA  (0 = no writeback)
+ *   args[3]  = descriptor buffer PA  (resolved from BO handle by driver)
+ *   args[4]  = descriptor buffer content size in bytes
+ *   args[5]  = result writeback PA   (resolved from BO handle; 0 = skip)
  *
- * When args[27] is non-zero, RPU writes apu_xrt_test_result there.
+ * Intra-descriptor pointers (kernel_name_off, result_bo_off) are byte
+ * offsets from the start of the descriptor buffer.  Kernel-arg PAs inside
+ * apu_xrt_karg_entry are absolute physical addresses.
  */
 #define APU_XRT_TEST                 0x58525454u  /* 'XRTT' */
 
+#define APU_XRT_TEST_NUM_ARGS        6u
 #define APU_XRT_TEST_MAX_KARGS       24u
-#define APU_XRT_TEST_RESULT_ARG_IDX  (3u + APU_XRT_TEST_MAX_KARGS)  /* 27 */
+/* Wire args[5] is the top-level result PA (descriptor protocol). */
+#define APU_XRT_TEST_RESULT_ARG_IDX  5u
+
+struct __attribute__((__packed__)) apu_xrt_karg_entry {
+	uint64_t pa;    /* physical address (BO) or scalar value (scalar) */
+	uint64_t size;  /* byte size for BO mapping; 0 = scalar arg */
+};
+
+#define APU_XRT_KARG_ENTRY_SIZE  sizeof(struct apu_xrt_karg_entry)
+
+struct __attribute__((__packed__)) apu_xrt_run_entry {
+	uint32_t iterations;
+	uint32_t n_kargs;
+	uint32_t kernel_name_off;    /* 0 = auto-discover from ELF */
+	uint32_t kernel_name_len;
+	uint32_t result_bo_off;      /* 0 = skip per-entry result */
+	uint32_t reserved;
+	struct apu_xrt_karg_entry kargs[];
+};
+
+#define APU_XRT_RUN_ENTRY_HDR_SIZE  (sizeof(uint32_t) * 6u)
+
+#define APU_XRT_RUN_ENTRY_SIZE(n_kargs) \
+	(APU_XRT_RUN_ENTRY_HDR_SIZE + (uint32_t)(n_kargs) * APU_XRT_KARG_ENTRY_SIZE)
+
+struct __attribute__((__packed__)) apu_xrt_cmd_desc {
+	uint32_t n_entries;
+	uint32_t reserved;
+};
+
+#define APU_XRT_CMD_DESC_HDR_SIZE  sizeof(struct apu_xrt_cmd_desc)
 
 struct __attribute__((__packed__)) apu_xrt_test_result {
-	uint32_t passed;           /* 1 = all iterations completed, 0 = fail */
-	uint32_t iterations_done;  /* number of iterations completed */
-	uint32_t latency_avg_us;   /* average start→wait round-trip */
-	uint32_t latency_first_us; /* first iteration latency */
+	uint32_t passed;
+	uint32_t iterations_done;
+	uint32_t latency_avg_us;
+	uint32_t latency_first_us;
 };
 
 #define APU_XRT_TEST_RESULT_SIZE  sizeof(struct apu_xrt_test_result)

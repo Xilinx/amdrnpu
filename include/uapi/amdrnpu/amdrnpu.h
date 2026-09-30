@@ -146,6 +146,28 @@ struct amdrnpu_buf_destroy {
 	_IOW(AMDRNPU_IOC_MAGIC, 0x11, struct amdrnpu_buf_destroy)
 
 /**
+ * struct amdrnpu_buf_query - return the DMA address recorded at import.
+ *
+ * @handle:	buffer handle from AMDRNPU_BUF_IMPORT / amdrnpu_buf_alloc().
+ * @pad:	reserved, must be 0.
+ * @dma_addr:	out; device/firmware-domain physical address of the buffer.
+ * @size:	out; contiguous mapped length in bytes.
+ *
+ * Used by userspace when filling APU_XRT_TEST descriptor karg entries
+ * (absolute PAs inside the descriptor blob).  The same address is what
+ * AMDRNPU_CMD_SUBMIT emits for wire BO args.
+ */
+struct amdrnpu_buf_query {
+	__u32 handle;
+	__u32 pad;
+	__u64 dma_addr;
+	__u64 size;
+};
+
+#define AMDRNPU_BUF_QUERY \
+	_IOWR(AMDRNPU_IOC_MAGIC, 0x12, struct amdrnpu_buf_query)
+
+/**
  * enum amdrnpu_memory_type - target memory domain for amdrnpu_buf_alloc().
  *
  * AMDRNPU_MEMORY_RPU:	  RPU/firmware-reachable memory.  The library allocates

@@ -74,6 +74,21 @@ AMDRNPU_LIB_API int amdrnpu_buf_alloc(int fd, uint32_t memory_type,
 AMDRNPU_LIB_API int amdrnpu_buf_close(int fd, uint32_t handle);
 
 /**
+ * amdrnpu_buf_get_phys - return the DMA/physical address of an imported BO.
+ *
+ * @fd:		open /dev/amdrnpu.N descriptor.
+ * @handle:	handle from amdrnpu_buf_alloc().
+ * @out_pa:	on success, firmware-domain physical address.
+ * @out_size:	optional; contiguous mapped size (pass NULL to ignore).
+ *
+ * Needed when writing absolute PAs into an APU_XRT_TEST descriptor buffer
+ * (the driver only rewrites top-level wire BO args, not in-descriptor
+ * karg entries).  Returns 0 on success or a negative errno.
+ */
+AMDRNPU_LIB_API int amdrnpu_buf_get_phys(int fd, uint32_t handle,
+					 uint64_t *out_pa, uint64_t *out_size);
+
+/**
  * amdrnpu_buf_mmap - CPU-map a (sub)range of a buffer.
  *
  * @fd:		open /dev/amdrnpu.N descriptor (same as passed to buf_alloc).

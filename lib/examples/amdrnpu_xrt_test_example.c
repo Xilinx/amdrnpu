@@ -2,33 +2,21 @@
 /*
  * amdrnpu_xrt_test_example - APU-side driver for APU_XRT_TEST.
  *
- * Opcodes and result struct are defined in apu_xrt_ops.h (copied from
- * RPU2/tests/xrt_apu_rpu_test/src/apu_xrt_ops.h).
+ * Wire protocol matches RPURuntime tests/xrt_apu_rpu_test/src/apu_xrt_ops.h:
+ *   args[0] = iterations
+ *   args[1] = ELF BO / PA
+ *   args[2] = ELF size
+ *   args[3] = descriptor BO / PA
+ *   args[4] = descriptor content size
+ *   args[5] = result BO / PA (optional)
  *
- * Submits APU_XRT_TEST ('XRTT', 0x58525454) to RPU_APP with:
- *   args[0]     = iteration count
- *   args[1]     = ELF BO (from --elf-file) or scalar PA (--elf-pa)
- *   args[2]     = ELF size in bytes
- *   args[3..10] = up to 8 kernel arg BOs (--arg PATH or --arg-pa PA:SIZE)
- *   args[11]    = result writeback BO (apu_xrt_test_result)
- *
- * The RPU_APP runs the full XRT pipeline:
- *   xrt::elf → xrt::hw_context → xrt::kernel → xrt::bo per arg →
- *   xrt::run::set_arg() → run loop (start/wait) → result writeback.
+ * The descriptor holds one (or more) apu_xrt_run_entry structs with kernel
+ * arg PA+size pairs.  Kernel-arg physical addresses come from
+ * amdrnpu_buf_get_phys() (AMDRNPU_BUF_QUERY) — dma-buf mmaps are not
+ * reliably present in /proc/self/pagemap.
  *
  * Usage:
- *   amdrnpu_xrt_test_example [OPTIONS]
- *
- *   --device PATH        /dev/amdrnpu.N node (auto-detected if omitted)
- *   --iterations N       Inference iterations (default 1)
- *   --elf-file PATH      Load ELF into RPU BO from file
- *   --elf-pa PA          Pre-loaded ELF physical address (hex)
- *   --elf-size SZ        ELF size in bytes (required with --elf-pa)
- *   --arg PATH[:SIZE]    Kernel arg: load file into RPU BO; SIZE optional
- *                        (use file size if omitted).  Repeat up to 8×.
- *   --arg-pa PA:SIZE     Kernel arg: pre-loaded PA:size (hex).  Repeat up to 8×.
- *   --no-result          Skip result writeback BO
- *   --timeout-s N        Wait timeout in seconds (default 60)
+ *   amdrnpu_xrt_test_example --elf-file ELF --arg PATH... [OPTIONS]
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -64,11 +52,6 @@ static void fail(const char *what, int rc)
 	g_fail = 1;
 }
 
-/*
- * Scan /dev/amdrnpu.* and open the lowest-numbered node. The driver is a
- * miscdevice, so the node name IS the identity -- there is no name/version
- * ioctl to probe. Returns fd >= 0 on success, -1 if none.
- */
 static int open_amdrnpu_node(char *path_out, size_t path_sz)
 {
 	DIR *dir = opendir("/dev");
@@ -124,11 +107,14 @@ static int parse_u64(const char *s, uint64_t *out)
 	return 0;
 }
 
-/* One kernel argument — either a file-backed BO or a pre-loaded PA. */
+/* Absolute PA for a BO handle (fills descriptor karg entries). */
+static int buf_phys(int fd, uint32_t handle, uint64_t *pa_out)
+{
+	return amdrnpu_buf_get_phys(fd, handle, pa_out, NULL);
+}
+
 struct karg_spec {
-	/* file-backed */
 	char     path[PATH_MAX];
-	/* pre-loaded PA */
 	uint64_t pa;
 	uint64_t size;
 };
@@ -137,11 +123,9 @@ struct cli_opts {
 	char             device[PATH_MAX];
 	uint32_t         iterations;
 	uint32_t         timeout_s;
-	/* ELF: file XOR pa+size */
 	char             elf_file[PATH_MAX];
 	uint64_t         elf_pa;
 	uint64_t         elf_size;
-	/* kernel args */
 	struct karg_spec kargs[APU_XRT_TEST_MAX_KARGS];
 	uint32_t         n_kargs;
 	bool             want_result;
@@ -206,14 +190,15 @@ static int parse_cli(int argc, char **argv, struct cli_opts *o)
 			o->n_kargs++;
 			i += 2;
 		} else if (!strcmp(argv[i], "--arg-pa") && i + 1 < argc) {
+			char *colon;
+
 			if (o->n_kargs >= APU_XRT_TEST_MAX_KARGS) {
 				fprintf(stderr,
 					"error: max %u --arg-pa entries\n",
 					APU_XRT_TEST_MAX_KARGS);
 				return -EINVAL;
 			}
-			/* format: PA:SIZE (both hex) */
-			char *colon = strchr(argv[i + 1], ':');
+			colon = strchr(argv[i + 1], ':');
 			if (!colon) {
 				fprintf(stderr,
 					"error: --arg-pa needs PA:SIZE\n");
@@ -257,7 +242,6 @@ static int parse_cli(int argc, char **argv, struct cli_opts *o)
 	return 0;
 }
 
-/* Load a file into an RPU BO; returns 0 on success. */
 static int load_file_to_rpu_bo(int fd, const char *path,
 				uint32_t *out_bo, void **out_map,
 				uint64_t *out_file_sz, uint64_t *out_alloc_sz)
@@ -343,46 +327,48 @@ static const char *rsp_status_str(int32_t st)
 	}
 }
 
-/* Per-karg runtime state */
 struct karg_bo {
 	uint32_t handle;
 	void    *map;
 	uint64_t alloc_sz;
+	uint64_t file_sz;
+	uint64_t pa;
 };
 
 int main(int argc, char **argv)
 {
 	struct cli_opts opts;
-	char opened_path[PATH_MAX] = {0};
+	char opened_path[PATH_MAX];
 	int fd = -1;
-	int rc;
+	int rc = 0;
 
-	/* ELF BO */
-	uint32_t elf_bo       = 0;
-	void    *elf_map      = NULL;
-	uint64_t elf_file_sz  = 0;
+	uint32_t elf_bo = 0;
+	void    *elf_map = NULL;
+	uint64_t elf_file_sz = 0;
 	uint64_t elf_alloc_sz = 0;
 
-	/* Kernel arg BOs */
 	struct karg_bo kbo[APU_XRT_TEST_MAX_KARGS];
 	memset(kbo, 0, sizeof(kbo));
 
-	/* Result BO */
-	uint32_t result_bo  = 0;
+	uint32_t desc_bo = 0;
+	void    *desc_map = NULL;
+	uint64_t desc_alloc_sz = 0;
+	uint32_t desc_content_sz = 0;
+
+	uint32_t result_bo = 0;
 	void    *result_map = NULL;
 
-	/* Wire args: 0=iter 1=elf_pa 2=elf_size 3..10=kargs 11=result */
-	struct amdrnpu_arg args[APU_XRT_TEST_RESULT_ARG_IDX + 1];
+	struct amdrnpu_arg args[APU_XRT_TEST_NUM_ARGS];
 	memset(args, 0, sizeof(args));
 
 	struct amdrnpu_cmd_submit hdr;
 	int32_t fence_st = 0;
+	uint32_t i;
 
 	rc = parse_cli(argc, argv, &opts);
 	if (rc > 0) return 0;
 	if (rc < 0) return 2;
 
-	/* Open device */
 	if (opts.device[0]) {
 		fd = open(opts.device, O_RDWR | O_CLOEXEC);
 		if (fd < 0) { perror(opts.device); return 1; }
@@ -405,7 +391,7 @@ int main(int argc, char **argv)
 	args[0].size  = 0;
 	args[0].value = opts.iterations;
 
-	/* args[1]: ELF */
+	/* args[1]/[2]: ELF */
 	if (opts.elf_file[0]) {
 		rc = load_file_to_rpu_bo(fd, opts.elf_file,
 					 &elf_bo, &elf_map,
@@ -414,7 +400,7 @@ int main(int argc, char **argv)
 		printf("elf-file:   %s → BO=%u size=%" PRIu64 "\n",
 		       opts.elf_file, elf_bo, elf_file_sz);
 		args[1].size                 = elf_alloc_sz;
-		args[1].bo.buffer_handle = (int32_t)elf_bo;
+		args[1].bo.buffer_handle     = (int32_t)elf_bo;
 		args[1].bo.offset            = 0;
 		args[2].size  = 0;
 		args[2].value = elf_file_sz;
@@ -432,119 +418,163 @@ int main(int argc, char **argv)
 		goto out;
 	}
 
-	/* args[3..10]: kernel arg BOs / PAs */
-	for (uint32_t i = 0; i < opts.n_kargs; ++i) {
+	/* Load kernel-arg BOs / resolve PAs for the descriptor. */
+	for (i = 0; i < opts.n_kargs; ++i) {
 		struct karg_spec *ks = &opts.kargs[i];
-		struct amdrnpu_arg *ta = &args[3 + i];
 
 		if (ks->path[0]) {
-			uint64_t fsz, asz;
 			rc = load_file_to_rpu_bo(fd, ks->path,
 						 &kbo[i].handle, &kbo[i].map,
-						 &fsz, &asz);
+						 &kbo[i].file_sz,
+						 &kbo[i].alloc_sz);
 			if (rc) {
 				fprintf(stderr, "load arg[%u] %s: %s\n",
 					i, ks->path, strerror(-rc));
 				g_fail = 1;
 				goto out;
 			}
-			kbo[i].alloc_sz = asz;
-			printf("arg[%u]:     %s → BO=%u size=%" PRIu64 "\n",
-			       i, ks->path, kbo[i].handle, fsz);
-			ta->size                 = asz;
-			ta->bo.buffer_handle = (int32_t)kbo[i].handle;
-			ta->bo.offset            = 0;
+			rc = buf_phys(fd, kbo[i].handle, &kbo[i].pa);
+			if (rc) {
+				fprintf(stderr,
+					"buf_get_phys(arg[%u]): %s\n",
+					i, strerror(-rc));
+				g_fail = 1;
+				goto out;
+			}
+			printf("arg[%u]:     %s → BO=%u size=%" PRIu64
+			       " PA=0x%08" PRIx64 "\n",
+			       i, ks->path, kbo[i].handle, kbo[i].file_sz,
+			       kbo[i].pa);
 		} else {
+			kbo[i].pa = ks->pa;
+			kbo[i].file_sz = ks->size;
+			kbo[i].alloc_sz = ks->size;
 			printf("arg[%u]:     PA=0x%08" PRIx64 " size=%" PRIu64 "\n",
 			       i, ks->pa, ks->size);
-			ta->size  = 0;
-			ta->value = ks->pa;
 		}
 	}
 
-	/* args[11]: result writeback BO */
-	uint32_t num_args = APU_XRT_TEST_RESULT_ARG_IDX + 1;
+	/* Build descriptor: 1 entry, n_kargs kernel args. */
+	desc_content_sz = APU_XRT_CMD_DESC_HDR_SIZE +
+			  APU_XRT_RUN_ENTRY_SIZE(opts.n_kargs);
+	desc_alloc_sz = (desc_content_sz + 4095ULL) & ~4095ULL;
+	if (desc_alloc_sz < 4096)
+		desc_alloc_sz = 4096;
 
+	rc = amdrnpu_buf_alloc(fd, AMDRNPU_MEMORY_RPU, desc_alloc_sz, &desc_bo);
+	if (rc) { fail("buf_alloc(desc)", rc); goto out; }
+	rc = amdrnpu_buf_mmap(fd, desc_bo, desc_alloc_sz, 0, desc_alloc_sz,
+			      &desc_map);
+	if (rc) { fail("buf_mmap(desc)", rc); goto out; }
+
+	{
+		uint8_t *base = desc_map;
+		struct apu_xrt_cmd_desc *desc =
+			(struct apu_xrt_cmd_desc *)base;
+		struct apu_xrt_run_entry *entry =
+			(struct apu_xrt_run_entry *)(base +
+						     APU_XRT_CMD_DESC_HDR_SIZE);
+
+		memset(base, 0, desc_alloc_sz);
+		desc->n_entries = 1;
+		desc->reserved  = 0;
+		entry->iterations      = opts.iterations;
+		entry->n_kargs         = opts.n_kargs;
+		entry->kernel_name_off = 0;
+		entry->kernel_name_len = 0;
+		entry->result_bo_off   = 0;
+		entry->reserved        = 0;
+		for (i = 0; i < opts.n_kargs; ++i) {
+			entry->kargs[i].pa = kbo[i].pa;
+			/* Use file size for BO mapping (not padded alloc). */
+			entry->kargs[i].size = kbo[i].file_sz ?
+				kbo[i].file_sz : kbo[i].alloc_sz;
+		}
+	}
+
+	rc = amdrnpu_buf_sync_to_device(fd, desc_bo, 0, 0);
+	if (rc) { fail("buf_sync(desc)", rc); goto out; }
+	printf("desc BO:    handle=%u content=%u B (1 entry, %u kargs)\n",
+	       desc_bo, desc_content_sz, opts.n_kargs);
+
+	args[3].size             = desc_alloc_sz;
+	args[3].bo.buffer_handle = (int32_t)desc_bo;
+	args[3].bo.offset        = 0;
+	args[4].size  = 0;
+	args[4].value = desc_content_sz;
+
+	/* args[5]: result writeback */
 	if (opts.want_result) {
 		rc = amdrnpu_buf_alloc(fd, AMDRNPU_MEMORY_RPU,
 					    APU_XRT_TEST_RESULT_SIZE,
 					    &result_bo);
 		if (rc) { fail("buf_alloc(result)", rc); goto out; }
 
-		/* CPU-map via the library (mmap on the buffer's dma-buf);
-		 * offset=0, length=0 maps the whole allocation.
-		 */
 		rc = amdrnpu_buf_mmap(fd, result_bo, 0, 0, 0, &result_map);
 		if (rc) {
 			fail("buf_mmap(result)", rc);
-			result_map = MAP_FAILED;
 			goto out;
 		}
 		memset(result_map, 0, APU_XRT_TEST_RESULT_SIZE);
 		rc = amdrnpu_buf_sync_to_device(fd, result_bo, 0, 0);
-		if (rc) { fail("buf_sync(result, to_device)", rc); goto out; }
+		if (rc) { fail("buf_sync(result)", rc); goto out; }
 
-		args[APU_XRT_TEST_RESULT_ARG_IDX].size                 =
-			APU_XRT_TEST_RESULT_SIZE;
-		args[APU_XRT_TEST_RESULT_ARG_IDX].bo.buffer_handle =
-			(int32_t)result_bo;
-		args[APU_XRT_TEST_RESULT_ARG_IDX].bo.offset            = 0;
+		args[5].size             = APU_XRT_TEST_RESULT_SIZE;
+		args[5].bo.buffer_handle = (int32_t)result_bo;
+		args[5].bo.offset        = 0;
 		printf("result BO:  handle=%u (%zu bytes)\n",
 		       result_bo, APU_XRT_TEST_RESULT_SIZE);
 	} else {
-		/* no result: trim args to last karg + 1 */
-		num_args = 3u + opts.n_kargs;
-		if (num_args < 3u) num_args = 3u;
+		args[5].size  = 0;
+		args[5].value = 0;
 	}
 
-	/* Submit */
-	memset(&hdr, 0, sizeof(hdr));
-	int64_t timeout_ns = (int64_t)opts.timeout_s * INT64_C(1000000000);
-
-	printf("submitting APU_XRT_TEST (%u args) ...\n", num_args);
-	rc = amdrnpu_cmd_submit(fd, APU_XRT_TEST, args, num_args,
-				     &hdr, sizeof(hdr));
-	if (rc) { fail("cmd_submit", rc); goto out; }
-
-	printf("syncobj_handle=%d\n", hdr.sync_handle);
-
-	/* Wait for completion */
-	rc = amdrnpu_syncobj_wait_complete(
-		fd, (uint32_t)hdr.sync_handle,
-		timeout_ns, &fence_st);
-	if (rc) { fail("syncobj_wait", rc); goto out; }
-
-	printf("fence_st=%" PRId32 " (%s)\n",
-	       fence_st, rsp_status_str(fence_st));
-
-	if (fence_st <= 0) {
-		g_fail = 1;
+	printf("submitting APU_XRT_TEST (%u args) ...\n", APU_XRT_TEST_NUM_ARGS);
+	rc = amdrnpu_cmd_submit(fd, APU_XRT_TEST, args, APU_XRT_TEST_NUM_ARGS,
+				&hdr, sizeof(hdr));
+	if (rc) {
+		fail("cmd_submit", rc);
 		goto out;
 	}
+	printf("syncobj_handle=%d\n", hdr.sync_handle);
 
-	/* Read result */
+	rc = amdrnpu_syncobj_wait_complete(
+		fd, (uint32_t)hdr.sync_handle,
+		(int64_t)opts.timeout_s * 1000000000LL, &fence_st);
+	if (rc) {
+		fail("syncobj_wait", rc);
+		close(hdr.sync_handle);
+		goto out;
+	}
+	close(hdr.sync_handle);
+	printf("fence_st=%d (%s)\n", fence_st, rsp_status_str(fence_st));
+
 	if (opts.want_result && result_map) {
 		struct apu_xrt_test_result res;
 
 		rc = amdrnpu_buf_sync_from_device(fd, result_bo, 0, 0);
-		if (rc) { fail("buf_sync(result, from_device)", rc); goto out; }
-
+		if (rc) { fail("buf_sync_from(result)", rc); goto out; }
 		memcpy(&res, result_map, sizeof(res));
 		printf("result: passed=%u iterations_done=%u "
 		       "avg_us=%u first_us=%u\n",
 		       res.passed, res.iterations_done,
 		       res.latency_avg_us, res.latency_first_us);
-
 		if (!res.passed)
 			g_fail = 1;
+	} else if (fence_st <= 0) {
+		g_fail = 1;
 	}
 
 out:
-	if (result_map && result_map != MAP_FAILED)
+	if (result_map)
 		amdrnpu_buf_munmap(result_map, APU_XRT_TEST_RESULT_SIZE);
 	if (result_bo)
 		amdrnpu_buf_close(fd, result_bo);
-	for (uint32_t i = 0; i < opts.n_kargs; ++i) {
+	if (desc_map)
+		amdrnpu_buf_munmap(desc_map, desc_alloc_sz);
+	if (desc_bo)
+		amdrnpu_buf_close(fd, desc_bo);
+	for (i = 0; i < APU_XRT_TEST_MAX_KARGS; ++i) {
 		if (kbo[i].map)
 			amdrnpu_buf_munmap(kbo[i].map, kbo[i].alloc_sz);
 		if (kbo[i].handle)
@@ -557,6 +587,10 @@ out:
 	if (fd >= 0)
 		close(fd);
 
-	printf("%s\n", g_fail ? "FAIL" : "PASS");
-	return g_fail ? 1 : 0;
+	if (g_fail || rc) {
+		printf("FAIL\n");
+		return 1;
+	}
+	printf("PASS\n");
+	return 0;
 }

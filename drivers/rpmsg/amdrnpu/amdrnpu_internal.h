@@ -135,6 +135,7 @@ void amdrnpu_chardev_deregister(struct amdrnpu_dev *rnpu);
 /* amdrnpu_buf.c */
 int  amdrnpu_ioctl_buf_import(struct amdrnpu_client *client, void __user *uarg);
 int  amdrnpu_ioctl_buf_destroy(struct amdrnpu_client *client, void __user *uarg);
+int  amdrnpu_ioctl_buf_query(struct amdrnpu_client *client, void __user *uarg);
 struct amdrnpu_buf *amdrnpu_buf_get(struct amdrnpu_client *client, u32 handle);
 void amdrnpu_buf_put(struct amdrnpu_buf *buf);
 void amdrnpu_client_buf_release(struct amdrnpu_client *client);

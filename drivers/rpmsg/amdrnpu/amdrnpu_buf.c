@@ -189,3 +189,26 @@ int amdrnpu_ioctl_buf_destroy(struct amdrnpu_client *client, void __user *uarg)
 	amdrnpu_buf_put(buf);
 	return 0;
 }
+
+int amdrnpu_ioctl_buf_query(struct amdrnpu_client *client, void __user *uarg)
+{
+	struct amdrnpu_buf_query arg;
+	struct amdrnpu_buf *buf;
+
+	if (copy_from_user(&arg, uarg, sizeof(arg)))
+		return -EFAULT;
+	if (arg.pad || arg.dma_addr || arg.size)
+		return -EINVAL;
+
+	buf = amdrnpu_buf_get(client, arg.handle);
+	if (!buf)
+		return -ENOENT;
+
+	arg.dma_addr = (u64)buf->dma_addr;
+	arg.size = (u64)buf->size;
+	amdrnpu_buf_put(buf);
+
+	if (copy_to_user(uarg, &arg, sizeof(arg)))
+		return -EFAULT;
+	return 0;
+}

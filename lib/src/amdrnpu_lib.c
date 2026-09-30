@@ -313,6 +313,29 @@ int amdrnpu_buf_close(int fd, uint32_t handle)
 	AMDRNPU_TRACE_RET(buf_close_exit, ret);
 }
 
+int amdrnpu_buf_get_phys(int fd, uint32_t handle, uint64_t *out_pa,
+			 uint64_t *out_size)
+{
+	struct amdrnpu_buf_query arg = {
+		.handle = handle,
+	};
+	int ret;
+
+	if (!out_pa)
+		return -EINVAL;
+	if (!amdrnpu_reg_lookup(fd, handle, NULL, NULL))
+		return -ENOENT;
+
+	ret = ioctl(fd, AMDRNPU_BUF_QUERY, &arg);
+	if (ret)
+		return -errno;
+
+	*out_pa = arg.dma_addr;
+	if (out_size)
+		*out_size = arg.size;
+	return 0;
+}
+
 int amdrnpu_buf_mmap(int fd, uint32_t handle, uint64_t buf_size,
 		     uint64_t offset, uint64_t length, void **out_map)
 {
