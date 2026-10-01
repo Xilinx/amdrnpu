@@ -4,7 +4,7 @@ channel and exposes a miscdevice (/dev/amdrnpu.N) with a small custom ioctl \
 surface (magic 'R'): dma-buf import/destroy and command submit, with \
 completion reported as a sync_file fd. Source lives under \
 drivers/rpmsg/amdrnpu in the amdrnpu repository."
-HOMEPAGE = "https://gitenterprise.xilinx.com/PhysicalAI/tessai-agent"
+HOMEPAGE = "https://github.com/Xilinx/amdrnpu"
 SECTION = "kernel/modules"
 
 LICENSE = "GPL-2.0-only"

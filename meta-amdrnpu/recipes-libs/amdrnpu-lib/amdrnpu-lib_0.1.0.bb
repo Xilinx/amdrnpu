@@ -3,7 +3,7 @@ DESCRIPTION = "Thin userspace wrapper around the amdrnpu rpmsg char driver: \
 dma-buf import + AMDRNPU_CMD_SUBMIT plus sync_file completion helpers. \
 Lives under lib/ in the amdrnpu repository and ships the amdrnpu_test CLI \
 used to exercise every UAPI op."
-HOMEPAGE = "https://gitenterprise.xilinx.com/PhysicalAI/tessai-agent"
+HOMEPAGE = "https://github.com/Xilinx/amdrnpu"
 SECTION = "libs"
 
 LICENSE = "MIT"

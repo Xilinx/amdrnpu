@@ -38,10 +38,10 @@ artifact; production boot on VEK385 uses the patcher, which injects an
 equivalent `amdrnpu` node (with the same `<0x500>` / `<0x01>`
 bindings) straight into the kernel DTB.
 
-On VEK385, produce a symbol-exporting base DTB with
-`/proj/xsjhdstaff5/wendlian/vek385/scripts/build_amdxdna_dt.sh` (outputs
-`*-amdxdna-base.dtb` plus the `r5f_*` labels). Boot that DTB from U-Boot,
-then apply this overlay on Linux.
+On VEK385, produce a symbol-exporting base DTB using the `build_amdxdna_dt.sh`
+script from the amdxdna board support package (outputs `*-amdxdna-base.dtb`
+plus the `r5f_*` labels). Boot that DTB from U-Boot, then apply this overlay
+on Linux.
 
 RPU firmware must advertise the **`amdrnpu`** RPMsg channel (`amdrnpu_ept.c`).
 
