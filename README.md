@@ -45,8 +45,7 @@ tessai-agent/
 │   ├── lib-userspace-flow.md
 │   └── README.md
 ├── build/                            # build orchestrator (see "Building" below)
-│   ├── build.sh                      # native / -cross-vitis / -cross-yocto
-│   └── strip-dirty-vermagic.py       # post-process helper invoked by build.sh
+│   └── build.sh                      # native / -sdk (Yocto SDK cross-build)
 └── meta-amdrnpu/                # Yocto/OE layer
     ├── conf/layer.conf
     ├── recipes-kernel/amdrnpu-mod/
@@ -83,21 +82,37 @@ clean out-of-source tree, leaving `drivers/rpmsg/amdrnpu/` and
 
 ```sh
 # Native (default): build all three against the running kernel.
+# Host-arch artifacts for quick compile checks and the gtest suite.
 # Requires linux-headers-$(uname -r) on the host.
 build/build.sh
 
-# aarch64 cross-build using a full Yocto build tree at PATH.
-# Toolchain, kernel, and target sysroot are auto-discovered under
-# PATH/tmp/work-shared/ and PATH/tmp/work/.
-build/build.sh -cross-yocto /path/to/yocto/build
-
-# aarch64 cross-build using the Vitis-shipped toolchain and a manually
-# prepared Xilinx kernel tree (no Yocto). PATH is an aarch64 sysroot.
-build/build.sh -cross-vitis -sysroot /path/to/aarch64/sysroot
+# aarch64 cross-build for the board, using an extracted Yocto SDK.
+# PATH is the SDK install directory (the one containing
+# environment-setup-*). This is the build that targets APU Linux.
+build/build.sh -sdk /path/to/sdk
 
 # Wipe build/Release/ and build/Release-aarch64/.
 build/build.sh -clean
 ```
+
+The `-sdk` mode is the one that produces board-ready aarch64 artifacts.
+Generate the SDK from your Yocto build and extract it:
+
+```sh
+bitbake <your-image> -c populate_sdk      # produces a self-extracting *.sh
+./tmp/deploy/sdk/<...>-toolchain-*.sh      # extract to e.g. /opt/<sdk> or ~/sdk
+build/build.sh -sdk /opt/<sdk>
+```
+
+The SDK supplies everything the cross-build needs: the aarch64 toolchain,
+the target sysroot, and — because it is built with `kernel-devsrc` — the
+kernel dev sources used to build the `.ko`. `build.sh` sources the SDK's
+`environment-setup-*` to discover the toolchain and sysroot, points `KDIR`
+at `<target-sysroot>/usr/src/kernel`, runs a one-time `make
+modules_prepare` to build the kernel's host scripts, then builds the
+module, library, and examples. The example CLIs are statically linked
+against `libamdrnpu.a`, so a staged binary runs on the board without
+`libamdrnpu.so` needing to be on the loader path.
 
 Outputs (per invocation):
 
@@ -105,13 +120,13 @@ Outputs (per invocation):
 |---|---|
 | `build/<TYPE>/driver/amdrnpu.ko` | kernel module |
 | `build/<TYPE>/lib/libamdrnpu.so*` | shared lib (+ `.a` static) |
-| `build/<TYPE>/bin/amdrnpu_test` | example CLI |
+| `build/<TYPE>/bin/amdrnpu_test` | example CLI (+ the other examples) |
 
-where `<TYPE>` is `Release` for native and `Release-aarch64` for either
-cross mode. The module has no device-tree binding of its own: loading the
-`.ko` registers an rpmsg driver, and a `miscdevice` char node at
-`/dev/amdrnpu.N` appears once RPU firmware advertises the `amdrnpu` RPMsg
-channel and the driver binds to it.
+where `<TYPE>` is `Release` for native and `Release-aarch64` for the
+`-sdk` cross build. The module has no device-tree binding of its own:
+loading the `.ko` registers an rpmsg driver, and a `miscdevice` char node
+at `/dev/amdrnpu.N` appears once RPU firmware advertises the `amdrnpu`
+RPMsg channel and the driver binds to it.
 
 CMake options forwarded to the lib build:
 
@@ -131,9 +146,8 @@ Downstream projects can consume the library via either CMake
 (`find_package(amdrnpu)`) or pkg-config
 (`pkg-config --cflags --libs amdrnpu`).
 
-Run `build/build.sh -help` for the full flag surface (toolchain path,
-KDIR override, Yocto machine override, `-localversion` injection,
-`-no-strip-dirty`, etc.).
+Run `build/build.sh -help` for the full flag surface (`-sdk`, `-kdir`
+override, `-j`, `-no-tests`, `-unit_tests`).
 
 ### Fallback: raw kbuild / Yocto-internal
 
@@ -143,9 +157,17 @@ relies on it via Yocto's `module.bbclass`; the same invocation also works
 as a manual fallback:
 
 ```sh
+# Native, against the running kernel's headers.
 make -C drivers/rpmsg/amdrnpu KDIR=/lib/modules/$(uname -r)/build
-make -C drivers/rpmsg/amdrnpu KDIR=... ARCH=arm64 \
-     CROSS_COMPILE=aarch64-linux-gnu-
+
+# aarch64, against a Yocto SDK's kernel dev sources. Source the SDK
+# environment first (it sets ARCH, CROSS_COMPILE, and SDKTARGETSYSROOT),
+# then point KDIR at the SDK's kernel tree. A freshly extracted SDK needs
+# a one-time `make -C "$KDIR" modules_prepare` before the first build.
+. /path/to/sdk/environment-setup-*
+make -C drivers/rpmsg/amdrnpu \
+     KDIR="$SDKTARGETSYSROOT/usr/src/kernel"
+
 make -C drivers/rpmsg/amdrnpu KDIR=... INSTALL_MOD_PATH=/tmp/rootfs \
      modules_install
 make -C drivers/rpmsg/amdrnpu KDIR=... clean

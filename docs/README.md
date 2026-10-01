@@ -21,7 +21,7 @@ the driver; command completion is a `sync_file` fd.
 - Userspace library: [`lib/`](../lib/) (`libamdrnpu` + `amdrnpu_test` CLI)
 - UAPI header: [`include/uapi/amdrnpu/amdrnpu.h`](../include/uapi/amdrnpu/amdrnpu.h)
 - Driver source: [`drivers/rpmsg/amdrnpu/`](../drivers/rpmsg/amdrnpu/)
-- Build orchestrator: [`build/build.sh`](../build/build.sh) (native / `-cross-vitis` / `-cross-yocto`)
+- Build orchestrator: [`build/build.sh`](../build/build.sh) (native / `-sdk` Yocto SDK cross-build)
 - Top-level overview: [`../README.md`](../README.md)
 
 ## Diagram conventions

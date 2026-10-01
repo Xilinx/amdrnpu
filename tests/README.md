@@ -85,13 +85,9 @@ phase is a no-op configure pass; pass `-no-tests` to skip even that.
 # Native, gtest binary:
 ./build/build.sh -unit_tests
 
-# Cross (Yocto):
-./build/build.sh -cross-yocto /path/to/yocto/build -unit_tests
-
-# Cross (Vitis) -- build.sh also sets CMAKE_CXX_COMPILER to the
-# matching aarch64-linux-gnu-g++ automatically when -unit_tests is
-# combined with -cross-vitis:
-./build/build.sh -cross-vitis -sysroot /path/to/rootfs -unit_tests
+# Cross (Yocto SDK) -- build.sh uses the SDK's cross g++ and target
+# sysroot automatically when -unit_tests is combined with -sdk:
+./build/build.sh -sdk /path/to/sdk -unit_tests
 ```
 
 Direct (CMake) callers default `AMDRNPU_BUILD_UNITTESTS=ON` in

@@ -26,7 +26,7 @@
 #
 #   1. From the parent tests/ tree via build/build.sh (default ON):
 #        ./build/build.sh                          # native
-#        ./build/build.sh -cross-yocto YOCTO       # cross
+#        ./build/build.sh -sdk /path/to/sdk        # cross
 #      Disable with AMDRNPU_BUILD_UNITTESTS=0 (env or -D).
 #
 #   2. Standalone via cmake -S:
