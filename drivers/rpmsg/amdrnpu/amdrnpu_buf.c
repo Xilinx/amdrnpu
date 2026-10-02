@@ -12,11 +12,22 @@
 #include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/uaccess.h>
+#include <linux/version.h>
 #include <linux/xarray.h>
 
 #include "amdrnpu_internal.h"
 
+/*
+ * v6.13 (cdd30ebb1b9f) switched MODULE_IMPORT_NS to take a string literal;
+ * on <=v6.12 the macro still __stringify()s a bare token. Pass the form the
+ * running kernel's macro expects so modpost records the namespace as
+ * DMA_BUF (not "DMA_BUF") on both.
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
 MODULE_IMPORT_NS("DMA_BUF");
+#else
+MODULE_IMPORT_NS(DMA_BUF);
+#endif
 
 static int amdrnpu_sgt_dma_contig(struct sg_table *sgt, dma_addr_t *base,
 				  size_t *len)
