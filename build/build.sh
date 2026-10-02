@@ -444,15 +444,6 @@ build_tests() {
         die "amdrnpu_unittest was not produced (see $OUT/cmake-tests-build.log). \
 Did you run: git submodule update --init --recursive ?"
     fi
-
-    # Surface the bundled RPURuntime firmware path so users / CI know
-    # where to grab the reference image to flash on remoteproc1.
-    if [ -f "$REPO/tests/rpu_app/zephyr/build/zephyr/zephyr.elf" ]; then
-        log "  Bundled RPU firmware: $REPO/tests/rpu_app/zephyr/build/zephyr/zephyr.elf"
-    else
-        warn "  tests/rpu_app/zephyr/build/zephyr/zephyr.elf is missing"
-        warn "  (rebuild it from tests/rpu_app/ via: cd tests/rpu_app && ./build.sh tests/amdrnpu)"
-    fi
     echo
 }
 

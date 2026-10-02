@@ -20,7 +20,7 @@ checkout) or via Yocto using the included `meta-amdrnpu` layer.
 ## Repository layout
 
 ```
-tessai-agent/
+amdrnpu/
 ├── drivers/rpmsg/amdrnpu/           # out-of-tree kernel module (rpmsg char device)
 │   ├── amdrnpu_drv.c           # miscdevice (/dev/amdrnpu.N), file ops, module init
 │   ├── amdrnpu_rpmsg.c         # rpmsg_driver: probe/remove/callback + wire send
@@ -183,7 +183,7 @@ directory; `build/build.sh` avoids that.
 The `meta-amdrnpu/` directory is a self-contained OE layer.
 
 ```sh
-bitbake-layers add-layer /path/to/tessai-agent/meta-amdrnpu
+bitbake-layers add-layer /path/to/amdrnpu/meta-amdrnpu
 bitbake amdrnpu-mod          # kernel module
 bitbake amdrnpu-lib          # runtime library
 ```
@@ -199,7 +199,7 @@ If your repository checkout lives elsewhere than the layer's parent
 directory, override `AMDRNPU_SRC` in `local.conf`:
 
 ```
-AMDRNPU_SRC = "/abs/path/to/tessai-agent"
+AMDRNPU_SRC = "/abs/path/to/amdrnpu"
 ```
 
 See [`meta-amdrnpu/README.md`](meta-amdrnpu/README.md) for more.

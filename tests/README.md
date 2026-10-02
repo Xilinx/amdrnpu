@@ -42,13 +42,6 @@ end-to-end path snapshot).
 tests/
 ├── CMakeLists.txt        # parent CMake: gate flag + adds unittests/ subtree
 ├── README.md             # this file
-├── rpu_app/              # RPURuntime source snapshot (Link A slave endpoint)
-│   ├── README.md         # provenance / rebuild instructions
-│   ├── build.sh          # `./build.sh tests/amdrnpu` → zephyr.elf
-│   ├── rpu_app.elf       # RPURuntime slave runtime library (see rpu_app/README.md)
-│   ├── platform/         # XSA, reserved.dtsi, linker fragment, dt-bindings
-│   ├── src/              # src/driver Zephyr module (link A transport + endpoint)
-│   └── tests/            # amdrnpu_test target + tests/common/prj.conf
 └── unittests/            # gtest-based unit suite
     ├── CMakeLists.txt
     ├── common/           # utest_common: KB/MB macros, buffer helpers
@@ -105,46 +98,21 @@ cmake --build build/utest-native -j
 ctest --test-dir build/utest-native --output-on-failure
 ```
 
-### Building the RPU-side runtime library
+### The RPU-side runtime library
 
 The host-side gtest binary above only covers the APU half of Link A.
 The matching RPU slave — the Zephyr image that registers the
 `"amdrnpu"` rpmsg endpoint, replies to `fw_echo` and
 `fw_echo_region`, and services the `REMI`/`NOTS`/`CANC`/`BADC`
-fault-injection opcodes — ships as
-`rpu_app/rpu_app.elf` so the manual recipe under
-[Running on the board](#running-on-the-board) works out of the box
-without an external RPURuntime clone.
+fault-injection opcodes — is maintained as a separate component and
+is **not** bundled in this repository. Build it from your RPU
+firmware tree and flash the resulting `zephyr.elf` as described under
+[Running on the board](#running-on-the-board).
 
-When you need to rebuild it (driver source changes under
-`rpu_app/src/driver/`, a new fault opcode in
-`amdrnpu_endpoint.c`, sharper debug printk in
-`apu_rpmsg_platform.c`, etc.) the `rpu_app/` subtree is fully
-self-contained — no external RPURuntime clone required:
-
-```bash
-cd tests/rpu_app
-
-# One-time host setup on a fresh build machine (apt install, needs sudo):
-./setup.sh
-
-# Build the slave ELF. First run is 15-25 min (Zephyr SDK download,
-# xlnx_rel_v2025.2 clone, west update, lopper SDT gen from the XSA).
-# Subsequent runs are 30 s - 2 min (script auto-detects .venv / .west
-# / zephyr / output_dir and jumps straight to `west build -p always`).
-./build.sh tests/amdrnpu
-
-# Fresh ELF lands here:
-ls -l zephyr/build/zephyr/zephyr.elf
-
-```
-
-Layout, what was/wasn't copied from RPURuntime, and the exact `cp`
-set to refresh the snapshot from a newer upstream checkout are in
-`rpu_app/README.md`. `rpu_app/.gitignore` keeps all the build
-artifacts (`.venv/`, `.west/`, `zephyr/`, `zephyr-sdk-*/`, `lopper/`,
-`output_dir/`, `build/`, …) out of the amdrnpu repo, so a stray
-`./build.sh` won't accidentally commit hundreds of MB of SDK state.
+The suite degrades gracefully against the handlers a given slave
+build implements: any opcode the running endpoint doesn't recognize
+is reported as a `GTEST_SKIP` rather than a failure (see
+[Troubleshooting](#troubleshooting)).
 
 ## Running on the board
 
@@ -156,21 +124,20 @@ Prerequisites on the VEK385 target:
    injects it with `bank@0`/`bank@1` bound to the official
    `rpu_gem_cma@20000000` (phandle `0x500`) and `buffer@50000000000`
    (phandle `0x01`) pools by numeric phandle).
-2. Push the RPURuntime endpoint binary and the gtest binary.
-   `rpu_app.elf` is the in-tree slave endpoint; rebuild via
-   `cd tests/rpu_app && ./build.sh tests/amdrnpu` and
-   substitute `tests/rpu_app/zephyr/build/zephyr/zephyr.elf` if you
-   need local source changes picked up
-   (see [Building the RPU-side runtime library](#building-the-rpu-side-runtime-library)).
+2. Push the RPU slave endpoint binary and the gtest binary. The RPU
+   slave is built separately (see
+   [The RPU-side runtime library](#the-rpu-side-runtime-library));
+   copy its `zephyr.elf` into `/lib/firmware/` under the name you
+   reference from remoteproc (here `amdrnpu_rpu.elf`).
    ```bash
-   scp tests/rpu_app/rpu_app.elf root@vek385:/lib/firmware/
+   scp amdrnpu_rpu.elf root@vek385:/lib/firmware/
    scp build/Release-aarch64/bin/amdrnpu_unittest root@vek385:/usr/bin/
    ssh root@vek385 modprobe amdrnpu     # or insmod amdrnpu.ko
    ```
 3. Apply the DT overlay and start `remoteproc1`:
    ```bash
    # boards/vek385/dtbo/load_amdrnpu_dtbo.sh apply  (if not auto-applied)
-   echo rpu_app.elf > /sys/class/remoteproc/remoteproc1/firmware
+   echo amdrnpu_rpu.elf > /sys/class/remoteproc/remoteproc1/firmware
    echo start              > /sys/class/remoteproc/remoteproc1/state
    ```
 4. Run the suite:
@@ -233,16 +200,16 @@ binary works on dev hosts without the hardware.
   or the rpmsg channel did not bind. Check
   `dmesg | grep -E 'amdrnpu|rpmsg.*amdrnpu'`.
 - Basic channel-up + scalar-args subtests PASS but `fw_echo` writeback
-  or later fail — endpoint is alive but the running RPURuntime build
-  pre-dates the writeback / Tier-A / Tier-B handlers. Re-flash with
-  the endpoint from `tests/rpu_app/`.
+  or later fail — endpoint is alive but the running RPU slave build
+  pre-dates the writeback / Tier-A / Tier-B handlers. Re-flash with an
+  RPU slave that includes these handlers.
 - `AmdrnpuMemory.BufSyncPartialRoundTrip` SKIPs with "RPU
   endpoint does not recognize 'RGNE'" — the running slave pre-dates
-  the `fw_echo_region` opcode. Rebuild from `tests/rpu_app/` (see
+  the `fw_echo_region` opcode. Update the RPU slave endpoint (see
   above) and re-flash.
 - Tier B fault tests (`AmdrnpuFault.*`) FAIL/`-ETIMEDOUT` while Tier
   A passes — the endpoint on the board does not recognize the
-  fault-injection opcodes (older RPURuntime build). Re-flash with the
-  bundled ELF, which has all four fault handlers compiled in.
+  fault-injection opcodes (older RPU slave build). Re-flash with an
+  RPU slave that has all four fault handlers compiled in.
 - Gtest binary fails to build with `thirdparty/googletest is missing` —
   run `git submodule update --init --recursive` once.

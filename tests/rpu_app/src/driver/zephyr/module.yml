@@ -1,4 +1,0 @@
-name: amdrnpu_rpu_driver
-build:
-  cmake: .
-  kconfig: Kconfig

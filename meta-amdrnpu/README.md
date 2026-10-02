@@ -23,20 +23,20 @@ the source tree that the layer ships inside (the parent directory of
 From your Yocto build directory (e.g. `/path/to/yocto/build`):
 
 ```sh
-bitbake-layers add-layer /path/to/tessai-agent/meta-amdrnpu
+bitbake-layers add-layer /path/to/amdrnpu/meta-amdrnpu
 ```
 
 Or edit `conf/bblayers.conf` directly:
 
 ```
-BBLAYERS += " /path/to/tessai-agent/meta-amdrnpu "
+BBLAYERS += " /path/to/amdrnpu/meta-amdrnpu "
 ```
 
 If your repository checkout lives elsewhere than the layer's parent
 directory, set `AMDRNPU_SRC` in `conf/local.conf`:
 
 ```
-AMDRNPU_SRC = "/abs/path/to/tessai-agent"
+AMDRNPU_SRC = "/abs/path/to/amdrnpu"
 ```
 
 ## Building

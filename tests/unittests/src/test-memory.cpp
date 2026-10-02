@@ -215,10 +215,8 @@ TEST_F(AmdrnpuMemory, BufSyncPartialRoundTrip)
 		  0);
 
 	// Parse the banner the RPU wrote. The format string MUST stay
-	// in lockstep with the snprintf in
-	// RPURuntime/.../amdrnpu_endpoint.c:amdrnpu_fw_echo_region
-	// AND with the mirror in
-	// tessai-agent/tests/rpu_app/.../amdrnpu_endpoint.c.
+	// in lockstep with the snprintf in the RPU slave's
+	// amdrnpu_fw_echo_region endpoint handler.
 	unsigned int  rpu_seq = 0;
 	unsigned long long rpu_off = 0, rpu_len = 0, rpu_in = 0;
 	int matched = std::sscanf(reinterpret_cast<const char *>(base + winoff),
@@ -241,9 +239,8 @@ TEST_F(AmdrnpuMemory, BufSyncPartialRoundTrip)
 		do_buf_munmap(map, bo_size);
 		EXPECT_EQ(do_gem_close(fd_, bo), 0);
 		GTEST_SKIP() << "RPU endpoint does not recognize 'RGNE' "
-				"(AMDRNPU_FW_OP_ECHO_REGION) -- rebuild "
-				"zephyr.elf from "
-				"tests/rpu_app/ to pick up the partial-"
+				"(AMDRNPU_FW_OP_ECHO_REGION) -- update the "
+				"RPU slave endpoint to pick up the partial-"
 				"sync round-trip handler";
 		return;
 	}

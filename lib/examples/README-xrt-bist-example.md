@@ -55,7 +55,7 @@ dow -data nop.elf 0x20100000
 Built with the amdrnpu lib when examples are enabled:
 
 ```bash
-cd tessai-agent/lib && cmake -B build && cmake --build build
+cd amdrnpu/lib && cmake -B build && cmake --build build
 ```
 
 Binary: `build/amdrnpu_xrt_bist_example`

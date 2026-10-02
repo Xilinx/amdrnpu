@@ -1,11 +1,9 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 //
-// Fault-class fence-errno mapping (Tier B). Requires an RPU endpoint
-// build with AMDRNPU_FW_OP_FAULT_* opcodes wired into the
-// amdrnpu endpoint (tests/rpu_app/.../amdrnpu_endpoint.c
-// or RPURuntime's equivalent). The bundled
-// tests/rpu_app/ endpoint has these handlers compiled in.
+// Fault-class fence-errno mapping (Tier B). Requires an RPU slave
+// endpoint built with the AMDRNPU_FW_OP_FAULT_* opcodes wired into
+// its amdrnpu endpoint handler table.
 //
 // Tests in this file (mapping kept for tests/README.md cross-ref):
 //   - AmdrnpuFault.RemoteIo                ('REMI' -> -EREMOTEIO)
