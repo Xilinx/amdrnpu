@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Portions of this file consist of AI-generated content.
 SUMMARY = "AMD amdrnpu userspace runtime library"
 DESCRIPTION = "Thin userspace wrapper around the amdrnpu rpmsg char driver: \
 dma-buf import + AMDRNPU_CMD_SUBMIT plus sync_file completion helpers. \

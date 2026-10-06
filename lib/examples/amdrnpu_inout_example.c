@@ -1,5 +1,9 @@
 /* SPDX-License-Identifier: MIT */
 /*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Portions of this file consist of AI-generated content.
+ */
+/*
  * amdrnpu_inout_example - end-to-end in/out buffer test for amdrnpu.
  *
  * Flow:

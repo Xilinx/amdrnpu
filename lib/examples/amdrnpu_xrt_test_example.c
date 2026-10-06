@@ -1,5 +1,9 @@
 /* SPDX-License-Identifier: MIT */
 /*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Portions of this file consist of AI-generated content.
+ */
+/*
  * amdrnpu_xrt_test_example - APU-side driver for APU_XRT_TEST.
  *
  * Wire protocol matches RPURuntime tests/xrt_apu_rpu_test/src/apu_xrt_ops.h:

@@ -1,5 +1,9 @@
 /* SPDX-License-Identifier: MIT */
 /*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Portions of this file consist of AI-generated content.
+ */
+/*
  * amdrnpu_test - one-binary CLI exercising every amdrnpu UAPI op.
  *
  * Each subcommand prints a short "Sending ..." banner and a one-line result.

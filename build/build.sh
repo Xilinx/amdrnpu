@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Portions of this file consist of AI-generated content.
 #
 # amdrnpu unified build orchestrator.
 #

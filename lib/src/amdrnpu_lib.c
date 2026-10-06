@@ -1,4 +1,8 @@
 /* SPDX-License-Identifier: MIT */
+/*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Portions of this file consist of AI-generated content.
+ */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif

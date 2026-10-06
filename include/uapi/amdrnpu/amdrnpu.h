@@ -1,5 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note OR MIT */
 /*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Portions of this file consist of AI-generated content.
+ */
+/*
  * amdrnpu — userspace/kernel ABI (ioctl surface)
  *
  * Custom ioctl (magic `'R'` for rnpu): command submission (`AMDRNPU_CMD_SUBMIT`).

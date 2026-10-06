@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# Portions of this file consist of AI-generated content.
 SUMMARY = "AMD amdrnpu out-of-tree rpmsg char-device kernel module"
 DESCRIPTION = "Lightweight rpmsg driver that binds to the 'amdrnpu' RPMsg \
 channel and exposes a miscdevice (/dev/amdrnpu.N) with a small custom ioctl \

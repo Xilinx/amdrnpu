@@ -1,5 +1,9 @@
 /* SPDX-License-Identifier: MIT */
 /*
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+ * Portions of this file consist of AI-generated content.
+ */
+/*
  * USDT (SDT) static trace markers for the amdrnpu userspace library.
  *
  * When systemtap-sdt-dev's <sys/sdt.h> is available (AMDRNPU_HAVE_SDT,
