@@ -331,9 +331,10 @@ static int dispatch(struct rpmsg_lite *ctx, uint16_t id, uint32_t used_len)
 
 int rpmsg_lite_poll(struct rpmsg_lite *ctx)
 {
+	uint16_t recycle[VRING_LITE_MAX_NUM];
 	uint16_t id;
 	uint32_t len;
-	int ret, error = 0, count = 0;
+	int ret, error = 0, count = 0, i;
 
 	if (!ctx || !ctx->initialized)
 		return -EINVAL;
@@ -343,18 +344,24 @@ int rpmsg_lite_poll(struct rpmsg_lite *ctx)
 	while ((ret = vring_lite_get_used(&ctx->rx, &id, &len)) > 0) {
 		if (id >= ctx->half)
 			return -EPROTO;
+		recycle[count++] = id;
 		ret = dispatch(ctx, id, len);
 		if (ret && !error)
 			error = ret;
-		++count;
+	}
+	if (ret < 0)
+		error = ret;
+	/* Drain completions before reposting: otherwise a queued duplicate ID
+	 * could appear busy again and publish the same buffer twice.
+	 */
+	for (i = 0; i < count; ++i) {
+		id = recycle[i];
 		ret = vring_lite_add_buffer(&ctx->rx, id, buffer_addr(ctx, 0, id),
 					    ctx->cfg.buf_size, VRING_DESC_F_WRITE);
 		if (ret)
 			return ret;
 		notify(ctx, 0);
 	}
-	if (ret < 0)
-		return ret;
 	ret = reclaim_tx(ctx);
 	if (ret)
 		return ret;

@@ -305,12 +305,34 @@ static void test_endpoints_and_small_ring(void)
 	CHECK(!extra.ctx && !epts[1].ctx);
 }
 
+static void test_duplicate_rx_completion(void)
+{
+	struct rpmsg_lite_ept ept;
+	unsigned int before = calls;
+	uint16_t id;
+
+	cfg.notify = NULL;
+	peer_rx_idx = peer_tx_idx = 0;
+	CHECK(rpmsg_lite_init(&ctx, &cfg) == 0);
+	CHECK(rpmsg_lite_create_ept(&ctx, &ept, "echo", RPMSG_ADDR_ANY,
+				    on_rx, &calls) == 0);
+	ept.dest_addr = 42;
+	peer_rx(ept.local_addr, "ping", 4, 512);
+	id = ctx.rx.used->ring[0].id;
+	peer_complete(&ctx.rx, id, 512);
+	CHECK(rpmsg_lite_poll(&ctx) == -EPROTO);
+	CHECK(calls == before + 1);
+	CHECK(ctx.rx.avail_idx == 5 && ctx.rx.outstanding == 4);
+	rpmsg_lite_deinit(&ctx);
+}
+
 int main(void)
 {
 	test_vring();
 	test_config();
 	test_rpmsg();
 	test_endpoints_and_small_ring();
+	test_duplicate_rx_completion();
 	puts("rpmsg-lite: simulated-peer tests passed");
 	return 0;
 }
