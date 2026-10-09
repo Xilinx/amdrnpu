@@ -13,6 +13,7 @@ include(GNUInstallDirs)
 option(AMDRNPU_LIB_BUILD_SHARED   "Build shared library" ON)
 option(AMDRNPU_LIB_BUILD_STATIC   "Build static library" ON)
 option(AMDRNPU_LIB_BUILD_EXAMPLES "Build examples" ON)
+option(AMDRNPU_LIB_BUILD_RPMSG_TEST "Build hardware-free rpmsg-lite test" OFF)
 option(AMDRNPU_LINK_EXAMPLES_STATIC
 	"Link examples against libamdrnpu.a (no libamdrnpu.so at runtime)" OFF)
 
@@ -33,6 +34,8 @@ set(AMDRNPU_UAPI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../include/uapi"
     CACHE PATH "amdrnpu UAPI")
 set(AMDRNPU_LIB_SOURCES
     src/amdrnpu_lib.c
+    src/rpmsg-lite/vring_lite.c
+    src/rpmsg-lite/rpmsg_lite.c
 )
 
 set(AMDRNPU_LIB_HEADERS
@@ -43,6 +46,7 @@ function(_amdrnpu_lib_configure_target tgt)
     target_include_directories(${tgt}
         PUBLIC
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/rpmsg-lite>
             $<BUILD_INTERFACE:${AMDRNPU_UAPI_DIR}>
             $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
     )
@@ -116,6 +120,17 @@ if(AMDRNPU_LIB_BUILD_EXAMPLES AND _installed_targets)
 	endif()
 endif()
 
+if(AMDRNPU_LIB_BUILD_RPMSG_TEST)
+    enable_testing()
+    add_executable(rpmsg_lite_test
+        src/rpmsg-lite/rpmsg_lite_test.c
+        src/rpmsg-lite/vring_lite.c
+        src/rpmsg-lite/rpmsg_lite.c
+    )
+    target_compile_options(rpmsg_lite_test PRIVATE -Wall -Wextra)
+    add_test(NAME rpmsg_lite COMMAND rpmsg_lite_test)
+endif()
+
 install(TARGETS ${_installed_targets}
     DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
@@ -123,6 +138,10 @@ install(TARGETS ${_installed_targets}
 install(DIRECTORY include/amdrnpu
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
     FILES_MATCHING PATTERN "*.h"
+)
+
+install(FILES src/rpmsg-lite/vring_lite.h src/rpmsg-lite/rpmsg_lite.h
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/amdrnpu
 )
 
 install(DIRECTORY ${AMDRNPU_UAPI_DIR}/amdrnpu
