@@ -10,6 +10,9 @@ project(amdrnpu_lib
 
 include(GNUInstallDirs)
 
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+
 option(AMDRNPU_LIB_BUILD_SHARED   "Build shared library" ON)
 option(AMDRNPU_LIB_BUILD_STATIC   "Build static library" ON)
 option(AMDRNPU_LIB_BUILD_EXAMPLES "Build examples" ON)
@@ -34,6 +37,8 @@ set(AMDRNPU_UAPI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../include/uapi"
     CACHE PATH "amdrnpu UAPI")
 set(AMDRNPU_LIB_SOURCES
     src/amdrnpu_lib.c
+    src/amdrnpu_ini.c
+    src/amdrnpu_pool.c
     src/rpmsg-lite/vring_lite.c
     src/rpmsg-lite/rpmsg_lite.c
 )
@@ -51,6 +56,7 @@ function(_amdrnpu_lib_configure_target tgt)
             $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
     )
     target_compile_options(${tgt} PRIVATE -Wall -Wextra)
+    target_link_libraries(${tgt} PRIVATE Threads::Threads)
     if(AMDRNPU_HAVE_SDT)
         target_compile_definitions(${tgt} PRIVATE AMDRNPU_HAVE_SDT)
     endif()
@@ -129,6 +135,16 @@ if(AMDRNPU_LIB_BUILD_RPMSG_TEST)
     )
     target_compile_options(rpmsg_lite_test PRIVATE -Wall -Wextra)
     add_test(NAME rpmsg_lite COMMAND rpmsg_lite_test)
+
+    # Pool allocator + INI reader unit tests (no device access).
+    add_executable(amdrnpu_pool_test
+        src/amdrnpu_pool_test.c
+        src/amdrnpu_pool.c
+        src/amdrnpu_ini.c
+    )
+    target_include_directories(amdrnpu_pool_test PRIVATE src)
+    target_compile_options(amdrnpu_pool_test PRIVATE -Wall -Wextra)
+    add_test(NAME amdrnpu_pool COMMAND amdrnpu_pool_test)
 endif()
 
 install(TARGETS ${_installed_targets}
@@ -147,4 +163,10 @@ install(FILES src/rpmsg-lite/vring_lite.h src/rpmsg-lite/rpmsg_lite.h
 install(DIRECTORY ${AMDRNPU_UAPI_DIR}/amdrnpu
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
     FILES_MATCHING PATTERN "*.h"
+)
+
+# Sample configuration (installed to the datadir; copy to /etc/amdrnpu.ini and
+# edit for the target, or point $AMDRNPU_INI at it).
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../etc/amdrnpu.ini
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/amdrnpu
 )

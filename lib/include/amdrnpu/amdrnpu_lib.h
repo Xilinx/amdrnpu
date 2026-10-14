@@ -10,16 +10,20 @@
  *
  * The public function signatures below are a stable interface; existing
  * callers depend on them, so they must not change (parameter names and
- * documentation may be refined, but arity and types are frozen).  The driver
- * is now an rpmsg char device (`/dev/amdrnpu.N`) rather than a DRM device, so
- * some parameters that only made sense for the old DRM/GEM model are retained
- * for source compatibility and documented as reserved; the library maps each
- * call onto the char-driver ABI internally.
+ * documentation may be refined, but arity and types are frozen).  The library
+ * no longer uses the amdrnpu kernel module: device/RPU memory is carved from
+ * fixed physical address pools (no-map in the device tree) and accessed through
+ * `/dev/mem`, and commands are submitted over the userspace rpmsg_lite leader.
+ * Pool base/size and the rpmsg shared-memory geometry are read once from
+ * `/etc/amdrnpu.ini` (override with `$AMDRNPU_INI`).  The `int fd` argument is
+ * now only an opaque key the caller supplies; some parameters that only made
+ * sense for the old kernel model are retained and documented as reserved.
  *
- * Buffer lifecycle: **`amdrnpu_buf_alloc()`** allocates and imports a buffer in
- * one step and returns an opaque handle; free it with **`amdrnpu_buf_close()`**.
- * CPU-map a handle with **`amdrnpu_buf_mmap()`** and bracket device DMA with
- * **`amdrnpu_buf_sync()`** (or the direction helpers).
+ * Buffer lifecycle: **`amdrnpu_buf_alloc()`** allocates a buffer from the pool
+ * (4 KiB-granular; min 4 KiB) and returns an opaque handle; free it with
+ * **`amdrnpu_buf_close()`**.  CPU-map a handle with **`amdrnpu_buf_mmap()`**;
+ * **`amdrnpu_buf_sync()`** is a no-op retained for source compatibility (pool
+ * memory is uncached/coherent).
  *
  * Command completion: **`amdrnpu_cmd_submit()`** returns a completion handle in
  * `hdr_out->sync_handle` (a sync_file fd).  Wait/probe it with the
@@ -47,20 +51,38 @@ extern "C" {
 #endif
 
 /**
+ * amdrnpu_open - open an amdrnpu device and bring up its Link A transport.
+ *
+ * @device_id:	which amdrnpu device to open.  Reserved for forward
+ *		compatibility (multi-RPU / multi-link selection); currently a
+ *		single Link A device is supported and this argument is ignored.
+ *
+ * Eagerly initializes the process-wide context: maps the shared window and
+ * memory pools from the INI ($AMDRNPU_INI or /etc/amdrnpu.ini), fills the
+ * remote's vring descriptors (master/remoteproc duty), and completes the
+ * rpmsg-lite name-service bind.  Calling this is optional — the first buf/cmd
+ * call initializes lazily — but it lets connection errors surface up front.
+ *
+ * Returns a non-negative opaque descriptor to pass as the @fd argument to the
+ * other helpers, or a negative errno on failure.
+ */
+AMDRNPU_LIB_API int amdrnpu_open(uint32_t device_id);
+
+/**
  * amdrnpu_buf_alloc - allocate and import a buffer; returns an opaque handle.
  *
- * @fd:		open /dev/amdrnpu.N descriptor.
+ * @fd:		descriptor from amdrnpu_open() (opaque key).
  * @memory_type: target memory domain, an enum amdrnpu_memory_type
  *		(AMDRNPU_MEMORY_DEVICE / AMDRNPU_MEMORY_DEFAULT for device
  *		memory, AMDRNPU_MEMORY_RPU for RPU/firmware memory).  The library
- *		allocates from the matching dma-buf heap and imports the buffer
- *		in the corresponding DMA domain.
- * @size:	allocation size in bytes.
+ *		allocates from the matching physical address pool declared in
+ *		amdrnpu.ini, rounding @size up to whole 4 KiB pages.
+ * @size:	allocation size in bytes (rounded up to a 4 KiB multiple).
  * @out_handle:	on success, the opaque handle for use in
  *		struct amdrnpu_arg.bo.buffer_handle and the other buf_* helpers.
  *
- * The library owns the underlying dma-buf fd for the handle; release it with
- * amdrnpu_buf_close().  Returns 0 on success or a negative errno.
+ * Release the handle (and its pool pages) with amdrnpu_buf_close().  Returns 0
+ * on success or a negative errno.
  */
 AMDRNPU_LIB_API int amdrnpu_buf_alloc(int fd, uint32_t memory_type,
 				      uint64_t size, uint32_t *out_handle);
@@ -148,18 +170,18 @@ AMDRNPU_LIB_API int amdrnpu_buf_read(int fd, uint32_t handle, void *dst,
 				     uint64_t offset, uint64_t length);
 
 /**
- * amdrnpu_buf_sync - CPU cache maintenance around device DMA.
+ * amdrnpu_buf_sync - CPU cache maintenance around device DMA (no-op).
  *
- * @fd:		open /dev/amdrnpu.N descriptor (same as passed to buf_alloc).
+ * @fd:		opaque key (same as passed to buf_alloc).
  * @handle:	handle from amdrnpu_buf_alloc().
- * @direction:	AMDRNPU_BUF_SYNC_TO_DEVICE (flush CPU writes) or
- *		AMDRNPU_BUF_SYNC_FROM_DEVICE (invalidate before CPU read).
- * @offset:	reserved; DMA_BUF_IOCTL_SYNC operates on the whole buffer, so
- *		this argument is ignored (pass 0).
- * @length:	reserved; ignored for the same reason (pass 0).
+ * @direction:	AMDRNPU_BUF_SYNC_TO_DEVICE or AMDRNPU_BUF_SYNC_FROM_DEVICE.
+ * @offset:	reserved; ignored (pass 0).
+ * @length:	reserved; ignored (pass 0).
  *
- * Issues DMA_BUF_IOCTL_SYNC on the buffer's dma-buf fd.  Returns 0 on success
- * or a negative errno.
+ * Pool memory is mapped uncached/coherent through /dev/mem, so there is no CPU
+ * cache to maintain; this validates @handle and @direction and returns 0.
+ * Retained so existing callers keep compiling.  Returns 0 on success or a
+ * negative errno (-ENOENT for an unknown handle, -EINVAL for a bad direction).
  */
 AMDRNPU_LIB_API int amdrnpu_buf_sync(int fd, uint32_t handle,
 				     uint32_t direction,
