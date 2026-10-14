@@ -56,46 +56,26 @@ static void fail(const char *what, int rc)
 	g_fail = 1;
 }
 
+/*
+ * The library is configured from an INI file rather than a kernel node; the fd
+ * is only an opaque API key.  Open the default config ($AMDRNPU_INI or
+ * /etc/amdrnpu.ini) read-only.
+ */
 static int open_amdrnpu_node(char *path_out, size_t path_sz)
 {
-	DIR *dir = opendir("/dev");
-	struct dirent *e;
-	long best = LONG_MAX;
-	int best_fd = -1;
-	char best_path[PATH_MAX];
+	const char *path = getenv("AMDRNPU_INI");
+	int fd;
 
-	if (!dir)
+	if (!path || !*path)
+		path = "/etc/amdrnpu.ini";
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0) {
+		fprintf(stderr, "open(%s): %s\n", path, strerror(errno));
 		return -1;
-
-	while ((e = readdir(dir)) != NULL) {
-		long n;
-		int fd;
-		char p[PATH_MAX];
-
-		if (strncmp(e->d_name, "amdrnpu.", 8) != 0)
-			continue;
-		if (e->d_name[8] < '0' || e->d_name[8] > '9')
-			continue;
-		n = strtol(e->d_name + 8, NULL, 10);
-		if (n < 0 || n >= best)
-			continue;
-		snprintf(p, sizeof(p), "/dev/%s", e->d_name);
-		fd = open(p, O_RDWR | O_CLOEXEC);
-		if (fd < 0)
-			continue;
-		if (best_fd >= 0)
-			close(best_fd);
-		best = n;
-		best_fd = fd;
-		snprintf(best_path, sizeof(best_path), "%s", p);
 	}
-	closedir(dir);
-
-	if (best_fd < 0)
-		return -1;
 	if (path_out && path_sz)
-		snprintf(path_out, path_sz, "%s", best_path);
-	return best_fd;
+		snprintf(path_out, path_sz, "%s", path);
+	return fd;
 }
 
 static int parse_u64(const char *s, uint64_t *out)
@@ -374,16 +354,13 @@ int main(int argc, char **argv)
 	if (rc < 0) return 2;
 
 	if (opts.device[0]) {
-		fd = open(opts.device, O_RDWR | O_CLOEXEC);
+		fd = open(opts.device, O_RDONLY | O_CLOEXEC);
 		if (fd < 0) { perror(opts.device); return 1; }
 		snprintf(opened_path, sizeof(opened_path), "%s", opts.device);
 	} else {
 		fd = open_amdrnpu_node(opened_path, sizeof(opened_path));
-		if (fd < 0) {
-			fprintf(stderr,
-				"no amdrnpu node under /dev/amdrnpu.*\n");
+		if (fd < 0)
 			return 1;
-		}
 	}
 
 	printf("device:     %s\n", opened_path);

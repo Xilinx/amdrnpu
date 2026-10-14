@@ -153,74 +153,34 @@ static int parse_arg_token(const char *tok, struct amdrnpu_arg *out)
 /* ------------------------------------------------------------------ */
 
 /*
- * Scan /dev/amdrnpu.* and pick the lowest-numbered node. The driver is a
- * miscdevice, so the node name IS the identity -- there is no name/version
- * ioctl to probe. Returns fd >= 0 on success, -1 if no match. Optionally
- * writes the path into @out_path (must be at least PATH_MAX bytes).
+ * The library is configured from an INI file rather than a kernel node; the fd
+ * is only an opaque API key.  Return the config path ($AMDRNPU_INI or
+ * /etc/amdrnpu.ini).
  */
-static int open_amdrnpu_scan(char *out_path, size_t out_sz)
+static const char *amdrnpu_default_config(void)
 {
-	DIR *dir;
-	struct dirent *e;
-	long best = LONG_MAX;
-	int best_fd = -1;
-	char best_path[PATH_MAX] = {0};
+	const char *path = getenv("AMDRNPU_INI");
 
-	dir = opendir("/dev");
-	if (!dir)
-		return -1;
-
-	while ((e = readdir(dir)) != NULL) {
-		long n;
-		int fd;
-		char p[PATH_MAX];
-
-		if (strncmp(e->d_name, "amdrnpu.", 8) != 0)
-			continue;
-		if (!isdigit((unsigned char)e->d_name[8]))
-			continue;
-		n = strtol(e->d_name + 8, NULL, 10);
-		if (n < 0 || n >= best)
-			continue;
-		snprintf(p, sizeof(p), "/dev/%s", e->d_name);
-		fd = open(p, O_RDWR | O_CLOEXEC);
-		if (fd < 0)
-			continue;
-		if (best_fd >= 0)
-			close(best_fd);
-		best = n;
-		best_fd = fd;
-		snprintf(best_path, sizeof(best_path), "%s", p);
-	}
-	closedir(dir);
-
-	if (best_fd >= 0 && out_path && out_sz > 0)
-		snprintf(out_path, out_sz, "%s", best_path);
-	return best_fd;
+	return (path && *path) ? path : "/etc/amdrnpu.ini";
 }
 
 /*
- * Open the user-supplied device path, or fall back to a /dev/amdrnpu.* scan
- * when path is NULL.
+ * Open the user-supplied config path, or the default INI when path is NULL.
+ * The fd is read-only and used only as an opaque key for the amdrnpu API.
  */
 static int open_amdrnpu_device(const char *path, char *opened_path, size_t sz)
 {
 	int fd;
 
-	if (path && path[0]) {
-		fd = open(path, O_RDWR | O_CLOEXEC);
-		if (fd < 0) {
-			fprintf(stderr, "open(%s): %s\n", path, strerror(errno));
-			return -1;
-		}
-		if (opened_path && sz > 0)
-			snprintf(opened_path, sz, "%s", path);
-		return fd;
+	if (!path || !path[0])
+		path = amdrnpu_default_config();
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0) {
+		fprintf(stderr, "open(%s): %s\n", path, strerror(errno));
+		return -1;
 	}
-	fd = open_amdrnpu_scan(opened_path, sz);
-	if (fd < 0)
-		fprintf(stderr,
-			"no /dev/amdrnpu.* node found; pass --device explicitly\n");
+	if (opened_path && sz > 0)
+		snprintf(opened_path, sz, "%s", path);
 	return fd;
 }
 

@@ -16,14 +16,13 @@
  * Prerequisites on VEK385 (system-top-rpu-enlarged.dtb + rebuilt rpu_fw):
  *   - RPU firmware registers RPMsg channel "amdrnpu" (amdrnpu_ept.c).
  *   - OpenAMP rsctbl/vrings match DT: 0x9800000 / 0x9860000 / 0x9864000 / 0x9868000.
- *   - amdrnpu driver loaded and bound to the "amdrnpu" RPMsg channel; the
- *     RPU buffers must come from an RPU-reachable, contiguous dma-buf heap
- *     (e.g. rpu_gem_cma@20000000 on the Versal-net layout).
- *   - Open /dev/amdrnpu.N (the driver is a miscdevice; CPU mapping is done
- *     on the buffer's dma-buf via amdrnpu_buf_mmap()).
+ *   - /etc/amdrnpu.ini (or $AMDRNPU_INI) describes the no-map RPU pool and the
+ *     rpmsg shared-memory geometry; the process must be able to mmap /dev/mem.
+ *   - RPU buffers come from the configured RPU pool; CPU mapping is done via
+ *     amdrnpu_buf_mmap() (a /dev/mem window).
  *
  * Usage:
- *   amdrnpu_inout_example [--device /dev/amdrnpu.N]
+ *   amdrnpu_inout_example [--device /path/to/amdrnpu.ini]
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -58,50 +57,26 @@ static void fail(const char *what, int rc)
 }
 
 /*
- * Scan /dev/amdrnpu.* and open the lowest-numbered node. The driver is a
- * miscdevice, so the node name IS the identity -- there is no name/version
- * ioctl to probe. Returns fd >= 0 on success, -1 if none.
+ * The library is now configured from an INI file (/etc/amdrnpu.ini, overridable
+ * with $AMDRNPU_INI) rather than a kernel node.  The amdrnpu fd is only an
+ * opaque key, so open the config file read-only and pass that fd to the API.
+ * Returns fd >= 0 on success, -1 on failure.
  */
 static int open_amdrnpu_node(char *path_out, size_t path_sz)
 {
-	DIR *dir = opendir("/dev");
-	struct dirent *e;
-	long best = LONG_MAX;
-	int best_fd = -1;
-	char best_path[PATH_MAX];
+	const char *path = getenv("AMDRNPU_INI");
+	int fd;
 
-	if (!dir)
+	if (!path || !*path)
+		path = "/etc/amdrnpu.ini";
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0) {
+		fprintf(stderr, "open(%s): %s\n", path, strerror(errno));
 		return -1;
-
-	while ((e = readdir(dir)) != NULL) {
-		long n;
-		int fd;
-		char p[PATH_MAX];
-
-		if (strncmp(e->d_name, "amdrnpu.", 8) != 0)
-			continue;
-		if (e->d_name[8] < '0' || e->d_name[8] > '9')
-			continue;
-		n = strtol(e->d_name + 8, NULL, 10);
-		if (n < 0 || n >= best)
-			continue;
-		snprintf(p, sizeof(p), "/dev/%s", e->d_name);
-		fd = open(p, O_RDWR | O_CLOEXEC);
-		if (fd < 0)
-			continue;
-		if (best_fd >= 0)
-			close(best_fd);
-		best = n;
-		best_fd = fd;
-		snprintf(best_path, sizeof(best_path), "%s", p);
 	}
-	closedir(dir);
-
-	if (best_fd < 0)
-		return -1;
 	if (path_out && path_sz)
-		snprintf(path_out, path_sz, "%s", best_path);
-	return best_fd;
+		snprintf(path_out, path_sz, "%s", path);
+	return fd;
 }
 
 static int parse_device_arg(int argc, char **argv, char *path, size_t path_sz)
@@ -136,17 +111,15 @@ int main(int argc, char **argv)
 	}
 
 	if (dev_path[0]) {
-		fd = open(dev_path, O_RDWR | O_CLOEXEC);
+		fd = open(dev_path, O_RDONLY | O_CLOEXEC);
 		if (fd < 0) {
 			perror(dev_path);
 			return 1;
 		}
 	} else {
 		fd = open_amdrnpu_node(dev_path, sizeof(dev_path));
-		if (fd < 0) {
-			fprintf(stderr, "no amdrnpu node under /dev/amdrnpu.*\n");
+		if (fd < 0)
 			return 1;
-		}
 	}
 
 	printf("device: %s\n", dev_path[0] ? dev_path : "(auto)");

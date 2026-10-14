@@ -27,23 +27,27 @@ Build `rpu_fw` with `versal2_rpu` board; firmware must include:
 
 Rebuild and load via remoteproc after updating the ELF on the target.
 
-## Linux
+## Linux (userspace, no kernel module)
 
-- `amdrnpu.ko` loaded and bound to the `amdrnpu` RPMsg channel
-- An RPU-reachable, contiguous dma-buf heap for the RPU buffers (e.g. backed
-  by `rpu_gem_cma@20000000` at `0x20000000`, 512 MiB, in the official
-  Versal-net layout)
-- Demo allocates **both buffers as RPU BOs** (`AMDRNPU_MEMORY_RPU`) so firmware can
-  access the resolved physical addresses.
-- Example opens **`/dev/amdrnpu.N`** (the driver is a miscdevice); CPU mapping is
-  done on each buffer's dma-buf via `amdrnpu_buf_mmap()`.
+- `/etc/amdrnpu.ini` (or `$AMDRNPU_INI`) declares the RPU pool and the rpmsg
+  shared-memory geometry. The pool regions are **`no-map`** reserved-memory in
+  the device tree (kernel-unmanaged); the library allocates from them with a
+  4 KiB bitmap and accesses them via **`/dev/mem`** (needs root / mmap
+  permission).
+- The library submits commands over the userspace **rpmsg_lite** leader on the
+  `amdrnpu` channel — no `amdrnpu.ko`.
+- Demo allocates **both buffers as RPU BOs** (`AMDRNPU_MEMORY_RPU`) so firmware
+  can access the resolved physical addresses; CPU mapping is a `/dev/mem` window
+  via `amdrnpu_buf_mmap()`.
 
 ## Run
 
 ```bash
+# Uses /etc/amdrnpu.ini by default:
 amdrnpu_inout_example
-# or
-amdrnpu_inout_example --device /dev/amdrnpu.0
+# or point at a specific config:
+AMDRNPU_INI=/path/to/amdrnpu.ini amdrnpu_inout_example
+amdrnpu_inout_example --device /path/to/amdrnpu.ini
 ```
 
 Success prints `verify OK: output matches input`.

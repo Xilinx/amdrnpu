@@ -94,69 +94,26 @@ static int echo_wait_busy_poll(int fd, uint32_t handle, int64_t timeout_ns,
 /* ------------------------------------------------------------------ */
 
 /*
- * Scan /dev/amdrnpu.* and open the lowest-numbered node. The driver is a
- * miscdevice, so the node name IS the identity -- there is no name/version
- * ioctl to probe.
+ * The library is configured from an INI file rather than a kernel node; the fd
+ * is only an opaque API key.  Open the user-supplied config path, or the
+ * default INI ($AMDRNPU_INI or /etc/amdrnpu.ini) when path is NULL.
  */
-static int open_amdrnpu_scan(char *out_path, size_t out_sz)
-{
-	DIR *dir;
-	struct dirent *e;
-	long best = LONG_MAX;
-	int best_fd = -1;
-	char best_path[PATH_MAX] = {0};
-
-	dir = opendir("/dev");
-	if (!dir)
-		return -1;
-
-	while ((e = readdir(dir)) != NULL) {
-		long n;
-		int fd;
-		char p[PATH_MAX];
-
-		if (strncmp(e->d_name, "amdrnpu.", 8) != 0)
-			continue;
-		if (!isdigit((unsigned char)e->d_name[8]))
-			continue;
-		n = strtol(e->d_name + 8, NULL, 10);
-		if (n < 0 || n >= best)
-			continue;
-		snprintf(p, sizeof(p), "/dev/%s", e->d_name);
-		fd = open(p, O_RDWR | O_CLOEXEC);
-		if (fd < 0)
-			continue;
-		if (best_fd >= 0)
-			close(best_fd);
-		best = n;
-		best_fd = fd;
-		snprintf(best_path, sizeof(best_path), "%s", p);
-	}
-	closedir(dir);
-
-	if (best_fd >= 0 && out_path && out_sz > 0)
-		snprintf(out_path, out_sz, "%s", best_path);
-	return best_fd;
-}
-
 static int open_amdrnpu_device(const char *path, char *opened_path, size_t sz)
 {
 	int fd;
 
-	if (path && path[0]) {
-		fd = open(path, O_RDWR | O_CLOEXEC);
-		if (fd < 0) {
-			fprintf(stderr, "open(%s): %s\n", path, strerror(errno));
-			return -1;
-		}
-		if (opened_path && sz > 0)
-			snprintf(opened_path, sz, "%s", path);
-		return fd;
+	if (!path || !path[0]) {
+		path = getenv("AMDRNPU_INI");
+		if (!path || !*path)
+			path = "/etc/amdrnpu.ini";
 	}
-	fd = open_amdrnpu_scan(opened_path, sz);
-	if (fd < 0)
-		fprintf(stderr,
-			"no /dev/amdrnpu.* node found; pass --device\n");
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0) {
+		fprintf(stderr, "open(%s): %s\n", path, strerror(errno));
+		return -1;
+	}
+	if (opened_path && sz > 0)
+		snprintf(opened_path, sz, "%s", path);
 	return fd;
 }
 
