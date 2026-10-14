@@ -279,6 +279,18 @@ Highlights:
 
 ## License
 
-- Kernel module: GPL-2.0-only (see SPDX headers in
-  `drivers/rpmsg/amdrnpu/`).
-- User-space library and meta-layer: MIT (see [`LICENSE`](LICENSE)).
+This repository ships components under more than one license. Every source
+file carries an SPDX `License-Identifier` header; the full license texts live
+in [`LICENSE`](LICENSE) (MIT) and
+[`LICENSES/GPL-2.0.txt`](LICENSES/GPL-2.0.txt) (GPL-2.0). The mapping:
+
+| Part | License | Text |
+|---|---|---|
+| Kernel module `drivers/rpmsg/amdrnpu/` (incl. its `Kbuild`/`Makefile`) | GPL-2.0 | [`LICENSES/GPL-2.0.txt`](LICENSES/GPL-2.0.txt) |
+| User-space library `lib/`, examples, and the CMake files | MIT | [`LICENSE`](LICENSE) |
+| Build scripts — `build/build.sh`, `boards/vek385/dtbo/*.sh`, and the top-level `Makefile` | MIT | [`LICENSE`](LICENSE) |
+| Yocto layer `meta-amdrnpu/` | MIT | [`meta-amdrnpu/COPYING.MIT`](meta-amdrnpu/COPYING.MIT) |
+| UAPI header `include/uapi/amdrnpu/amdrnpu.h` | GPL-2.0 WITH Linux-syscall-note **OR** MIT (dual; recipient's choice) | [`LICENSES/GPL-2.0.txt`](LICENSES/GPL-2.0.txt) / [`LICENSE`](LICENSE) |
+
+The UAPI header is deliberately dual-licensed so the MIT user-space library can
+include the kernel/user ABI without GPL reach-through.
