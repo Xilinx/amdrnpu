@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0+
+# SPDX-License-Identifier: MIT
 # Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Portions of this file consist of AI-generated content.
 #
