@@ -55,6 +55,7 @@
 #                           amdrnpu_inout_example
 #                           amdrnpu_xrt_test_example
 #                           amdrnpu_echo_latency_example
+#                           amdrnpu_copy_loopback_example
 #                           amdrnpu_unittest         (only with -unit_tests)
 #   build/<TYPE>/obj/       kbuild mirror: directories are real, source
 #                           files are symlinks back into the repo, kbuild
@@ -71,12 +72,16 @@ REPO=$(cd "$SCRIPT_DIR/.." && pwd)
 
 # ---------- defaults ----------
 SDK=""               # -sdk PATH (extracted Yocto SDK); empty => native
+YOCTO=""             # -yocto PATH (Yocto build dir); no-SDK cross build
 CLEAN=0
 JOBS=$(nproc)
 KDIR=""
+SYSROOT_OVERRIDE=""  # -sysroot PATH (override auto-discovered target sysroot)
+OUT_OVERRIDE=""      # -o PATH (override the build output directory)
 NATIVE_KDIR_DEFAULT="/lib/modules/$(uname -r)/build"
 BUILD_TESTS=1        # build tests/ tree (-no-tests to skip)
 BUILD_UNITTESTS=0    # gtest amdrnpu_unittest (-unit_tests to opt in)
+BUNDLE=0             # -bundle: assemble a flat lib+app dir ($ORIGIN rpath)
 
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
 log()  { printf "${GREEN}[build]${NC} %s\n" "$*"; }
@@ -99,6 +104,12 @@ Usage: build/build.sh [OPTIONS]
     in build/Release-aarch64/. This is the build for APU Linux on the
     board.
 
+  Cross (Yocto build, no SDK): build/build.sh -yocto /path/to/yocto/build
+    aarch64 cross-build straight from a Yocto build tree, without running
+    populate_sdk. Auto-discovers the kernel build tree (so the .ko gets
+    the right vermagic), the exact cross toolchain the kernel was built
+    with, and a target sysroot. Combine with -o to stage elsewhere.
+
 Options:
   -h, -help            Show this help.
   -clean               rm -rf build/Release/ build/Release-aarch64/ and exit.
@@ -107,9 +118,20 @@ Options:
                        environment-setup-*). Enables the aarch64 cross
                        build. KDIR defaults to the SDK's kernel dev
                        sources (sysroots/<target>/usr/src/kernel).
+  -yocto PATH          Yocto build directory (the one containing tmp/).
+                       Enables a no-SDK aarch64 cross build: KDIR, cross
+                       toolchain and target sysroot are auto-discovered.
+                       Mutually exclusive with -sdk. Override pieces with
+                       -kdir / -sysroot if auto-discovery picks wrong.
+  -o, -out PATH        Output directory for this build (default:
+                       build/Release or build/Release-aarch64). Handy to
+                       keep a Yocto build separate from an SDK build.
+  -sysroot PATH        Override the auto-discovered target sysroot
+                       (-yocto mode): a recipe-sysroot with usr/lib/libc.so*.
   -kdir PATH           Override the kernel source+build tree.
                        Default native: $NATIVE_KDIR_DEFAULT
                        Default -sdk:   <sdk-target-sysroot>/usr/src/kernel
+                       Default -yocto: tmp/work-shared/<m>/kernel-build-artifacts
   -no-tests            Skip the tests/ target entirely (the gtest
                        amdrnpu_unittest acceptance suite). On by default;
                        this flag is mostly for fast iteration when only
@@ -118,6 +140,11 @@ Options:
                        amdrnpu_unittest). OFF by default because it needs
                        a C++17 cross toolchain. The Yocto SDK ships g++,
                        so this works under -sdk.
+  -bundle              Also assemble build/<TYPE>/bundle/: a single flat
+                       directory with libamdrnpu.so* and every app, synced
+                       to the target as-is. The apps are linked dynamically
+                       with an \$ORIGIN rpath, so they load the co-located
+                       .so and never override /usr/lib on the target.
 
 Outputs (per build):
   build/<TYPE>/driver/amdrnpu.ko
@@ -126,6 +153,7 @@ Outputs (per build):
   build/<TYPE>/bin/amdrnpu_inout_example
   build/<TYPE>/bin/amdrnpu_xrt_test_example
   build/<TYPE>/bin/amdrnpu_echo_latency_example
+  build/<TYPE>/bin/amdrnpu_copy_loopback_example
   build/<TYPE>/bin/amdrnpu_unittest (only with -unit_tests; needs C++17)
 EOF
 }
@@ -137,26 +165,41 @@ while [ $# -gt 0 ]; do
         -clean)            CLEAN=1; shift ;;
         -j)                JOBS="$2"; shift 2 ;;
         -sdk)              SDK="$2"; shift 2 ;;
+        -yocto)            YOCTO="$2"; shift 2 ;;
         -kdir)             KDIR="$2"; shift 2 ;;
+        -sysroot)          SYSROOT_OVERRIDE="$2"; shift 2 ;;
+        -o|-out)           OUT_OVERRIDE="$2"; shift 2 ;;
         -no-tests)         BUILD_TESTS=0; shift ;;
         -unit_tests|-unit-tests)
                            BUILD_UNITTESTS=1; shift ;;
+        -bundle)           BUNDLE=1; shift ;;
         *) die "Unknown option: $1 (try -help)" ;;
     esac
 done
 
+[ -n "$SDK" ] && [ -n "$YOCTO" ] && die "-sdk and -yocto are mutually exclusive"
+
 CROSS=0
+YOCTO_MODE=0
 [ -n "$SDK" ] && CROSS=1
+[ -n "$YOCTO" ] && { CROSS=1; YOCTO_MODE=1; }
 
 # ---------- BUILD_TYPE + clean ----------
 if [ "$CROSS" -eq 1 ]; then BUILD_TYPE="Release-aarch64"; else BUILD_TYPE="Release"; fi
-OUT="$REPO/build/$BUILD_TYPE"
+if [ -n "$OUT_OVERRIDE" ]; then OUT="$OUT_OVERRIDE"; else OUT="$REPO/build/$BUILD_TYPE"; fi
 
 if [ "$CLEAN" -eq 1 ]; then
     log "Cleaning $REPO/build/Release{,-aarch64}/"
     rm -rf "$REPO/build/Release" "$REPO/build/Release-aarch64"
     exit 0
 fi
+
+# kbuild's external-module M= must be an ABSOLUTE path (it is resolved
+# relative to the kernel tree after `make -C $KDIR`). A relative -o (e.g.
+# ./build/foo) would otherwise make the kmod build fail with "external module
+# directory ... does not exist". Normalise OUT to an absolute path.
+mkdir -p "$OUT"
+OUT=$(cd "$OUT" && pwd)
 
 # ---------- per-mode setup ----------
 # CC/CXX/AR/RANLIB used by the lib + tests cmake invocations in -sdk mode.
@@ -166,10 +209,67 @@ CROSS_CC=""
 CROSS_CXX=""
 CROSS_AR=""
 CROSS_RANLIB=""
-SYSROOT=""             # target sysroot (-sdk mode)
-SDK_PATH_PREFIX=""     # SDK PATH (cross + host tools) for the kbuild step
+SYSROOT=""             # target sysroot (-sdk / -yocto mode)
+SDK_PATH_PREFIX=""     # PATH (cross + host tools) for the kbuild step
 
-if [ "$CROSS" -eq 1 ]; then
+if [ "$YOCTO_MODE" -eq 1 ]; then
+    # -------- no-SDK cross build straight from a Yocto build tree --------
+    # Auto-discover the pieces an SDK would normally bundle:
+    #   KDIR    = the shared kernel build artifacts (correct vermagic)
+    #   CROSS_* = the exact aarch64 toolchain the kernel was built with
+    #   SYSROOT = any target recipe-sysroot (the lib is dependency-free)
+    [ -d "$YOCTO/tmp" ] || die "not a Yocto build dir (no tmp/): $YOCTO"
+
+    # 1. Kernel build tree: has Makefile, .config, Module.symvers and the
+    #    prebuilt host scripts, so no modules_prepare is needed.
+    if [ -z "$KDIR" ]; then
+        KDIR=$(find "$YOCTO/tmp/work-shared" -maxdepth 2 -type d \
+                    -name kernel-build-artifacts 2>/dev/null | head -1)
+    fi
+    [ -n "$KDIR" ] && [ -f "$KDIR/Makefile" ] && [ -d "$KDIR/scripts" ] \
+        || die "no kernel-build-artifacts under $YOCTO/tmp/work-shared (pass -kdir PATH)."
+
+    # 2. Cross toolchain from the kernel recipe's native sysroot (the exact
+    #    gcc that built this kernel -> matching vermagic/ABI).
+    _cc=$(find "$YOCTO/tmp/work" \
+               -path '*/linux-xlnx/*/recipe-sysroot-native/usr/bin/*/aarch64-*-gcc' \
+               2>/dev/null | head -1)
+    [ -n "$_cc" ] || _cc=$(find "$YOCTO/tmp/work" \
+               -path '*/recipe-sysroot-native/usr/bin/*/aarch64-*-linux-gcc' \
+               2>/dev/null | head -1)
+    [ -n "$_cc" ] && [ -x "$_cc" ] \
+        || die "no aarch64 cross gcc under $YOCTO/tmp/work (build the kernel first)."
+    _bindir=$(dirname "$_cc")
+    _pfx=$(basename "$_cc"); _pfx="${_pfx%gcc}"   # e.g. aarch64-amd-linux-
+    CROSS_CC="$_bindir/${_pfx}gcc"
+    CROSS_CXX="$_bindir/${_pfx}g++"
+    CROSS_AR="$_bindir/${_pfx}ar"
+    CROSS_RANLIB="$_bindir/${_pfx}ranlib"
+    [ -x "$CROSS_CC" ] || die "cross gcc not executable: $CROSS_CC"
+
+    # 3. Target sysroot for the userspace lib + apps. The lib has no deps
+    #    beyond libc + UAPI headers, so any same-distro recipe-sysroot works.
+    if [ -n "$SYSROOT_OVERRIDE" ]; then
+        SYSROOT="$SYSROOT_OVERRIDE"
+    else
+        while IFS= read -r _rs; do
+            # Require libc headers/libs AND the gcc runtime (crtbeginS.o) so a
+            # normal userspace link succeeds. This also skips toolchain
+            # component sysroots (libgcc/glibc builds) that lack the runtime.
+            if [ -e "$_rs/usr/include/stdio.h" ] \
+               && ls "$_rs"/usr/lib/libc.so* >/dev/null 2>&1 \
+               && ls "$_rs"/usr/lib/*/*/crtbeginS.o >/dev/null 2>&1; then
+                SYSROOT="$_rs"; break
+            fi
+        done < <(find "$YOCTO/tmp/work" -maxdepth 4 -type d -name recipe-sysroot 2>/dev/null)
+    fi
+    [ -n "$SYSROOT" ] && [ -d "$SYSROOT" ] \
+        || die "no target sysroot found; pass -sysroot PATH (a recipe-sysroot with usr/lib/libc.so*)."
+
+    export ARCH="arm64"
+    export CROSS_COMPILE="$_pfx"
+    SDK_PATH_PREFIX="$_bindir:$PATH"
+elif [ "$CROSS" -eq 1 ]; then
     [ -d "$SDK" ] || die "SDK directory does not exist: $SDK"
 
     # The SDK's environment-setup script is the source of truth for the
@@ -240,7 +340,11 @@ fi
 
 mkdir -p "$OUT/driver" "$OUT/lib" "$OUT/bin"
 log "amdrnpu build"
-if [ "$CROSS" -eq 1 ]; then
+if [ "$YOCTO_MODE" -eq 1 ]; then
+    log "  Mode:         yocto cross (aarch64, no SDK)"
+    log "  Yocto:        $YOCTO"
+    log "  Compiler:     $("$CROSS_CC" --version 2>&1 | head -1)"
+elif [ "$CROSS" -eq 1 ]; then
     log "  Mode:         sdk cross (aarch64)"
     log "  SDK:          $SDK"
     log "  Compiler:     $("$CROSS_CC" --version 2>&1 | head -1)"
@@ -338,11 +442,14 @@ build_lib() {
             -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY
             -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY
             -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY
-            # Link the examples against libamdrnpu.a so the staged binaries
-            # run on the board without needing libamdrnpu.so on the
-            # rootfs loader path.
-            -DAMDRNPU_LINK_EXAMPLES_STATIC=ON
         )
+        # Default cross: link examples against libamdrnpu.a so the staged
+        # binaries run on the board without needing libamdrnpu.so on the
+        # loader path. With -bundle we instead ship the .so next to the apps
+        # and load it via an $ORIGIN rpath, so keep the examples dynamic.
+        if [ "$BUNDLE" -eq 0 ]; then
+            cmake_args+=( -DAMDRNPU_LINK_EXAMPLES_STATIC=ON )
+        fi
     fi
 
     cmake "${cmake_args[@]}" >"$OUT/cmake-configure.log" 2>&1 \
@@ -368,7 +475,9 @@ build_lib() {
         amdrnpu_test
         amdrnpu_inout_example
         amdrnpu_xrt_test_example
+        amdrnpu_xrt_offload_example
         amdrnpu_echo_latency_example
+        amdrnpu_copy_loopback_example
     )
     for _exe in "${examples[@]}"; do
         [ -f "$OUT/cmake-lib/$_exe" ] \
@@ -449,12 +558,47 @@ Did you run: git submodule update --init --recursive ?"
     echo
 }
 
+# ---------- bundle phase ----------
+# Assemble a single flat directory that can be synced to the target as-is:
+# the shared library plus every app. The apps are linked with an $ORIGIN
+# rpath (see lib/CMakeLists.txt), so they load the co-located libamdrnpu.so*
+# and never the copy in /usr/lib on the target.
+build_bundle() {
+    [ "$BUNDLE" -eq 1 ] || return 0
+
+    local dir="$OUT/bundle"
+    log "Assembling sync bundle (shared lib + apps, \$ORIGIN rpath)"
+    rm -rf "$dir"
+    mkdir -p "$dir"
+
+    shopt -s nullglob
+    local sos=( "$OUT/lib"/libamdrnpu.so* )
+    shopt -u nullglob
+    [ "${#sos[@]}" -gt 0 ] \
+        || die "no libamdrnpu.so* to bundle (was the shared lib built?)"
+    cp -af "${sos[@]}" "$dir/"
+
+    local app
+    for app in "$OUT/bin"/*; do
+        [ -f "$app" ] && cp -f "$app" "$dir/"
+    done
+
+    log "  -> $dir/ ($(ls -1 "$dir/" | tr '\n' ' '))"
+    log "  sync it to the target, e.g.:"
+    log "    rsync -a $dir/ root@TARGET:/home/root/amdrnpu/"
+    log "  then on the target (loads the co-located .so, not /usr/lib):"
+    log "    cd /home/root/amdrnpu && ./amdrnpu_copy_loopback_example --self-test"
+    echo
+}
+
 # ---------- run ----------
 build_kmod
 build_lib
 build_tests
+build_bundle
 
 log "Done. Artifacts under $OUT/:"
 log "  driver/amdrnpu.ko"
 for f in $(ls -1 "$OUT/lib/"); do log "  lib/$f"; done
 for f in $(ls -1 "$OUT/bin/"); do log "  bin/$f"; done
+[ "$BUNDLE" -eq 1 ] && for f in $(ls -1 "$OUT/bundle/"); do log "  bundle/$f"; done
