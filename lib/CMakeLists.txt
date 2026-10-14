@@ -101,7 +101,9 @@ if(AMDRNPU_LIB_BUILD_EXAMPLES AND _installed_targets)
 		amdrnpu_test
 		amdrnpu_inout_example
 		amdrnpu_xrt_test_example
-		amdrnpu_echo_latency_example)
+		amdrnpu_xrt_offload_example
+		amdrnpu_echo_latency_example
+		amdrnpu_copy_loopback_example)
 	if(AMDRNPU_LINK_EXAMPLES_STATIC)
 		if(NOT TARGET amdrnpu_static)
 			message(FATAL_ERROR
@@ -117,12 +119,26 @@ if(AMDRNPU_LIB_BUILD_EXAMPLES AND _installed_targets)
 		add_executable(${_exe} examples/${_exe}.c)
 		target_link_libraries(${_exe} PRIVATE ${_example_tess_lib})
 		if(NOT AMDRNPU_LINK_EXAMPLES_STATIC AND TARGET amdrnpu)
-			target_link_options(${_exe} PRIVATE "-Wl,-rpath,\$ORIGIN/../amdrnpu-lib")
+			# $ORIGIN: libamdrnpu.so* sits next to the app (flat bundle).
+			# $ORIGIN/../amdrnpu-lib: the default build/<TYPE> staging layout.
+			# Either resolves the lib without touching /usr/lib.
+			target_link_options(${_exe} PRIVATE
+				"-Wl,-rpath,\$ORIGIN:\$ORIGIN/../amdrnpu-lib")
 		endif()
 	endforeach()
 	# Echo-latency benchmark uses sqrt() for stddev -> needs libm.
 	if(TARGET amdrnpu_echo_latency_example)
 		target_link_libraries(amdrnpu_echo_latency_example PRIVATE m)
+	endif()
+	# The copy-loopback example embeds the vring "response" server, so it
+	# reuses the INI reader and the internal wire/rpmsg headers and needs
+	# threads.
+	if(TARGET amdrnpu_copy_loopback_example)
+		target_sources(amdrnpu_copy_loopback_example PRIVATE src/amdrnpu_ini.c)
+		target_include_directories(amdrnpu_copy_loopback_example PRIVATE
+			${CMAKE_CURRENT_SOURCE_DIR}/src
+			${CMAKE_CURRENT_SOURCE_DIR}/src/rpmsg-lite)
+		target_link_libraries(amdrnpu_copy_loopback_example PRIVATE Threads::Threads)
 	endif()
 endif()
 
@@ -145,6 +161,14 @@ if(AMDRNPU_LIB_BUILD_RPMSG_TEST)
     target_include_directories(amdrnpu_pool_test PRIVATE src)
     target_compile_options(amdrnpu_pool_test PRIVATE -Wall -Wextra)
     add_test(NAME amdrnpu_pool COMMAND amdrnpu_pool_test)
+
+    # End-to-end ifm->ofm copy over the full stack, driving the copy-loopback
+    # example in hardware-free self-test mode (backing file via $AMDRNPU_DEVMEM).
+    # Only runnable on the host, so skip it when cross-compiling.
+    if(TARGET amdrnpu_copy_loopback_example AND NOT CMAKE_CROSSCOMPILING)
+        add_test(NAME amdrnpu_copy_loopback
+                 COMMAND amdrnpu_copy_loopback_example --self-test)
+    endif()
 endif()
 
 install(TARGETS ${_installed_targets}
