@@ -17,6 +17,8 @@ option(AMDRNPU_LIB_BUILD_SHARED   "Build shared library" ON)
 option(AMDRNPU_LIB_BUILD_STATIC   "Build static library" ON)
 option(AMDRNPU_LIB_BUILD_EXAMPLES "Build examples" ON)
 option(AMDRNPU_LIB_BUILD_RPMSG_TEST "Build hardware-free rpmsg-lite test" OFF)
+option(AMDRNPU_LIB_BUILD_RPMSG_DMA_TEST
+	"Build hardware-free DMA-backend rpmsg-lite test" OFF)
 option(AMDRNPU_LINK_EXAMPLES_STATIC
 	"Link examples against libamdrnpu.a (no libamdrnpu.so at runtime)" OFF)
 
@@ -171,6 +173,27 @@ if(AMDRNPU_LIB_BUILD_RPMSG_TEST)
     endif()
 endif()
 
+if(AMDRNPU_LIB_BUILD_RPMSG_DMA_TEST)
+    enable_testing()
+    # DMA variant: every ring field and payload goes through the pluggable
+    # rpmsg_mem backend. The host-memory backend lets this run without hardware;
+    # the MDB5 backend is compiled for coverage but not exercised here.
+    add_executable(rpmsg_lite_dma_test
+        src/rpmsg-lite/rpmsg_lite_dma_test.c
+        src/rpmsg-lite/vring_lite_dma.c
+        src/rpmsg-lite/rpmsg_lite_dma.c
+        src/rpmsg-lite/rpmsg_mem_host.c
+    )
+    target_include_directories(rpmsg_lite_dma_test PRIVATE src/rpmsg-lite)
+    target_compile_options(rpmsg_lite_dma_test PRIVATE -Wall -Wextra)
+    add_test(NAME rpmsg_lite_dma COMMAND rpmsg_lite_dma_test)
+
+    # Compile-only guard for the real MDB5 pread/pwrite adapter.
+    add_library(rpmsg_mem_mdb5 STATIC src/rpmsg-lite/rpmsg_mem_mdb5.c)
+    target_include_directories(rpmsg_mem_mdb5 PRIVATE src/rpmsg-lite)
+    target_compile_options(rpmsg_mem_mdb5 PRIVATE -Wall -Wextra)
+endif()
+
 install(TARGETS ${_installed_targets}
     DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
@@ -183,6 +206,17 @@ install(DIRECTORY include/amdrnpu
 install(FILES src/rpmsg-lite/vring_lite.h src/rpmsg-lite/rpmsg_lite.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/amdrnpu
 )
+
+# The DMA (MDB5/PCIe) variant and its pluggable-backend headers are only
+# shipped when explicitly built; the default devmem build installs nothing
+# DMA-related.
+if(AMDRNPU_LIB_BUILD_RPMSG_DMA_TEST)
+    install(FILES src/rpmsg-lite/rpmsg_mem.h src/rpmsg-lite/rpmsg_mem_host.h
+        src/rpmsg-lite/rpmsg_mem_mdb5.h src/rpmsg-lite/vring_lite_dma.h
+        src/rpmsg-lite/rpmsg_lite_dma.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/amdrnpu
+    )
+endif()
 
 install(DIRECTORY ${AMDRNPU_UAPI_DIR}/amdrnpu
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
