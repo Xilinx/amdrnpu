@@ -1,0 +1,5 @@
+# build artifacts
+echo_host
+echo_device
+cosim_test
+*.o
