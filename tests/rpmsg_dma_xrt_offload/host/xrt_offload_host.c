@@ -34,6 +34,7 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <limits.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -47,6 +48,8 @@
 #define DEFAULT_ITERATIONS 1u
 #define DEFAULT_TIMEOUT_S  60u
 #define POOL_ALIGN         0x1000u   /* page-align every pool allocation */
+#define RESULT_POISON      0xFFFFFFFFu /* result.passed sentinel = "not written yet" */
+#define POLL_INTERVAL_MS   10u         /* delay between completion checks (poll mode) */
 
 /* ---------------------------------------------------------------------------
  * Config (inline INI parser). Covers the Link A vring geometry + the two
@@ -244,6 +247,54 @@ static int pool_zero(struct pool *p, uint64_t pa, uint64_t len)
 	return 0;
 }
 
+/* DMA-write @src to @pa, then read it back and compare, so a device write that
+ * did not land (e.g. the MDB5 aperture does not cover this DDR range, or needs a
+ * translation offset the OCM path does not) is caught BEFORE the address is
+ * handed to the RPU/AIE. The readback buffer is freshly zeroed before every read
+ * so a failed/short DMA read shows up as a mismatch, not as stale matching data. */
+static int pool_write_verify(struct pool *p, uint64_t pa, const void *src,
+			     uint64_t len, const char *tag)
+{
+	const uint8_t *s = src;
+	uint8_t *vbuf;
+	int rc = pool_write(p, pa, src, len);
+
+	if (rc) {
+		fprintf(stderr, "DMA write %s @0x%" PRIx64 ": %s\n",
+			tag, pa, strerror(-rc));
+		return rc;
+	}
+
+	vbuf = malloc((size_t)len);
+	if (!vbuf)
+		return -ENOMEM;
+	memset(vbuf, 0, (size_t)len);	/* zero readback buffer before every verify */
+
+	rc = p->mem->read(p->mem->priv, vbuf, pa, len);
+	if (rc) {
+		fprintf(stderr, "DMA readback %s @0x%" PRIx64 ": %s\n",
+			tag, pa, strerror(-rc));
+		free(vbuf);
+		return rc;
+	}
+
+	if (memcmp(vbuf, s, (size_t)len) != 0) {
+		uint64_t off = 0;
+		while (off < len && s[off] == vbuf[off])
+			off++;
+		fprintf(stderr, "VERIFY FAIL %s @0x%" PRIx64 " size=%" PRIu64
+			": first diff @+0x%" PRIx64 " wrote=0x%02x read=0x%02x\n",
+			tag, pa, len, off, s[off], vbuf[off]);
+		free(vbuf);
+		return -EIO;
+	}
+
+	free(vbuf);
+	printf("verify:     %s @0x%" PRIx64 " size=%" PRIu64 " OK (readback matches)\n",
+	       tag, pa, len);
+	return 0;
+}
+
 /* ---------------------------------------------------------------------------
  * ELF loader (transparently inflates a zlib-compressed control ELF).
  * ------------------------------------------------------------------------- */
@@ -336,6 +387,7 @@ struct opts {
 	bool             want_result;
 	bool             dump_args;
 	bool             trace_dma;
+	bool             interactive;
 };
 
 static void usage(const char *p)
@@ -350,7 +402,9 @@ static void usage(const char *p)
 		"  --no-result         skip result writeback\n"
 		"  --dump-args         print the descriptor kargs + wire args, then submit\n"
 		"  --trace-dma         print dev_addr + len on every MDB5 DMA call\n"
-		"  --timeout-s N       response wait timeout seconds (default %u)\n",
+		"  --timeout-s N       response wait timeout seconds (default %u; poll mode only)\n"
+		"  --interactive       debug: after submit, check once and re-check on each\n"
+		"                      Enter (Ctrl-C quits) instead of auto-polling\n",
 		p, APU_XRT_TEST_MAX_KARGS, DEFAULT_ITERATIONS, DEFAULT_TIMEOUT_S);
 }
 
@@ -376,6 +430,8 @@ static int parse_cli(int argc, char **argv, struct opts *o)
 			o->dump_args = true;
 		} else if (!strcmp(argv[i], "--trace-dma")) {
 			o->trace_dma = true;
+		} else if (!strcmp(argv[i], "--interactive")) {
+			o->interactive = true;
 		} else if (!strcmp(argv[i], "--arg") && i + 1 < argc) {
 			if (o->n_kargs >= APU_XRT_TEST_MAX_KARGS) { fprintf(stderr, "too many kargs\n"); return -EINVAL; }
 			snprintf(o->kargs[o->n_kargs].path, sizeof(o->kargs[o->n_kargs].path), "%s", argv[++i]);
@@ -440,6 +496,21 @@ static uint64_t now_ns(void)
 	return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
+static volatile sig_atomic_t g_stop;
+
+static void on_sigint(int sig)
+{
+	(void)sig;
+	g_stop = 1;
+}
+
+static void sleep_ms(uint32_t ms)
+{
+	struct timespec ts = { .tv_sec = ms / 1000u, .tv_nsec = (long)(ms % 1000u) * 1000000L };
+	while (nanosleep(&ts, &ts) && errno == EINTR && !g_stop)
+		;
+}
+
 static const char *rsp_str(uint32_t t)
 {
 	switch (t) {
@@ -456,25 +527,129 @@ static const char *rsp_str(uint32_t t)
  * the real backend. Wraps rpmsg_mem_ops so it covers BOTH the pool DMAs and
  * the rpmsg_lite_dma ring/field accesses (one ring field = one DMA).
  * ------------------------------------------------------------------------- */
+#define DMA_TRACE_SEEN_MAX 1024
 struct dma_trace {
 	const struct rpmsg_mem_ops *inner;
 	unsigned long seq;
+	/* De-dup: print only the first access to each (dir,addr,len) so a busy
+	 * poll loop re-reading the same ring fields doesn't flood stderr. */
+	struct { uint64_t addr; size_t len; int write; } seen[DMA_TRACE_SEEN_MAX];
+	size_t n_seen;
 };
+
+/* Return 1 the first time this (write,addr,len) tuple is seen, 0 thereafter. */
+static int dma_trace_first(struct dma_trace *t, int write, uint64_t addr, size_t len)
+{
+	for (size_t i = 0; i < t->n_seen; i++)
+		if (t->seen[i].write == write && t->seen[i].addr == addr &&
+		    t->seen[i].len == len)
+			return 0;
+	if (t->n_seen < DMA_TRACE_SEEN_MAX) {
+		t->seen[t->n_seen].addr  = addr;
+		t->seen[t->n_seen].len   = len;
+		t->seen[t->n_seen].write = write;
+		t->n_seen++;
+	}
+	return 1;
+}
 
 static int trace_write(void *priv, uint64_t dev_addr, const void *src, size_t len)
 {
 	struct dma_trace *t = priv;
-	fprintf(stderr, "[dma %6lu] WR dev_addr=0x%010" PRIx64 " len=%zu\n",
-		t->seq++, dev_addr, len);
+	if (dma_trace_first(t, 1, dev_addr, len))
+		fprintf(stderr, "[dma %6lu] WR dev_addr=0x%010" PRIx64 " len=%zu (first)\n",
+			t->seq, dev_addr, len);
+	t->seq++;
 	return t->inner->write(t->inner->priv, dev_addr, src, len);
 }
 
 static int trace_read(void *priv, void *dst, uint64_t dev_addr, size_t len)
 {
 	struct dma_trace *t = priv;
-	fprintf(stderr, "[dma %6lu] RD dev_addr=0x%010" PRIx64 " len=%zu\n",
-		t->seq++, dev_addr, len);
+	if (dma_trace_first(t, 0, dev_addr, len))
+		fprintf(stderr, "[dma %6lu] RD dev_addr=0x%010" PRIx64 " len=%zu (first)\n",
+			t->seq, dev_addr, len);
+	t->seq++;
 	return t->inner->read(t->inner->priv, dst, dev_addr, len);
+}
+
+/* ---------------------------------------------------------------------------
+ * Word-aligning shim: the MDB5 DMA engine only moves 4-byte aligned words, so a
+ * raw 1- or 2-byte pwrite/pread silently misbehaves (DRIVER_OK byte and vring
+ * index fields never land). Expand every transfer to 4-byte granularity, using
+ * read-modify-write for unaligned/partial head and tail words. The aligned
+ * middle passes straight through (the DMA-friendly bulk path).
+ * ------------------------------------------------------------------------- */
+#define DMA_WORD 4u
+struct dma_align { const struct rpmsg_mem_ops *inner; };
+
+static int align_rmw_word(const struct rpmsg_mem_ops *in, uint64_t wbase,
+			  unsigned off, const uint8_t *src, unsigned n)
+{
+	uint8_t w[DMA_WORD];
+	int rc = in->read(in->priv, w, wbase, DMA_WORD);
+	if (rc) return rc;
+	memcpy(w + off, src, n);
+	return in->write(in->priv, wbase, w, DMA_WORD);
+}
+
+static int align_write(void *priv, uint64_t dev_addr, const void *src, size_t len)
+{
+	const struct rpmsg_mem_ops *in = ((struct dma_align *)priv)->inner;
+	const uint8_t *p = src;
+	uint64_t addr = dev_addr;
+
+	if (addr & (DMA_WORD - 1)) {              /* unaligned head */
+		uint64_t wbase = addr & ~(uint64_t)(DMA_WORD - 1);
+		unsigned off = (unsigned)(addr - wbase);
+		unsigned n = DMA_WORD - off;
+		if (n > len) n = (unsigned)len;
+		int rc = align_rmw_word(in, wbase, off, p, n);
+		if (rc) return rc;
+		addr += n; p += n; len -= n;
+	}
+	size_t full = len & ~(size_t)(DMA_WORD - 1);  /* aligned whole words */
+	if (full) {
+		int rc = in->write(in->priv, addr, p, full);
+		if (rc) return rc;
+		addr += full; p += full; len -= full;
+	}
+	if (len) {                                 /* partial tail word */
+		int rc = align_rmw_word(in, addr, 0, p, (unsigned)len);
+		if (rc) return rc;
+	}
+	return 0;
+}
+
+static int align_read(void *priv, void *dst, uint64_t dev_addr, size_t len)
+{
+	const struct rpmsg_mem_ops *in = ((struct dma_align *)priv)->inner;
+	uint8_t *p = dst;
+	uint64_t addr = dev_addr;
+	uint8_t w[DMA_WORD];
+
+	if (addr & (DMA_WORD - 1)) {              /* unaligned head */
+		uint64_t wbase = addr & ~(uint64_t)(DMA_WORD - 1);
+		unsigned off = (unsigned)(addr - wbase);
+		unsigned n = DMA_WORD - off;
+		if (n > len) n = (unsigned)len;
+		int rc = in->read(in->priv, w, wbase, DMA_WORD);
+		if (rc) return rc;
+		memcpy(p, w + off, n);
+		addr += n; p += n; len -= n;
+	}
+	size_t full = len & ~(size_t)(DMA_WORD - 1);  /* aligned whole words */
+	if (full) {
+		int rc = in->read(in->priv, p, addr, full);
+		if (rc) return rc;
+		addr += full; p += full; len -= full;
+	}
+	if (len) {                                 /* partial tail word */
+		int rc = in->read(in->priv, w, addr, DMA_WORD);
+		if (rc) return rc;
+		memcpy(p, w, len);
+	}
+	return 0;
 }
 
 int main(int argc, char **argv)
@@ -485,6 +660,8 @@ int main(int argc, char **argv)
 	struct rpmsg_mem_ops mdb5_ops;
 	struct dma_trace trace;
 	struct rpmsg_mem_ops trace_ops;
+	struct dma_align align;
+	struct rpmsg_mem_ops align_ops;
 	const struct rpmsg_mem_ops *mem;   /* active ops (traced or raw) */
 	struct rpmsg_lite_dma ctx;
 	struct rpmsg_lite_dma_ept ept;
@@ -516,15 +693,22 @@ int main(int argc, char **argv)
 	rc = rpmsg_mem_mdb5_open(&mdb5, &mdb5_ops, cfg.mdb5_write, cfg.mdb5_read);
 	if (rc) { fprintf(stderr, "mdb5 open (%s / %s): %s\n", cfg.mdb5_write, cfg.mdb5_read, strerror(-rc)); goto out_scratch; }
 
-	/* Route every DMA through the tracing shim when --trace-dma is set. */
+	/* The MDB5 engine only moves 4-byte aligned words, so sub-word transfers
+	 * (the DRIVER_OK byte, vring index fields) must go through the word-aligning
+	 * shim or they silently don't land. The align shim sits closest to
+	 * rpmsg_lite_dma; the trace (if enabled) sits BELOW it, so the log shows the
+	 * ACTUAL word-aligned MDB5 transfers (e.g. the 4-byte RMW read+write of the
+	 * DRIVER_OK byte at 0xbbf8002c), not the logical sub-word requests. */
+	const struct rpmsg_mem_ops *base = &mdb5_ops;
 	if (opts.trace_dma) {
 		trace = (struct dma_trace){ .inner = &mdb5_ops, .seq = 0 };
 		trace_ops = (struct rpmsg_mem_ops){ .write = trace_write, .read = trace_read, .priv = &trace };
-		mem = &trace_ops;
-		printf("dma trace:  ON (dev_addr + len printed per MDB5 transfer)\n");
-	} else {
-		mem = &mdb5_ops;
+		base = &trace_ops;
+		printf("dma trace:  ON (actual word-aligned MDB5 transfers)\n");
 	}
+	align = (struct dma_align){ .inner = base };
+	align_ops = (struct rpmsg_mem_ops){ .write = align_write, .read = align_read, .priv = &align };
+	mem = &align_ops;
 
 	rpu_pool = (struct pool){ .mem = mem, .base = cfg.rpu_pool_base, .size = cfg.rpu_pool_size, .off = 0 };
 	dev_pool = (struct pool){ .mem = mem, .base = cfg.dev_pool_base, .size = cfg.dev_pool_size, .off = 0 };
@@ -547,6 +731,23 @@ int main(int argc, char **argv)
 		.scratch_size = cfg.buf_size,
 		.shm_size = cfg.shm_size,
 	};
+	/* The resource-table protocol requires the master to fill the vring.da
+	 * fields BEFORE DRIVER_OK: apu_rpmsg_platform.c reads da ONCE, right after
+	 * its DRIVER_OK poll returns, and bails on 0xffffffff. rpmsg_lite_dma_init
+	 * sets DRIVER_OK at its END and never touches the da fields, so write them
+	 * HERE, before init:
+	 *   vring0.da @ +0x30 = RX ring (dev_base + vring_rx_offset)
+	 *   vring1.da @ +0x44 = TX ring (dev_base + vring_tx_offset)
+	 * The +0x30/+0x44 field offsets match the RPU firmware's resource table. */
+	{
+		uint32_t da0 = (uint32_t)(cfg.dev_base + cfg.vring_rx_offset);
+		uint32_t da1 = (uint32_t)(cfg.dev_base + cfg.vring_tx_offset);
+		rc = mem->write(mem->priv, cfg.dev_base + 0x30, &da0, sizeof(da0));
+		if (!rc) rc = mem->write(mem->priv, cfg.dev_base + 0x44, &da1, sizeof(da1));
+		if (rc) { fprintf(stderr, "write vring da: %s\n", strerror(-rc)); goto out_mdb5; }
+		printf("vring da:   wrote vring0.da=0x%08x vring1.da=0x%08x (before DRIVER_OK)\n", da0, da1);
+	}
+
 	rc = rpmsg_lite_dma_init(&ctx, &dcfg);
 	if (rc) { fprintf(stderr, "rpmsg_lite_dma_init: %s\n", strerror(-rc)); goto out_mdb5; }
 
@@ -569,14 +770,15 @@ int main(int argc, char **argv)
 
 	rc = rpmsg_lite_dma_create_ept(&ctx, &ept, cfg.ept_name, cfg.host_ept_addr, on_rsp, &rsp);
 	if (rc) { fprintf(stderr, "create_ept: %s\n", strerror(-rc)); goto out_dma; }
-	printf("ept '%s' local_addr=%u -> peer_dst=%u\n\n", cfg.ept_name, ept.local_addr, cfg.peer_dst);
+	printf("[host-ept] endpoint '%s' created, local_addr=%u -> peer_dst=%u\n\n",
+	       cfg.ept_name, ept.local_addr, cfg.peer_dst);
 
 	/* ---- ELF into the RPU pool ---------------------------------------- */
 	uint64_t elf_sz = 0, elf_pa = 0;
 	rc = load_elf(opts.elf_file, &elf_data, &elf_sz);
 	if (rc) goto out_dma;
 	if (pool_alloc(&rpu_pool, elf_sz, &elf_pa)) goto out_dma;
-	rc = pool_write(&rpu_pool, elf_pa, elf_data, elf_sz);
+	rc = pool_write_verify(&rpu_pool, elf_pa, elf_data, elf_sz, "elf");
 	if (rc) { fprintf(stderr, "DMA ELF: %s\n", strerror(-rc)); goto out_dma; }
 	printf("elf:        PA=0x%" PRIx64 " size=%" PRIu64 "\n", elf_pa, elf_sz);
 
@@ -595,7 +797,7 @@ int main(int argc, char **argv)
 			rc = slurp(k->path, &d, &fsz);
 			if (rc) goto out_dma;
 			if (pool_alloc(&dev_pool, fsz, &pa)) { free(d); goto out_dma; }
-			rc = pool_write(&dev_pool, pa, d, fsz);
+			rc = pool_write_verify(&dev_pool, pa, d, fsz, k->path);
 			free(d);
 			if (rc) { fprintf(stderr, "DMA arg[%u]: %s\n", i, strerror(-rc)); goto out_dma; }
 			karg_sz[i] = fsz;
@@ -616,16 +818,18 @@ int main(int argc, char **argv)
 	for (uint32_t i = 0; i < opts.n_kargs; i++) { re->kargs[i].pa = karg_pa[i]; re->kargs[i].size = karg_sz[i]; }
 	uint64_t desc_pa = 0;
 	if (pool_alloc(&rpu_pool, desc_sz, &desc_pa)) goto out_dma;
-	rc = pool_write(&rpu_pool, desc_pa, desc, desc_sz);
+	rc = pool_write_verify(&rpu_pool, desc_pa, desc, desc_sz, "descriptor");
 	if (rc) { fprintf(stderr, "DMA desc: %s\n", strerror(-rc)); goto out_dma; }
 	printf("descriptor: PA=0x%" PRIx64 " size=%u (1 entry, %u kargs)\n", desc_pa, desc_sz, opts.n_kargs);
 
 	/* ---- result into the RPU pool ------------------------------------- */
 	uint64_t result_pa = 0;
 	if (opts.want_result) {
+		uint8_t poison[APU_XRT_TEST_RESULT_SIZE];
+		memset(poison, 0xFF, sizeof(poison));   /* RPU overwrites with real status */
 		if (pool_alloc(&rpu_pool, APU_XRT_TEST_RESULT_SIZE, &result_pa)) goto out_dma;
-		rc = pool_zero(&rpu_pool, result_pa, APU_XRT_TEST_RESULT_SIZE);
-		if (rc) { fprintf(stderr, "DMA zero result: %s\n", strerror(-rc)); goto out_dma; }
+		rc = pool_write(&rpu_pool, result_pa, poison, APU_XRT_TEST_RESULT_SIZE);
+		if (rc) { fprintf(stderr, "DMA poison result: %s\n", strerror(-rc)); goto out_dma; }
 	}
 
 	/* ---- build + send the APU_XRT_TEST wire command ------------------- */
@@ -664,18 +868,111 @@ int main(int argc, char **argv)
 	rc = rpmsg_lite_dma_sendto(&ctx, &ept, cmdbuf, sizeof(cmdbuf), cfg.peer_dst);
 	if (rc) { fprintf(stderr, "sendto: %s\n", strerror(-rc)); goto out_dma; }
 
-	/* ---- poll for the RPU response ------------------------------------ */
-	uint64_t deadline = now_ns() + (uint64_t)opts.timeout_s * 1000000000ull;
-	while (!rsp.got) {
+	/* ---- wait for completion: rpmsg reply OR DDR result struct --------
+	 * The reply travels on the vring0 used-ring in OCM; on this MDB5 link the
+	 * host cannot reliably read that used-ring update back, so rsp.got may never
+	 * fire even though the RPU replied. The RPU also writes the result struct to
+	 * rpu_pool DDR and cache-flushes it, so poll that directly: the buffer is
+	 * pre-poisoned with 0xFF and a non-poison first word means the run is done.
+	 */
+	/* Raw vring0 used-ring word (flags u16 | idx u16 << 16), read alongside the
+	 * poll so each check shows what the host actually sees over MDB5. Split
+	 * vring layout: desc[num] (16 B each), avail (6 + 2*num B), then used,
+	 * aligned up to vring_align. */
+	uint64_t used_off = (uint64_t)cfg.vring_num * 16u + 6u + 2u * cfg.vring_num;
+	used_off = (used_off + cfg.vring_align - 1u) & ~((uint64_t)cfg.vring_align - 1u);
+	uint64_t vr0_used_addr = cfg.dev_base + cfg.vring_rx_offset + used_off;
+
+	/* Default: poll every POLL_INTERVAL_MS until the reply/result shows up or
+	 * --timeout-s expires, logging a check only when a read value changes.
+	 * --interactive (debug): check once, then re-check each time the user
+	 * presses Enter, logging every check; no timeout.
+	 * Ctrl-C (or EOF in interactive mode) ends the run. SIGINT is installed
+	 * without SA_RESTART so it breaks the blocking fgets(). */
+	struct sigaction sa;
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = on_sigint;
+	sigemptyset(&sa.sa_mask);
+	sigaction(SIGINT, &sa, NULL);
+
+	uint64_t t_send = now_ns();
+	uint64_t deadline = t_send + (uint64_t)opts.timeout_s * 1000000000ull;
+	int last_urc = 1, last_rrc = 1;               /* impossible values: force first print */
+	uint32_t last_used_w = 0, last_w0 = 0;
+	unsigned long chk;
+	for (chk = 0;; chk++) {
+		double dt = (double)(now_ns() - t_send) / 1e9;
+
 		rc = rpmsg_lite_dma_poll(&ctx);
 		if (rc < 0) { fprintf(stderr, "poll: %s\n", strerror(-rc)); goto out_dma; }
-		if (now_ns() > deadline) {
-			fprintf(stderr, "TIMEOUT waiting for RPU response (is RPU_APP running?)\n");
-			goto out_dma;
+
+		uint32_t used_w = 0;
+		int urc = mem->read(mem->priv, &used_w, vr0_used_addr, sizeof(used_w));
+		if (opts.interactive || urc != last_urc || used_w != last_used_w || rsp.got) {
+			if (urc)
+				printf("[chk %lu t+%.3fs] vring0.used @0x%010" PRIx64 " read FAILED: %s\n",
+				       chk, dt, vr0_used_addr, strerror(-urc));
+			else
+				printf("[chk %lu t+%.3fs] vring0.used @0x%010" PRIx64 " = 0x%08x (flags=0x%04x idx=%u) rsp.got=%d\n",
+				       chk, dt, vr0_used_addr, used_w, used_w & 0xffffu, used_w >> 16, rsp.got);
+		}
+		last_urc = urc;
+		last_used_w = used_w;
+		if (rsp.got)
+			break;
+
+		if (opts.want_result) {
+			uint32_t w0 = RESULT_POISON;
+			int rrc = mem->read(mem->priv, &w0, result_pa, sizeof(w0));
+			if (opts.interactive || rrc != last_rrc || w0 != last_w0) {
+				if (rrc)
+					printf("[chk %lu t+%.3fs] result      @0x%010" PRIx64 " read FAILED: %s\n",
+					       chk, dt, result_pa, strerror(-rrc));
+				else
+					printf("[chk %lu t+%.3fs] result      @0x%010" PRIx64 " = 0x%08x%s\n",
+					       chk, dt, result_pa, w0, w0 == RESULT_POISON ? " (poison)" : "");
+			}
+			last_rrc = rrc;
+			last_w0 = w0;
+			if (!rrc && w0 != RESULT_POISON)
+				break;   /* RPU wrote the result to DDR */
+		}
+
+		if (opts.interactive) {
+			if (!g_stop) {
+				printf(">>> no reply / result yet. Press Enter to check again, Ctrl-C to quit: ");
+				fflush(stdout);
+			}
+			char line[64];
+			if (g_stop || !fgets(line, sizeof(line), stdin) || g_stop) {
+				printf("\nstopped by user after %lu check(s)\n", chk + 1);
+				goto out_dma;
+			}
+		} else {
+			fflush(stdout);
+			if (g_stop) {
+				printf("stopped by user after %lu check(s)\n", chk + 1);
+				goto out_dma;
+			}
+			if (now_ns() > deadline) {
+				fprintf(stderr, "TIMEOUT after %us / %lu checks: no rpmsg reply AND no DDR result "
+					"(last vring0.used=0x%08x result=0x%08x)\n",
+					opts.timeout_s, chk + 1, last_used_w, last_w0);
+				goto out_dma;
+			}
+			sleep_ms(POLL_INTERVAL_MS);
 		}
 	}
-	printf("response:   seq=%u type=%u (%s)\n", rsp.seq, rsp.rsp_type, rsp_str(rsp.rsp_type));
-	if (rsp.rsp_type != AMDRNPU_WIRE_RSP_COMPLETE) { ret = 1; goto out_dma; }
+	signal(SIGINT, SIG_DFL);
+	printf("completion seen after %lu check(s), t+%.3fs\n",
+	       chk + 1, (double)(now_ns() - t_send) / 1e9);
+	if (rsp.got) {
+		printf("response:   seq=%u type=%u (%s)\n", rsp.seq, rsp.rsp_type, rsp_str(rsp.rsp_type));
+		if (rsp.rsp_type != AMDRNPU_WIRE_RSP_COMPLETE) { ret = 1; goto out_dma; }
+	} else {
+		printf("response:   (no rpmsg reply; completion via DDR result poll — "
+		       "vring0 used-ring not read back over MDB5)\n");
+	}
 
 	/* ---- DMA-read the result struct back ------------------------------ */
 	if (opts.want_result) {

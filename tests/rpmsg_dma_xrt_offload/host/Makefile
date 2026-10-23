@@ -34,30 +34,36 @@ EXAMPLES ?= $(firstword $(foreach d,$(EXAMPLES_CANDIDATES),\
 
 CPPFLAGS := -I. -I$(RPMSG) -I$(LIBSRC) -I$(EXAMPLES)
 
-SRCS := xrt_offload_host.c \
-        $(RPMSG)/rpmsg_lite_dma.c \
-        $(RPMSG)/vring_lite_dma.c \
-        $(RPMSG)/rpmsg_mem_mdb5.c
+# Shared rpmsg-lite + MDB5 transport, linked into every host binary.
+TRANSPORT := $(RPMSG)/rpmsg_lite_dma.c \
+             $(RPMSG)/vring_lite_dma.c \
+             $(RPMSG)/rpmsg_mem_mdb5.c
 
 LDLIBS := -lz
 
-BIN := xrt_offload_host
+# Generic descriptor-driven host + ResNet50-specialised host (IFM packing,
+# fixed karg layout, OFM readback). Both reuse the same transport.
+BINS := xrt_offload_host resnet_offload_host
 
-all: $(BIN)
+all: $(BINS)
 
-$(BIN): $(SRCS)
 ifeq ($(RPMSG),)
-	$(error could not find rpmsg-lite sources; set RPMSG=/path/to/rpmsg-lite)
+$(error could not find rpmsg-lite sources; set RPMSG=/path/to/rpmsg-lite)
 endif
 ifeq ($(LIBSRC),)
-	$(error could not find amdrnpu_wire.h; set LIBSRC=/path/to/lib/src)
+$(error could not find amdrnpu_wire.h; set LIBSRC=/path/to/lib/src)
 endif
 ifeq ($(EXAMPLES),)
-	$(error could not find apu_ops.h; set EXAMPLES=/path/to/lib/examples)
+$(error could not find apu_ops.h; set EXAMPLES=/path/to/lib/examples)
 endif
-	$(CC) $(CFLAGS) $(CPPFLAGS) $(SRCS) $(LDLIBS) -o $@
+
+xrt_offload_host: xrt_offload_host.c $(TRANSPORT)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $^ $(LDLIBS) -o $@
+
+resnet_offload_host: resnet_offload_host.c $(TRANSPORT)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $^ $(LDLIBS) -o $@
 
 clean:
-	rm -f $(BIN)
+	rm -f $(BINS)
 
 .PHONY: all clean
