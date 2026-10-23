@@ -41,9 +41,10 @@ TRANSPORT := $(RPMSG)/rpmsg_lite_dma.c \
 
 LDLIBS := -lz
 
-# Generic descriptor-driven host + ResNet50-specialised host (IFM packing,
-# fixed karg layout, OFM readback). Both reuse the same transport.
-BINS := xrt_offload_host resnet_offload_host
+# Generic descriptor-driven host, ResNet50-specialised host (IFM packing,
+# fixed karg layout, OFM readback) and the APU_XRT_SETS_TEST (one kernel,
+# N arg sets) host. All reuse the same transport.
+BINS := xrt_offload_host resnet_offload_host sets_host
 
 all: $(BINS)
 
@@ -61,6 +62,9 @@ xrt_offload_host: xrt_offload_host.c $(TRANSPORT)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $^ $(LDLIBS) -o $@
 
 resnet_offload_host: resnet_offload_host.c $(TRANSPORT)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $^ $(LDLIBS) -o $@
+
+sets_host: sets_host.c $(TRANSPORT)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $^ $(LDLIBS) -o $@
 
 clean:
