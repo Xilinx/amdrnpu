@@ -6,7 +6,12 @@
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
+/* secure_getenv() */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -139,16 +144,19 @@ static int amdrnpu_reg_take(int dev_fd, uint32_t handle, int *out_dmabuf_fd,
 /* Internal char-driver primitives                                    */
 /* ------------------------------------------------------------------ */
 
-/* Map memory_type -> dma-buf heap name (env-overridable) and import flag. */
+/*
+ * Map memory_type -> dma-buf heap name (env-overridable) and import flag.
+ * secure_getenv() ignores the override in setuid/setgid processes.
+ */
 static const char *amdrnpu_heap_for_memtype(uint32_t memory_type)
 {
 	const char *env;
 
 	if (memory_type == AMDRNPU_MEMORY_RPU) {
-		env = getenv("AMDRNPU_HEAP_RPU");
+		env = secure_getenv("AMDRNPU_HEAP_RPU");
 		return env ? env : "reserved";
 	}
-	env = getenv("AMDRNPU_HEAP_DEVICE");
+	env = secure_getenv("AMDRNPU_HEAP_DEVICE");
 	return env ? env : "reserved";
 }
 
@@ -158,26 +166,47 @@ static uint32_t amdrnpu_flag_for_memtype(uint32_t memory_type)
 						   : AMDRNPU_BUF_IMPORT_DEVICE;
 }
 
+/*
+ * Open /dev/dma_heap/<heap>.  The name may come from the environment, so it is
+ * matched against the heaps actually present and the path is built from the
+ * directory entry, never from the caller's string: a heap can only ever be a
+ * node directly under /dev/dma_heap/.
+ */
+static int amdrnpu_heap_open(const char *heap)
+{
+	DIR *dir = opendir("/dev/dma_heap");
+	struct dirent *e;
+	char path[128];
+	int fd = -ENOENT;
+
+	if (!dir)
+		return -errno;
+	while ((e = readdir(dir)) != NULL) {
+		if (e->d_name[0] == '.' || strcmp(e->d_name, heap) != 0)
+			continue;
+		if ((size_t)snprintf(path, sizeof(path), "/dev/dma_heap/%s",
+				     e->d_name) >= sizeof(path)) {
+			fd = -ENAMETOOLONG;
+		} else {
+			fd = open(path, O_RDWR | O_CLOEXEC);
+			if (fd < 0)
+				fd = -errno;
+		}
+		break;
+	}
+	closedir(dir);
+	return fd;
+}
+
 /* Allocate a physically-contiguous dma-buf from a heap. */
 static int amdrnpu_heap_alloc(const char *heap, uint64_t size, int *out_fd)
 {
 	struct dma_heap_allocation_data data;
-	char path[128];
 	int heap_fd;
 
-	if (strchr(heap, '/')) {
-		if ((size_t)snprintf(path, sizeof(path), "%s", heap) >=
-		    sizeof(path))
-			return -ENAMETOOLONG;
-	} else {
-		if ((size_t)snprintf(path, sizeof(path), "/dev/dma_heap/%s",
-				     heap) >= sizeof(path))
-			return -ENAMETOOLONG;
-	}
-
-	heap_fd = open(path, O_RDWR | O_CLOEXEC);
+	heap_fd = amdrnpu_heap_open(heap);
 	if (heap_fd < 0)
-		return -errno;
+		return heap_fd;
 
 	memset(&data, 0, sizeof(data));
 	data.len = size;
