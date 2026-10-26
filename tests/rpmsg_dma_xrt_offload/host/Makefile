@@ -44,7 +44,7 @@ LDLIBS := -lz
 # Generic descriptor-driven host, ResNet50-specialised host (IFM packing,
 # fixed karg layout, OFM readback) and the APU_XRT_SETS_TEST (one kernel,
 # N arg sets) host. All reuse the same transport.
-BINS := xrt_offload_host resnet_offload_host sets_host
+BINS := xrt_offload_host resnet_offload_host sets_host sets_host_trace
 
 all: $(BINS)
 
@@ -65,6 +65,9 @@ resnet_offload_host: resnet_offload_host.c $(TRANSPORT)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $^ $(LDLIBS) -o $@
 
 sets_host: sets_host.c $(TRANSPORT)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $^ $(LDLIBS) -o $@
+
+sets_host_trace: sets_host_trace.c $(TRANSPORT)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $^ $(LDLIBS) -o $@
 
 clean:

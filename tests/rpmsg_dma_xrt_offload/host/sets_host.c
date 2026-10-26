@@ -25,6 +25,9 @@
  *                        the DDR result word
  *   3. sync from device: every set's output BOs
  * and the three phases are timed separately (CLOCK_MONOTONIC on the host).
+ * The first request asks RPU_APP to reset its profile totals and the last one
+ * to print its avg/min/max per-phase summary on the RPU_APP console after
+ * replying (APU_XRT_SETS_FLAG_PROF_*).
  *
  * Usage (bevformer-t20, 3 batches sharing the weights):
  *   sets_host --ini offload_config.ini --model aie_control_james.elf --sets 3 \
@@ -819,7 +822,9 @@ struct round_stat {
 	uint32_t rpu_avg_us, rpu_first_us;
 	bool     via_rsp;                              /* completion by rpmsg reply */
 	bool     have_result;
+	bool     have_prof;                            /* prof_magic matched      */
 	bool     passed;
+	struct apu_xrt_sets_test_result res;           /* raw RPU result + profile */
 };
 
 /* Host + device buffers, set up once and reused by every round. A shared
@@ -995,7 +1000,11 @@ static int run_round(const struct link *l, const struct opts *o, uint32_t round,
 	cmd->args[2] = b->elf_sz;
 	cmd->args[3] = S;
 	cmd->args[4] = K;
-	cmd->args[5] = 0;
+	/* RPU_APP profile: start fresh on the first round, print the summary on
+	 * the RPU_APP console after the last round's reply. */
+	cmd->args[APU_XRT_SETS_TEST_FLAGS_ARG_IDX] =
+		(round == 0 ? APU_XRT_SETS_FLAG_PROF_RESET : 0u) |
+		(round + 1 == o->rounds ? APU_XRT_SETS_FLAG_PROF_REPORT : 0u);
 	for (uint32_t s = 0; s < S; s++)
 		for (uint32_t i = 0; i < K; i++) {
 			uint32_t idx = APU_XRT_SETS_TEST_KARG_ARG_IDX(s, i, K);
@@ -1049,6 +1058,8 @@ static int run_round(const struct link *l, const struct opts *o, uint32_t round,
 		if (rc) { fprintf(stderr, "read result: %s\n", strerror(-rc)); return rc; }
 		if (res.passed != RESULT_POISON) {
 			st->have_result = true;
+			st->res = res;
+			st->have_prof = (res.prof_magic == APU_XRT_SETS_PROF_MAGIC);
 			st->iterations_done = res.iterations_done;
 			st->rpu_avg_us = res.latency_avg_us;
 			st->rpu_first_us = res.latency_first_us;
@@ -1076,6 +1087,96 @@ static int run_round(const struct link *l, const struct opts *o, uint32_t round,
 }
 
 static double ms(uint64_t ns) { return (double)ns / 1e6; }
+
+/* avg / min / max over rounds, in ns. */
+struct agg {
+	double   sum;
+	uint64_t min, max;
+	uint32_t n;
+};
+
+static void agg_add(struct agg *a, uint64_t v)
+{
+	if (!a->n || v < a->min) a->min = v;
+	if (!a->n || v > a->max) a->max = v;
+	a->sum += (double)v;
+	a->n++;
+}
+
+static void agg_print(const char *name, const struct agg *a, const char *note)
+{
+	if (!a->n) {
+		printf("  %-26s %12s %12s %12s %6s  %s\n", name, "-", "-", "-", "0", note);
+		return;
+	}
+	printf("  %-26s %12.3f %12.3f %12.3f %6u  %s\n", name,
+	       a->sum / a->n / 1e3, (double)a->min / 1e3, (double)a->max / 1e3, a->n, note);
+}
+
+/* RPU-reported value usable for stats: not the 0xFF placeholder. */
+static bool prof_ok(uint32_t v) { return v != RESULT_POISON; }
+
+static void print_profile(const struct opts *o, const struct round_stat *st, uint32_t n_done)
+{
+	struct agg h_to = {0}, h_exec = {0}, h_from = {0}, h_gap = {0};
+	struct agg rx = {0}, parse = {0}, hwctx = {0}, bomap = {0}, bind = {0};
+	struct agg exec = {0}, exec_max = {0}, teardown = {0}, handler = {0};
+	struct agg fill = {0}, send = {0};
+	uint32_t n_prof = 0;
+
+	for (uint32_t r = 0; r < n_done; r++) {
+		const struct round_stat *s = &st[r];
+		const struct apu_xrt_sets_test_result *p = &s->res;
+
+		agg_add(&h_to, s->elf_ns + s->shared_ns + s->sets_ns + s->init_ns);
+		agg_add(&h_exec, s->exec_ns);
+		agg_add(&h_from, s->out_ns);
+		if (!s->have_prof)
+			continue;
+		n_prof++;
+		agg_add(&rx, p->rx_to_start_ns);
+		agg_add(&parse, p->elf_parse_ns);
+		agg_add(&hwctx, p->hwctx_ns);
+		agg_add(&bomap, p->bo_map_ns);
+		agg_add(&bind, p->bind_ns);
+		agg_add(&exec, p->exec_ns);
+		agg_add(&exec_max, p->exec_max_ns);
+		agg_add(&teardown, p->teardown_ns);
+		agg_add(&handler, p->handler_ns);
+		if (prof_ok(p->result_fill_ns))
+			agg_add(&fill, p->result_fill_ns);
+		if (p->prev_send_ns && prof_ok(p->prev_send_ns))
+			agg_add(&send, p->prev_send_ns);
+		/* Host send->completion minus what the RPU accounted for: vring
+		 * poll wait (0-1 ms), host completion polling, DMA reads. */
+		uint64_t rpu = (uint64_t)p->rx_to_start_ns + p->handler_ns;
+		if (s->exec_ns > rpu)
+			agg_add(&h_gap, s->exec_ns - rpu);
+	}
+
+	printf("\nProfile over %u round(s), %u with an RPU profile (%u set(s)/request); times in us\n",
+	       n_done, n_prof, o->num_sets);
+	printf("  %-26s %12s %12s %12s %6s\n", "phase", "avg", "min", "max", "n");
+	printf("  host:\n");
+	agg_print("sync to device", &h_to, "elf + shared + sets + result init");
+	agg_print("exec (send -> done)", &h_exec, "host-observed command time");
+	agg_print("sync from device", &h_from, "every set's outputs");
+	printf("  RPU APP:\n");
+	agg_print("rx -> start processing", &rx, "RPMsg RX callback -> handler start");
+	agg_print("ELF parse", &parse, "xrt::elf + kernel lookup");
+	agg_print("hw_context + kernel", &hwctx, "via RPU_FW (Link B)");
+	agg_print("bo map + run create", &bomap, "");
+	agg_print("set_arg (bind)", &bind, "sum over sets");
+	agg_print("execution", &exec, "run start -> wait, sum over sets");
+	agg_print("execution (longest run)", &exec_max, "per command");
+	agg_print("teardown", &teardown, "run/bo/kernel/hw_context destroy");
+	agg_print("handler total", &handler, "handler start -> before result fill");
+	agg_print("result fill", &fill, "write result struct");
+	agg_print("reply send + IPI kick", &send, "rpmsg_send (previous command)");
+	agg_print("not covered by RPU", &h_gap, "host exec - (rx->start + handler)");
+	if (!n_prof && n_done)
+		printf("  (no RPU profile: RPU_APP predates the profiling result layout)\n");
+}
 
 static void print_stats(const struct opts *o, const struct round_stat *st, uint32_t n_done)
 {
@@ -1262,12 +1363,16 @@ int main(int argc, char **argv)
 		n_done++;
 		if (!stats[r].passed)
 			ret = 1;
-		if (!g_verbose)
+		if (!g_verbose && (r < 3 || (r + 1) % 100 == 0 || r + 1 == opts.rounds)) {
 			printf("round %u done: exec %.3f ms\n", r, ms(stats[r].exec_ns));
+			fflush(stdout);
+		}
 	}
 	signal(SIGINT, SIG_DFL);
 
-	print_stats(&opts, stats, n_done);
+	if (n_done <= 20 || g_verbose)
+		print_stats(&opts, stats, n_done);
+	print_profile(&opts, stats, n_done);
 	if (n_done != opts.rounds)
 		ret = 1;
 
