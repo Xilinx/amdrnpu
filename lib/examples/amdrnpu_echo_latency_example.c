@@ -96,9 +96,12 @@ static int echo_wait_busy_poll(int fd, uint32_t handle, int64_t timeout_ns,
 /*
  * Scan /dev/amdrnpu.* and open the lowest-numbered node. The driver is a
  * miscdevice, so the node name IS the identity -- there is no name/version
- * ioctl to probe.
+ * ioctl to probe. If @want is non-NULL, only the node it names
+ * ("/dev/amdrnpu.N") is opened; the path is rebuilt from the directory entry so
+ * --device can only ever reach an amdrnpu node.
  */
-static int open_amdrnpu_scan(char *out_path, size_t out_sz)
+static int open_amdrnpu_scan(const char *want, char *out_path,
+			     size_t out_sz)
 {
 	DIR *dir;
 	struct dirent *e;
@@ -106,6 +109,8 @@ static int open_amdrnpu_scan(char *out_path, size_t out_sz)
 	int best_fd = -1;
 	char best_path[PATH_MAX] = {0};
 
+	if (want && strncmp(want, "/dev/", 5) != 0)
+		return -1;
 	dir = opendir("/dev");
 	if (!dir)
 		return -1;
@@ -118,6 +123,8 @@ static int open_amdrnpu_scan(char *out_path, size_t out_sz)
 		if (strncmp(e->d_name, "amdrnpu.", 8) != 0)
 			continue;
 		if (!isdigit((unsigned char)e->d_name[8]))
+			continue;
+		if (want && strcmp(e->d_name, want + 5) != 0)
 			continue;
 		n = strtol(e->d_name + 8, NULL, 10);
 		if (n < 0 || n >= best)
@@ -144,16 +151,13 @@ static int open_amdrnpu_device(const char *path, char *opened_path, size_t sz)
 	int fd;
 
 	if (path && path[0]) {
-		fd = open(path, O_RDWR | O_CLOEXEC);
-		if (fd < 0) {
-			fprintf(stderr, "open(%s): %s\n", path, strerror(errno));
-			return -1;
-		}
-		if (opened_path && sz > 0)
-			snprintf(opened_path, sz, "%s", path);
+		fd = open_amdrnpu_scan(path, opened_path, sz);
+		if (fd < 0)
+			fprintf(stderr, "%s: not an accessible /dev/amdrnpu.N node\n",
+				path);
 		return fd;
 	}
-	fd = open_amdrnpu_scan(opened_path, sz);
+	fd = open_amdrnpu_scan(NULL, opened_path, sz);
 	if (fd < 0)
 		fprintf(stderr,
 			"no /dev/amdrnpu.* node found; pass --device\n");

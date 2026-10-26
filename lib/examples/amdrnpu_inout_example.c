@@ -60,16 +60,22 @@ static void fail(const char *what, int rc)
 /*
  * Scan /dev/amdrnpu.* and open the lowest-numbered node. The driver is a
  * miscdevice, so the node name IS the identity -- there is no name/version
- * ioctl to probe. Returns fd >= 0 on success, -1 if none.
+ * ioctl to probe. If @want is non-NULL, only the node it names
+ * ("/dev/amdrnpu.N") is opened; the path is rebuilt from the directory entry so
+ * --device can only ever reach an amdrnpu node. Returns fd >= 0 on success,
+ * -1 if none.
  */
-static int open_amdrnpu_node(char *path_out, size_t path_sz)
+static int open_amdrnpu_node(const char *want, char *path_out, size_t path_sz)
 {
-	DIR *dir = opendir("/dev");
+	DIR *dir;
 	struct dirent *e;
 	long best = LONG_MAX;
 	int best_fd = -1;
 	char best_path[PATH_MAX];
 
+	if (want && strncmp(want, "/dev/", 5) != 0)
+		return -1;
+	dir = opendir("/dev");
 	if (!dir)
 		return -1;
 
@@ -81,6 +87,8 @@ static int open_amdrnpu_node(char *path_out, size_t path_sz)
 		if (strncmp(e->d_name, "amdrnpu.", 8) != 0)
 			continue;
 		if (e->d_name[8] < '0' || e->d_name[8] > '9')
+			continue;
+		if (want && strcmp(e->d_name, want + 5) != 0)
 			continue;
 		n = strtol(e->d_name + 8, NULL, 10);
 		if (n < 0 || n >= best)
@@ -136,13 +144,14 @@ int main(int argc, char **argv)
 	}
 
 	if (dev_path[0]) {
-		fd = open(dev_path, O_RDWR | O_CLOEXEC);
+		fd = open_amdrnpu_node(dev_path, NULL, 0);
 		if (fd < 0) {
-			perror(dev_path);
+			fprintf(stderr, "%s: not an accessible /dev/amdrnpu.N node\n",
+				dev_path);
 			return 1;
 		}
 	} else {
-		fd = open_amdrnpu_node(dev_path, sizeof(dev_path));
+		fd = open_amdrnpu_node(NULL, dev_path, sizeof(dev_path));
 		if (fd < 0) {
 			fprintf(stderr, "no amdrnpu node under /dev/amdrnpu.*\n");
 			return 1;

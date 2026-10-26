@@ -257,13 +257,22 @@ static int load_file_to_rpu_bo(int fd, const char *path,
 	FILE *fp = NULL;
 	int rc;
 
-	if (stat(path, &st) < 0) {
+	/* Open first and fstat() the stream so the size matches what we read. */
+	fp = fopen(path, "rb");
+	if (!fp) {
 		rc = -errno;
-		fprintf(stderr, "stat(%s): %s\n", path, strerror(errno));
+		fprintf(stderr, "fopen(%s): %s\n", path, strerror(errno));
+		return rc;
+	}
+	if (fstat(fileno(fp), &st) < 0) {
+		rc = -errno;
+		fprintf(stderr, "fstat(%s): %s\n", path, strerror(errno));
+		fclose(fp);
 		return rc;
 	}
 	if (!S_ISREG(st.st_mode) || st.st_size == 0) {
 		fprintf(stderr, "%s: not a regular file or empty\n", path);
+		fclose(fp);
 		return -EINVAL;
 	}
 	file_sz  = (uint64_t)st.st_size;
@@ -273,21 +282,17 @@ static int load_file_to_rpu_bo(int fd, const char *path,
 	if (rc) {
 		fprintf(stderr, "buf_alloc(%s, %llu): %s\n", path,
 			(unsigned long long)alloc_sz, strerror(-rc));
+		fclose(fp);
 		return rc;
 	}
 
 	rc = amdrnpu_buf_mmap(fd, bo, alloc_sz, 0, alloc_sz, &map);
 	if (rc) {
 		fprintf(stderr, "buf_mmap(%s): %s\n", path, strerror(-rc));
+		fclose(fp);
 		goto err;
 	}
 
-	fp = fopen(path, "rb");
-	if (!fp) {
-		rc = -errno;
-		fprintf(stderr, "fopen(%s): %s\n", path, strerror(errno));
-		goto err_unmap;
-	}
 	if (fread(map, 1, file_sz, fp) != file_sz) {
 		fprintf(stderr, "fread(%s): short read\n", path);
 		rc = -EIO;
