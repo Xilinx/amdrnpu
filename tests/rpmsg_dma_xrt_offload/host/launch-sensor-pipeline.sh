@@ -4,8 +4,11 @@
 # (RPU_APP = xrt_batches.elf, freshly loaded for every run) + 3 sensors on the
 # local Strix-class NPU, ResNet50-int8, ping-pong buffers.
 #
-# Usage: ./launch-sensor-pipeline.sh [orig|feat|fusion] [extra sensor_pipeline args]
+# Usage: ./launch-sensor-pipeline.sh [orig|orig-final|feat|fusion] [extra sensor_pipeline args]
 #   orig (default)  ResNet50 classifier: OFM = 1000 int8 logits per sensor
+#   orig-final      orig + final step = the same ResNet50 on the local NPU, 6
+#                   runs on simulated IFMs submitted as one xrt::runlist (add
+#                   --final-submit runs for 6 x start/wait), golden-checked
 #   feat            ResNet50 cut after layer4 (no avgpool/FC): OFM = [2048,7,7]
 #                   int8 feature map per sensor (scale 0.125) = 49 location
 #                   tokens x 2048 for a downstream VLM/VLA
@@ -18,6 +21,7 @@
 #   e.g. ./launch-sensor-pipeline.sh --frames 1000 --post-us 5000
 #        ./launch-sensor-pipeline.sh feat --frames 1000
 #        ./launch-sensor-pipeline.sh fusion --frames 1000
+#        ./launch-sensor-pipeline.sh orig-final --lockstep --slots 1
 #        ./launch-sensor-pipeline.sh --slots 1          # no overlap, for comparison
 #        ./launch-sensor-pipeline.sh --no-rpu           # local NPU only
 #        ./launch-sensor-pipeline.sh --no-strix         # T20 RPU only
@@ -44,13 +48,24 @@ APP=${HOSTDIR}/sensor_pipeline
 
 MODEL=${MODEL:-orig}
 case "${1:-}" in
-orig|feat|fusion) MODEL=$1; shift ;;
+orig|orig-final|feat|fusion) MODEL=$1; shift ;;
 esac
 
 case "${MODEL}" in
-orig)
+orig|orig-final)
 	RPU=${HOSTDIR}/resnet50-int8-t20
 	STRIX=${HOSTDIR}/resnet50-int8-strix
+	if [ "${MODEL}" = orig-final ]; then
+		# 6 simulated IFMs = the CI image (the only one with a golden) x 6;
+		# sizes/args are the sensor_pipeline defaults = this Strix build
+		set -- \
+		  --final-dir    ${STRIX} \
+		  --final-runs   6 \
+		  --final-ifm    ${STRIX}/ifm_hw.bin \
+		  --final-golden ${STRIX}/ofm_golden.bin \
+		  --final-submit runlist \
+		  "$@"
+	fi
 	set -- \
 	  --rpu-elf    ${RPU}/aie_control-4cols.elf \
 	  --rpu-wts    ${RPU}/wts32-4cols.bin \
@@ -98,7 +113,7 @@ feat|fusion)
 	  "$@"
 	;;
 *)
-	echo "unknown MODEL '${MODEL}' (use orig, feat or fusion)" >&2
+	echo "unknown MODEL '${MODEL}' (use orig, orig-final, feat or fusion)" >&2
 	exit 1
 	;;
 esac
