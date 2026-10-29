@@ -97,6 +97,7 @@ static int amdrnpu_rpmsg_probe(struct rpmsg_device *rpdev)
 	kref_init(&rnpu->refcount);
 	mutex_init(&rnpu->rpmsg_lock);
 	amdrnpu_dev_cmd_init(rnpu);
+	amdrnpu_dev_heap_init(rnpu);
 	rnpu->rpdev = rpdev;
 
 	idx = atomic_fetch_inc(&amdrnpu_instance_counter);
@@ -109,6 +110,7 @@ static int amdrnpu_rpmsg_probe(struct rpmsg_device *rpdev)
 			"amdrnpu: misc_register(%s) failed: %d\n",
 			rnpu->dev_name, ret);
 		amdrnpu_dev_cmd_fini(rnpu);
+		amdrnpu_dev_heap_fini(rnpu);
 		mutex_destroy(&rnpu->rpmsg_lock);
 		kfree(rnpu);
 		return ret;

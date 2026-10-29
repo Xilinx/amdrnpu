@@ -10,5 +10,7 @@ obj-m += amdrnpu.o
 amdrnpu-y := \
 	amdrnpu_buf.o   \
 	amdrnpu_cmd.o   \
+	amdrnpu_configfs.o \
 	amdrnpu_drv.o   \
+	amdrnpu_heap.o  \
 	amdrnpu_rpmsg.o

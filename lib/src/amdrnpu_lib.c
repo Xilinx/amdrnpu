@@ -6,12 +6,7 @@
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
-/* secure_getenv() */
-#ifndef _GNU_SOURCE
-#define _GNU_SOURCE
-#endif
 
-#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -26,7 +21,6 @@
 #include <unistd.h>
 
 #include <linux/dma-buf.h>
-#include <linux/dma-heap.h>
 #include <linux/sync_file.h>
 
 #include <amdrnpu/amdrnpu_lib.h>
@@ -145,97 +139,23 @@ static int amdrnpu_reg_take(int dev_fd, uint32_t handle, int *out_dmabuf_fd,
 /* ------------------------------------------------------------------ */
 
 /*
- * Map memory_type -> dma-buf heap name (env-overridable) and import flag.
- * secure_getenv() ignores the override in setuid/setgid processes.
+ * Kernel-side allocation (AMDRNPU_BUF_ALLOC): the driver picks the heap for
+ * @memory_type and returns both the handle and an exported dma-buf fd.
  */
-static const char *amdrnpu_heap_for_memtype(uint32_t memory_type)
+static int amdrnpu_kernel_alloc(int fd, uint32_t memory_type, uint64_t size,
+				uint32_t *out_handle, int *out_dmabuf_fd)
 {
-	const char *env;
-
-	if (memory_type == AMDRNPU_MEMORY_RPU) {
-		env = secure_getenv("AMDRNPU_HEAP_RPU");
-		return env ? env : "reserved";
-	}
-	env = secure_getenv("AMDRNPU_HEAP_DEVICE");
-	return env ? env : "reserved";
-}
-
-static uint32_t amdrnpu_flag_for_memtype(uint32_t memory_type)
-{
-	return (memory_type == AMDRNPU_MEMORY_RPU) ? AMDRNPU_BUF_IMPORT_FW
-						   : AMDRNPU_BUF_IMPORT_DEVICE;
-}
-
-/*
- * Open /dev/dma_heap/<heap>.  The name may come from the environment, so it is
- * matched against the heaps actually present and the path is built from the
- * directory entry, never from the caller's string: a heap can only ever be a
- * node directly under /dev/dma_heap/.
- */
-static int amdrnpu_heap_open(const char *heap)
-{
-	DIR *dir = opendir("/dev/dma_heap");
-	struct dirent *e;
-	char path[128];
-	int fd = -ENOENT;
-
-	if (!dir)
-		return -errno;
-	while ((e = readdir(dir)) != NULL) {
-		if (e->d_name[0] == '.' || strcmp(e->d_name, heap) != 0)
-			continue;
-		if ((size_t)snprintf(path, sizeof(path), "/dev/dma_heap/%s",
-				     e->d_name) >= sizeof(path)) {
-			fd = -ENAMETOOLONG;
-		} else {
-			fd = open(path, O_RDWR | O_CLOEXEC);
-			if (fd < 0)
-				fd = -errno;
-		}
-		break;
-	}
-	closedir(dir);
-	return fd;
-}
-
-/* Allocate a physically-contiguous dma-buf from a heap. */
-static int amdrnpu_heap_alloc(const char *heap, uint64_t size, int *out_fd)
-{
-	struct dma_heap_allocation_data data;
-	int heap_fd;
-
-	heap_fd = amdrnpu_heap_open(heap);
-	if (heap_fd < 0)
-		return heap_fd;
-
-	memset(&data, 0, sizeof(data));
-	data.len = size;
-	data.fd_flags = O_RDWR | O_CLOEXEC;
-	if (ioctl(heap_fd, DMA_HEAP_IOCTL_ALLOC, &data)) {
-		int e = -errno;
-
-		close(heap_fd);
-		return e;
-	}
-	close(heap_fd);
-
-	*out_fd = (int)data.fd;
-	return 0;
-}
-
-static int amdrnpu_import(int fd, int dmabuf_fd, uint32_t flags,
-			  uint32_t *out_handle)
-{
-	struct amdrnpu_buf_import arg;
+	struct amdrnpu_buf_alloc arg;
 
 	memset(&arg, 0, sizeof(arg));
-	arg.fd = dmabuf_fd;
-	arg.flags = flags;
+	arg.size = size;
+	arg.memory_type = memory_type;
 
-	if (ioctl(fd, AMDRNPU_BUF_IMPORT, &arg))
+	if (ioctl(fd, AMDRNPU_BUF_ALLOC, &arg))
 		return -errno;
 
 	*out_handle = arg.handle;
+	*out_dmabuf_fd = arg.fd;
 	return 0;
 }
 
@@ -297,8 +217,6 @@ int amdrnpu_buf_alloc(int fd, uint32_t memory_type, uint64_t size,
 {
 	int dmabuf_fd = -1;
 	uint32_t handle = 0;
-	const char *heap;
-	uint32_t flags;
 	int ret;
 
 	AMDRNPU_TRACE2(buf_alloc_enter, memory_type, (int)size);
@@ -308,18 +226,9 @@ int amdrnpu_buf_alloc(int fd, uint32_t memory_type, uint64_t size,
 	    memory_type != AMDRNPU_MEMORY_DEVICE)
 		AMDRNPU_TRACE_RET(buf_alloc_exit, -EINVAL);
 
-	heap = amdrnpu_heap_for_memtype(memory_type);
-	flags = amdrnpu_flag_for_memtype(memory_type);
-
-	ret = amdrnpu_heap_alloc(heap, size, &dmabuf_fd);
+	ret = amdrnpu_kernel_alloc(fd, memory_type, size, &handle, &dmabuf_fd);
 	if (ret)
 		AMDRNPU_TRACE_RET(buf_alloc_exit, ret);
-
-	ret = amdrnpu_import(fd, dmabuf_fd, flags, &handle);
-	if (ret) {
-		close(dmabuf_fd);
-		AMDRNPU_TRACE_RET(buf_alloc_exit, ret);
-	}
 
 	ret = amdrnpu_reg_add(fd, handle, dmabuf_fd, size);
 	if (ret) {

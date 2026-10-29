@@ -17,7 +17,7 @@
  *
  * Commands:
  *   device                                    # print which node was opened
- *   buf_alloc <rpu|device> <size>             # alloc+import a buffer then close
+ *   buf_alloc <rpu|device> <size>             # alloc a buffer then close
  *   cmd_submit <op_hex> [scalar:<u64> |
  *              buf:<handle>:<offset>]...      # one-shot AMDRNPU_CMD_SUBMIT
  *   syncobj_wait <handle> [timeout_ns=2e9]    # wait + report fence status
@@ -384,11 +384,12 @@ static int do_fw_echo(int fd, int argc, char **argv)
 	printf("[3/8] mmap rsp_bo + canary (0x0a)\n");
 
 	/*
-	 * The buffers come from a cacheable dma-buf heap, so the APU
-	 * CPU-side mapping is cacheable.  Any range the device will read
-	 * must be flushed from CPU caches first (DMA_BUF_IOCTL_SYNC via
-	 * amdrnpu_buf_sync_to_device), otherwise the RPU could observe
-	 * stale (un-flushed) bytes when it inspects the buffer.
+	 * Buffers from amdrnpu_buf_alloc() are coherent, so this sync is a
+	 * no-op for them, but a buffer imported from a cacheable exporter
+	 * needs it: any range the device will read must be flushed from CPU
+	 * caches first (DMA_BUF_IOCTL_SYNC via amdrnpu_buf_sync_to_device),
+	 * otherwise the RPU could observe stale (un-flushed) bytes when it
+	 * inspects the buffer.  Syncing keeps this a valid template for both.
 	 *
 	 * rsp_bo: flush the 0x0a canary so the RPU sees it before it
 	 *         overwrites the buffer with the ASCII reply.
@@ -555,7 +556,7 @@ static void usage(const char *prog)
 		"\n"
 		"Commands:\n"
 		"  device                                       print which node was opened\n"
-		"  buf_alloc <rpu|device> <size>                alloc+import a buffer then close\n"
+		"  buf_alloc <rpu|device> <size>                alloc a buffer then close\n"
 		"  cmd_submit <op_hex> [scalar:U64 | buf:H:O]   one-shot AMDRNPU_CMD_SUBMIT\n"
 		"  syncobj_wait <handle> [timeout_ns=2e9]       wait on completion + fence status\n"
 		"  fw_echo <v1_hex> <v2_hex>                    full RPU-firmware echo flow\n"

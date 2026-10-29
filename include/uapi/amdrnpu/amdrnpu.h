@@ -27,9 +27,9 @@
  * struct amdrnpu_arg — one submission argument (scalar or buffer slice).
  *
  * Scalar: @size == 0, @value is a QWORD on the wire.
- * Buffer: @size != 0, @bo references a buffer previously imported with
+ * Buffer: @size != 0, @bo references a buffer from AMDRNPU_BUF_ALLOC or
  *	   AMDRNPU_BUF_IMPORT; the driver emits (dma_addr + @bo.offset) as the
- *	   wire word.  @bo.buffer_handle is the handle returned by the import,
+ *	   wire word.  @bo.buffer_handle is the handle returned by that ioctl,
  *	   and [@bo.offset, @bo.offset + @size) must lie within the buffer.
  */
 struct amdrnpu_arg {
@@ -53,7 +53,7 @@ struct amdrnpu_arg {
  * trailing amdrnpu_arg array.  Driver-owned wire seq is not UAPI.
  *
  * Scalar args (@size == 0, @value) and buffer args (@size != 0, @bo, from
- * AMDRNPU_BUF_IMPORT) are both accepted.
+ * AMDRNPU_BUF_ALLOC or AMDRNPU_BUF_IMPORT) are both accepted.
  *
  * Example (OP_CODE_ECHO, two scalar args):
  *
@@ -105,10 +105,11 @@ struct amdrnpu_cmd_submit {
  * struct amdrnpu_buf_import - import an external dma-buf for use as a
  * command buffer argument.
  *
- * @fd:		dma-buf file descriptor to import.  Typically allocated by
- *		userspace from a dma-buf heap (e.g. /dev/dma_heap/reserved);
- *		the buffer must be physically contiguous and, to be reachable
- *		by the RPU, allocated from the RPU-visible pool.
+ * @fd:		dma-buf file descriptor to import, from any exporter (e.g. a
+ *		dma-buf heap or another driver); the buffer must be physically
+ *		contiguous and, to be reachable by the RPU, allocated from the
+ *		RPU-visible pool.  For memory the driver should allocate itself,
+ *		use AMDRNPU_BUF_ALLOC instead.
  * @flags:	target DMA domain, one of AMDRNPU_BUF_IMPORT_DEVICE (0) or
  *		AMDRNPU_BUF_IMPORT_FW; other bits reserved, must be 0.
  * @handle:	out; opaque buffer handle for struct amdrnpu_arg.bo.buffer_handle.
@@ -130,12 +131,13 @@ struct amdrnpu_buf_import {
 	_IOWR(AMDRNPU_IOC_MAGIC, 0x10, struct amdrnpu_buf_import)
 
 /**
- * struct amdrnpu_buf_destroy - release a buffer handle from AMDRNPU_BUF_IMPORT.
+ * struct amdrnpu_buf_destroy - release a buffer handle from AMDRNPU_BUF_ALLOC
+ * or AMDRNPU_BUF_IMPORT.
  *
  * @handle:	buffer handle to release.
  * @pad:	reserved, must be 0.
  *
- * Drops the driver's reference to the imported dma-buf for @handle and removes
+ * Drops the driver's reference to the dma-buf for @handle and removes
  * it from the file's handle table.  If the buffer is still referenced by an
  * in-flight command, the underlying dma-buf attachment is not torn down until
  * that command completes.  After this call @handle is invalid and must not be
@@ -150,9 +152,9 @@ struct amdrnpu_buf_destroy {
 	_IOW(AMDRNPU_IOC_MAGIC, 0x11, struct amdrnpu_buf_destroy)
 
 /**
- * struct amdrnpu_buf_query - return the DMA address recorded at import.
+ * struct amdrnpu_buf_query - return the DMA address of a buffer handle.
  *
- * @handle:	buffer handle from AMDRNPU_BUF_IMPORT / amdrnpu_buf_alloc().
+ * @handle:	buffer handle from AMDRNPU_BUF_ALLOC or AMDRNPU_BUF_IMPORT.
  * @pad:	reserved, must be 0.
  * @dma_addr:	out; device/firmware-domain physical address of the buffer.
  * @size:	out; contiguous mapped length in bytes.
@@ -172,13 +174,13 @@ struct amdrnpu_buf_query {
 	_IOWR(AMDRNPU_IOC_MAGIC, 0x12, struct amdrnpu_buf_query)
 
 /**
- * enum amdrnpu_memory_type - target memory domain for amdrnpu_buf_alloc().
+ * enum amdrnpu_memory_type - target memory domain for AMDRNPU_BUF_ALLOC.
  *
- * AMDRNPU_MEMORY_RPU:	  RPU/firmware-reachable memory.  The library allocates
- *			  from the RPU dma-buf heap and imports the buffer in
- *			  the firmware (remoteproc) DMA domain.
+ * AMDRNPU_MEMORY_RPU:	  RPU/firmware-reachable memory.  Allocated from the
+ *			  rpu_region reserved-memory node, in the firmware
+ *			  (remoteproc) DMA domain.
  * AMDRNPU_MEMORY_DEVICE:  accelerator/device memory (default).  Allocated from
- *			  the device dma-buf heap and imported in the device
+ *			  the device_region reserved-memory node, in the device
  *			  DMA domain.
  */
 enum amdrnpu_memory_type {
@@ -187,6 +189,38 @@ enum amdrnpu_memory_type {
 };
 
 #define AMDRNPU_MEMORY_DEFAULT	AMDRNPU_MEMORY_DEVICE
+
+/**
+ * struct amdrnpu_buf_alloc - allocate a driver-owned buffer.
+ *
+ * @size:	allocation size in bytes; rounded up to a whole page.
+ * @memory_type: an enum amdrnpu_memory_type.  The driver allocates a physically
+ *		contiguous buffer from the reserved-memory node configured for
+ *		that type (/sys/kernel/config/amdrnpu/rpu_region and
+ *		device_region; "rpu_gem_cma" and "buffer" by default), in the
+ *		matching DMA domain (as AMDRNPU_BUF_IMPORT_FW /
+ *		AMDRNPU_BUF_IMPORT_DEVICE would).  Fails with -ENODEV if the
+ *		region is not present.
+ * @flags:	reserved, must be 0.
+ * @handle:	out; must be 0 on entry.  Buffer handle, same namespace and
+ *		semantics as one returned by AMDRNPU_BUF_IMPORT.
+ * @fd:		out; must be 0 on entry.  dma-buf fd exported by the driver for
+ *		CPU access (mmap(2), DMA_BUF_IOCTL_SYNC) and sharing.
+ *
+ * The memory is freed once both @handle has been released (AMDRNPU_BUF_DESTROY
+ * or closing the device fd) and every reference to the dma-buf (@fd, mappings,
+ * other importers) is gone.
+ */
+struct amdrnpu_buf_alloc {
+	__u64 size;
+	__u32 memory_type;
+	__u32 flags;
+	__u32 handle;
+	__s32 fd;
+};
+
+#define AMDRNPU_BUF_ALLOC \
+	_IOWR(AMDRNPU_IOC_MAGIC, 0x13, struct amdrnpu_buf_alloc)
 
 /**
  * enum amdrnpu_buf_sync_dir - direction for amdrnpu_buf_sync().

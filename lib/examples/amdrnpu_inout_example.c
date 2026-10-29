@@ -17,8 +17,9 @@
  *   - RPU firmware registers RPMsg channel "amdrnpu" (amdrnpu_ept.c).
  *   - OpenAMP rsctbl/vrings match DT: 0x9800000 / 0x9860000 / 0x9864000 / 0x9868000.
  *   - amdrnpu driver loaded and bound to the "amdrnpu" RPMsg channel; the
- *     RPU buffers must come from an RPU-reachable, contiguous dma-buf heap
- *     (e.g. rpu_gem_cma@20000000 on the Versal-net layout).
+ *     RPU buffers come from the driver's RPU region, which must be
+ *     RPU-reachable (rpu_gem_cma@20000000 by default on the Versal-net
+ *     layout; see /sys/kernel/config/amdrnpu/rpu_region).
  *   - Open /dev/amdrnpu.N (the driver is a miscdevice; CPU mapping is done
  *     on the buffer's dma-buf via amdrnpu_buf_mmap()).
  *

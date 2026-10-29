@@ -21,6 +21,7 @@ static void amdrnpu_dev_release(struct kref *ref)
 	struct amdrnpu_dev *rnpu = container_of(ref, struct amdrnpu_dev, refcount);
 
 	amdrnpu_dev_cmd_fini(rnpu);
+	amdrnpu_dev_heap_fini(rnpu);
 	if (rnpu->rproc_dev)
 		put_device(rnpu->rproc_dev);
 	mutex_destroy(&rnpu->rpmsg_lock);
@@ -111,18 +112,27 @@ void amdrnpu_chardev_deregister(struct amdrnpu_dev *rnpu)
 
 static int __init amdrnpu_module_init(void)
 {
-	int ret = amdrnpu_rpmsg_register();
+	int ret = amdrnpu_configfs_register();
 
-	if (ret)
+	if (ret) {
+		pr_err("amdrnpu: configfs registration failed: %d\n", ret);
+		return ret;
+	}
+
+	ret = amdrnpu_rpmsg_register();
+	if (ret) {
 		pr_err("amdrnpu: register_rpmsg_driver failed: %d\n", ret);
-	else
-		pr_info("amdrnpu: registered (waiting for rpmsg channels)\n");
-	return ret;
+		amdrnpu_configfs_unregister();
+		return ret;
+	}
+	pr_info("amdrnpu: registered (waiting for rpmsg channels)\n");
+	return 0;
 }
 
 static void __exit amdrnpu_module_exit(void)
 {
 	amdrnpu_rpmsg_unregister();
+	amdrnpu_configfs_unregister();
 	pr_info("amdrnpu: unregistered\n");
 }
 

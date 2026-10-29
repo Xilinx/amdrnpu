@@ -16,8 +16,8 @@
  * for source compatibility and documented as reserved; the library maps each
  * call onto the char-driver ABI internally.
  *
- * Buffer lifecycle: **`amdrnpu_buf_alloc()`** allocates and imports a buffer in
- * one step and returns an opaque handle; free it with **`amdrnpu_buf_close()`**.
+ * Buffer lifecycle: **`amdrnpu_buf_alloc()`** allocates a driver-owned buffer
+ * and returns an opaque handle; free it with **`amdrnpu_buf_close()`**.
  * CPU-map a handle with **`amdrnpu_buf_mmap()`** and bracket device DMA with
  * **`amdrnpu_buf_sync()`** (or the direction helpers).
  *
@@ -47,14 +47,14 @@ extern "C" {
 #endif
 
 /**
- * amdrnpu_buf_alloc - allocate and import a buffer; returns an opaque handle.
+ * amdrnpu_buf_alloc - allocate a driver-owned buffer; returns an opaque handle.
  *
  * @fd:		open /dev/amdrnpu.N descriptor.
  * @memory_type: target memory domain, an enum amdrnpu_memory_type
  *		(AMDRNPU_MEMORY_DEVICE / AMDRNPU_MEMORY_DEFAULT for device
- *		memory, AMDRNPU_MEMORY_RPU for RPU/firmware memory).  The library
- *		allocates from the matching dma-buf heap and imports the buffer
- *		in the corresponding DMA domain.
+ *		memory, AMDRNPU_MEMORY_RPU for RPU/firmware memory).  The driver
+ *		allocates from the reserved-memory region configured for that
+ *		type (AMDRNPU_BUF_ALLOC); requires a driver with that ioctl.
  * @size:	allocation size in bytes.
  * @out_handle:	on success, the opaque handle for use in
  *		struct amdrnpu_arg.bo.buffer_handle and the other buf_* helpers.

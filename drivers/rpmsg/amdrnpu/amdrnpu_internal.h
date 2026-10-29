@@ -25,6 +25,8 @@
 
 struct dma_buf;
 struct dma_buf_attachment;
+struct platform_device;
+struct reserved_mem;
 struct sg_table;
 
 #define AMDRNPU_DRV_NAME	AMDRNPU_DRIVER_NAME
@@ -38,6 +40,29 @@ struct sg_table;
 
 /* cmd not indexed in cmd_xa (wire seq 0 and UINT_MAX are both valid ids). */
 #define AMDRNPU_CMD_SEQ_NONE	((u32)~0U)
+
+/* enum amdrnpu_memory_type values: AMDRNPU_MEMORY_RPU, AMDRNPU_MEMORY_DEVICE. */
+#define AMDRNPU_NUM_MEMORY_TYPES	2
+
+/* Max length (with NUL) of a configured reserved-memory node name. */
+#define AMDRNPU_REGION_NAME_LEN		64
+
+/*
+ * The memory pool that AMDRNPU_BUF_ALLOC buffers of one memory type are carved
+ * from: the configured reserved-memory region for that type (see
+ * amdrnpu_heap.c).
+ * Registered on first use (@pdev non-NULL from then on) and kept until the
+ * device is released.
+ *
+ * @pdev is a driver-private device that carries the pool: @rmem is bound to it
+ * as its CMA area (reusable pool) or coherent pool (no-map pool), and its DMA
+ * configuration is that of the domain for the memory type, so the returned dma
+ * address is the one the RPU / accelerator dereferences.
+ */
+struct amdrnpu_heap {
+	struct platform_device	*pdev;
+	struct reserved_mem	*rmem;
+};
 
 /*
  * Per-channel device state.  One of these is allocated for each bound rpmsg
@@ -64,6 +89,9 @@ struct amdrnpu_dev {
 	atomic_t		fence_seqno;
 	u64			fence_context;
 
+	struct mutex		heap_lock;	/* heaps */
+	struct amdrnpu_heap	heaps[AMDRNPU_NUM_MEMORY_TYPES];
+
 	char			dev_name[32];
 };
 
@@ -76,16 +104,17 @@ struct amdrnpu_dev {
 	container_of(misc_dev, struct amdrnpu_dev, mdev)
 
 /*
- * An imported dma-buf usable as a command buffer argument.  Allocation lives in
- * userspace (a dma-buf heap); the driver only imports the fd, maps it against
- * the misc device's direct-mapped DMA context, and records the physical/dma
- * address.  Kref-counted: the per-client handle table owns one reference, and
- * each in-flight command that references the buffer holds another (see
- * cmd.bo_refs).
+ * A dma-buf usable as a command buffer argument.  Either imported
+ * (AMDRNPU_BUF_IMPORT: allocated by userspace from a dma-buf heap, attached and
+ * mapped here to record its dma address) or allocated and exported by this
+ * driver (AMDRNPU_BUF_ALLOC: @attach and @sgt are NULL, the dma address is the
+ * allocation's own).  Kref-counted: the per-client handle table owns one
+ * reference, and each in-flight command that references the buffer holds
+ * another (see cmd.bo_refs).
  */
 struct amdrnpu_buf {
 	struct dma_buf			*dmabuf;
-	struct dma_buf_attachment	*attach;
+	struct dma_buf_attachment	*attach;	/* NULL if driver-allocated */
 	struct sg_table			*sgt;
 	dma_addr_t			dma_addr;	/* base of the contiguous run */
 	size_t				size;
@@ -136,9 +165,21 @@ void amdrnpu_chardev_deregister(struct amdrnpu_dev *rnpu);
 int  amdrnpu_ioctl_buf_import(struct amdrnpu_client *client, void __user *uarg);
 int  amdrnpu_ioctl_buf_destroy(struct amdrnpu_client *client, void __user *uarg);
 int  amdrnpu_ioctl_buf_query(struct amdrnpu_client *client, void __user *uarg);
+int  amdrnpu_ioctl_buf_alloc(struct amdrnpu_client *client, void __user *uarg);
 struct amdrnpu_buf *amdrnpu_buf_get(struct amdrnpu_client *client, u32 handle);
 void amdrnpu_buf_put(struct amdrnpu_buf *buf);
 void amdrnpu_client_buf_release(struct amdrnpu_client *client);
+
+/* amdrnpu_configfs.c */
+int  amdrnpu_configfs_register(void);
+void amdrnpu_configfs_unregister(void);
+void amdrnpu_region_get(u32 memory_type, char *name);
+void amdrnpu_region_put(u32 memory_type);
+
+/* amdrnpu_heap.c */
+void amdrnpu_dev_heap_init(struct amdrnpu_dev *rnpu);
+void amdrnpu_dev_heap_fini(struct amdrnpu_dev *rnpu);
+struct amdrnpu_heap *amdrnpu_heap_get(struct amdrnpu_dev *rnpu, u32 memory_type);
 
 /* amdrnpu_cmd.c */
 long amdrnpu_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);

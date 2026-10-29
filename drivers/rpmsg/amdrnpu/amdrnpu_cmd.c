@@ -451,6 +451,8 @@ long amdrnpu_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		return amdrnpu_ioctl_buf_destroy(client, uarg);
 	case AMDRNPU_BUF_QUERY:
 		return amdrnpu_ioctl_buf_query(client, uarg);
+	case AMDRNPU_BUF_ALLOC:
+		return amdrnpu_ioctl_buf_alloc(client, uarg);
 	default:
 		return -ENOTTY;
 	}
