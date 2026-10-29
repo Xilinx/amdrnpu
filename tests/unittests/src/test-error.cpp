@@ -113,10 +113,10 @@ TEST_F(AmdrnpuError, SyncobjDestroyTwiceFails)
 TEST(AmdrnpuErrorNegative, OpenNonexistentDevicePath)
 {
 	// /dev/amdrnpu.99 doesn't exist on any amdrnpu host.
-	int fd = ::open("/dev/amdrnpu.99", O_RDWR | O_CLOEXEC);
-	EXPECT_LT(fd, 0);
-	if (fd >= 0)
-		::close(fd);
+	int device_fd = ::open("/dev/amdrnpu.99", O_RDWR | O_CLOEXEC);
+	EXPECT_LT(device_fd, 0);
+	if (device_fd >= 0)
+		::close(device_fd);
 }
 
 // ---- multi-threaded variant ----------------------------------------

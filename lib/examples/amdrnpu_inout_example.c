@@ -82,7 +82,7 @@ static int open_amdrnpu_node(const char *want, char *path_out, size_t path_sz)
 
 	while ((e = readdir(dir)) != NULL) {
 		long n;
-		int fd;
+		int device_fd;
 		char p[PATH_MAX];
 
 		if (strncmp(e->d_name, "amdrnpu.", 8) != 0)
@@ -95,13 +95,13 @@ static int open_amdrnpu_node(const char *want, char *path_out, size_t path_sz)
 		if (n < 0 || n >= best)
 			continue;
 		snprintf(p, sizeof(p), "/dev/%s", e->d_name);
-		fd = open(p, O_RDWR | O_CLOEXEC);
-		if (fd < 0)
+		device_fd = open(p, O_RDWR | O_CLOEXEC);
+		if (device_fd < 0)
 			continue;
 		if (best_fd >= 0)
 			close(best_fd);
 		best = n;
-		best_fd = fd;
+		best_fd = device_fd;
 		snprintf(best_path, sizeof(best_path), "%s", p);
 	}
 	closedir(dir);
@@ -132,7 +132,7 @@ static int parse_device_arg(int argc, char **argv, char *path, size_t path_sz)
 int main(int argc, char **argv)
 {
 	char dev_path[PATH_MAX] = {0};
-	int fd = -1;
+	int device_fd = -1;
 	uint32_t in_hd = 0, out_hd = 0;
 	void *in_map = NULL, *out_map = NULL;
 	struct amdrnpu_arg args[6];
@@ -145,15 +145,15 @@ int main(int argc, char **argv)
 	}
 
 	if (dev_path[0]) {
-		fd = open_amdrnpu_node(dev_path, NULL, 0);
-		if (fd < 0) {
+		device_fd = open_amdrnpu_node(dev_path, NULL, 0);
+		if (device_fd < 0) {
 			fprintf(stderr, "%s: not an accessible /dev/amdrnpu.N node\n",
 				dev_path);
 			return 1;
 		}
 	} else {
-		fd = open_amdrnpu_node(NULL, dev_path, sizeof(dev_path));
-		if (fd < 0) {
+		device_fd = open_amdrnpu_node(NULL, dev_path, sizeof(dev_path));
+		if (device_fd < 0) {
 			fprintf(stderr, "no amdrnpu node under /dev/amdrnpu.*\n");
 			return 1;
 		}
@@ -162,24 +162,24 @@ int main(int argc, char **argv)
 	printf("device: %s\n", dev_path[0] ? dev_path : "(auto)");
 	printf("buffer size: %u bytes per RPU BO\n", TEST_BUF_SIZE);
 
-	rc = amdrnpu_buf_alloc(fd, AMDRNPU_MEMORY_RPU, TEST_BUF_SIZE, &in_hd);
+	rc = amdrnpu_buf_alloc(device_fd, AMDRNPU_MEMORY_RPU, TEST_BUF_SIZE, &in_hd);
 	if (rc) {
 		fail("buf_alloc(in RPU)", rc);
 		goto out;
 	}
-	rc = amdrnpu_buf_alloc(fd, AMDRNPU_MEMORY_RPU, TEST_BUF_SIZE, &out_hd);
+	rc = amdrnpu_buf_alloc(device_fd, AMDRNPU_MEMORY_RPU, TEST_BUF_SIZE, &out_hd);
 	if (rc) {
 		fail("buf_alloc(out RPU)", rc);
 		goto out;
 	}
 	printf("RPU BO handles: in=%u out=%u\n", in_hd, out_hd);
 
-	rc = amdrnpu_buf_mmap(fd, in_hd, TEST_BUF_SIZE, 0, 0, &in_map);
+	rc = amdrnpu_buf_mmap(device_fd, in_hd, TEST_BUF_SIZE, 0, 0, &in_map);
 	if (rc) {
 		fail("buf_mmap(in)", rc);
 		goto out;
 	}
-	rc = amdrnpu_buf_mmap(fd, out_hd, TEST_BUF_SIZE, 0, 0, &out_map);
+	rc = amdrnpu_buf_mmap(device_fd, out_hd, TEST_BUF_SIZE, 0, 0, &out_map);
 	if (rc) {
 		fail("buf_mmap(out)", rc);
 		goto out;
@@ -189,12 +189,12 @@ int main(int argc, char **argv)
 		((uint8_t *)in_map)[i] = (uint8_t)(0xa5 ^ (i & 0xff));
 	memset(out_map, 0x5a, TEST_BUF_SIZE);
 
-	rc = amdrnpu_buf_sync_to_device(fd, in_hd, 0, TEST_BUF_SIZE);
+	rc = amdrnpu_buf_sync_to_device(device_fd, in_hd, 0, TEST_BUF_SIZE);
 	if (rc) {
 		fail("buf_sync_to_device(in)", rc);
 		goto out;
 	}
-	rc = amdrnpu_buf_sync_to_device(fd, out_hd, 0, TEST_BUF_SIZE);
+	rc = amdrnpu_buf_sync_to_device(device_fd, out_hd, 0, TEST_BUF_SIZE);
 	if (rc) {
 		fail("buf_sync_to_device(out)", rc);
 		goto out;
@@ -218,7 +218,7 @@ int main(int argc, char **argv)
 	args[5].bo.offset = 0;
 
 	memset(&hdr, 0, sizeof(hdr));
-	rc = amdrnpu_cmd_submit(fd, AMDRNPU_OP_COPY_IN_OUT, args, 6,
+	rc = amdrnpu_cmd_submit(device_fd, AMDRNPU_OP_COPY_IN_OUT, args, 6,
 				     &hdr, sizeof(hdr));
 	if (rc) {
 		fail("cmd_submit", rc);
@@ -226,7 +226,7 @@ int main(int argc, char **argv)
 	}
 	printf("submitted COPY op, syncobj=%d\n", hdr.sync_handle);
 
-	rc = amdrnpu_syncobj_wait_complete(fd,
+	rc = amdrnpu_syncobj_wait_complete(device_fd,
 						(uint32_t)hdr.sync_handle,
 						DEFAULT_WAIT_NS, &fence_st);
 	if (rc) {
@@ -241,7 +241,7 @@ int main(int argc, char **argv)
 	}
 	printf("command completed (fence_st=%" PRId32 ")\n", fence_st);
 
-	rc = amdrnpu_buf_sync_from_device(fd, out_hd, 0, TEST_BUF_SIZE);
+	rc = amdrnpu_buf_sync_from_device(device_fd, out_hd, 0, TEST_BUF_SIZE);
 	if (rc) {
 		fail("buf_sync_from_device(out)", rc);
 		goto out;
@@ -260,11 +260,11 @@ out:
 	if (out_map)
 		amdrnpu_buf_munmap(out_map, TEST_BUF_SIZE);
 	if (in_hd)
-		amdrnpu_buf_close(fd, in_hd);
+		amdrnpu_buf_close(device_fd, in_hd);
 	if (out_hd)
-		amdrnpu_buf_close(fd, out_hd);
-	if (fd >= 0)
-		close(fd);
+		amdrnpu_buf_close(device_fd, out_hd);
+	if (device_fd >= 0)
+		close(device_fd);
 
 	return g_fail ? 1 : 0;
 }

@@ -164,7 +164,7 @@ uint64_t now_ns();
 // amdrnpu_cmd_submit(). @args may be null when @num_args == 0. Returns
 // 0 on success and writes the completion sync_file fd into @out_handle
 // (the rest of the suite treats it as an opaque "syncobj" handle).
-int do_cmd_submit(int fd, uint32_t command_op,
+int do_cmd_submit(int device_fd, uint32_t command_op,
 		  const struct amdrnpu_arg *args, uint32_t num_args,
 		  uint32_t *out_handle);
 
@@ -172,20 +172,20 @@ int do_cmd_submit(int fd, uint32_t command_op,
 // fence is signalled (including signalled-with-error -- callers inspect
 // status separately), -ETIMEDOUT on deadline, negative errno on error.
 // Does NOT close the handle (caller manages lifecycle).
-int do_syncobj_wait(int fd, uint32_t handle, uint64_t timeout_ns);
+int do_syncobj_wait(int device_fd, uint32_t handle, uint64_t timeout_ns);
 
 // Release a completion handle (close the sync_file fd).
-int do_syncobj_destroy(int fd, uint32_t handle);
+int do_syncobj_destroy(int device_fd, uint32_t handle);
 
 // amdrnpu_buf_alloc(). Writes the driver's per-file import handle.
-int do_buf_alloc(int fd, uint32_t mtype, uint64_t size, uint32_t *out_handle);
+int do_buf_alloc(int device_fd, uint32_t mtype, uint64_t size, uint32_t *out_handle);
 
 // amdrnpu_buf_close() -- drops the import handle for @handle.
-int do_gem_close(int fd, uint32_t handle);
+int do_gem_close(int device_fd, uint32_t handle);
 
 // amdrnpu_buf_mmap() -- maps the whole BO for @handle R/W SHARED and
 // writes the mapping into @out_map. Pair with do_buf_munmap().
-int do_buf_mmap(int fd, uint32_t handle, uint64_t size, void **out_map);
+int do_buf_mmap(int device_fd, uint32_t handle, uint64_t size, void **out_map);
 
 // amdrnpu_buf_munmap() -- undo do_buf_mmap().
 void do_buf_munmap(void *addr, uint64_t length);
@@ -193,24 +193,24 @@ void do_buf_munmap(void *addr, uint64_t length);
 // amdrnpu_buf_sync(). @offset/@length are reserved (the underlying
 // DMA_BUF_IOCTL_SYNC is whole-buffer) and kept only so call sites read
 // intent-first.
-int do_buf_sync(int fd, uint32_t handle, uint32_t direction,
+int do_buf_sync(int device_fd, uint32_t handle, uint32_t direction,
 		uint64_t offset, uint64_t length);
 
 // amdrnpu_syncobj_to_fence_fd() -- dups the completion fd. Caller owns
 // @out_sf_fd.
-int do_syncobj_to_fence_fd(int fd, uint32_t handle, int *out_sf_fd);
+int do_syncobj_to_fence_fd(int device_fd, uint32_t handle, int *out_sf_fd);
 
 // Non-blocking fence status via amdrnpu_syncobj_fence_status():
 //   >0 signaled-ok (typically 1)
 //   =0 still pending
 //   <0 dma_fence error (e.g. -EREMOTEIO)
-int do_syncobj_fence_status(int fd, uint32_t handle, int32_t *out_status);
+int do_syncobj_fence_status(int device_fd, uint32_t handle, int32_t *out_status);
 
 // amdrnpu_syncobj_wait_busy_poll(). NOTE: this API is OBSOLETE and
 // delegates to wait_complete (there is no way to query command status
 // ahead of the response message); the @interval_ns arg is accepted for
 // source compatibility but ignored. Does NOT close the handle.
-int do_syncobj_busy_poll(int fd, uint32_t handle,
+int do_syncobj_busy_poll(int device_fd, uint32_t handle,
 			 uint64_t max_wall_ns, uint64_t interval_ns,
 			 int32_t *out_status);
 

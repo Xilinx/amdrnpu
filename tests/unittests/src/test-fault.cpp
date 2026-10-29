@@ -25,29 +25,29 @@ namespace {
 // negative int32_t status. The blocking SYNCOBJ_WAIT here returns 0
 // (signaled) even when the fence carries an error -- "signaled with
 // error" is still signaled.
-void RunFaultClass(int fd, const char *name, uint32_t op,
+void RunFaultClass(int device_fd, const char *name, uint32_t op,
 		   int32_t expected_status)
 {
 	SCOPED_TRACE(::testing::Message()
 		     << name << " (op=0x" << std::hex << op << ")");
 
 	uint32_t syncobj = 0;
-	ASSERT_EQ(do_cmd_submit(fd, op, nullptr, 0, &syncobj), 0);
+	ASSERT_EQ(do_cmd_submit(device_fd, op, nullptr, 0, &syncobj), 0);
 	ASSERT_NE(syncobj, 0u);
 
-	ASSERT_EQ(do_syncobj_wait(fd, syncobj, kSubmitTimeoutNs), 0)
+	ASSERT_EQ(do_syncobj_wait(device_fd, syncobj, kSubmitTimeoutNs), 0)
 		<< "wait timed out -- endpoint may be running a pre-Phase-2d "
 		   "build without the fault opcodes";
 
 	int32_t status = 0;
-	ASSERT_EQ(do_syncobj_fence_status(fd, syncobj, &status), 0);
+	ASSERT_EQ(do_syncobj_fence_status(device_fd, syncobj, &status), 0);
 	EXPECT_EQ(status, expected_status)
 		<< "fence_status=" << status
 		<< " (" << (status < 0 ? std::strerror(-status) : "non-error")
 		<< "), expected=" << expected_status
 		<< " (" << std::strerror(-expected_status) << ")";
 
-	(void)do_syncobj_destroy(fd, syncobj);
+	(void)do_syncobj_destroy(device_fd, syncobj);
 }
 
 }  // anonymous namespace

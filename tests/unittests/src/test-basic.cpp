@@ -119,19 +119,19 @@ TEST(AmdrnpuBasicStandalone, NoopSubmitMultiThreaded)
 	std::array<std::thread, kNumThreads> threads;
 	for (int i = 0; i < kNumThreads; ++i) {
 		threads[i] = std::thread([&] {
-			int fd = open_amdrnpu_device();
-			if (fd < 0) { ++fails; return; }
+			int device_fd = open_amdrnpu_device();
+			if (device_fd < 0) { ++fails; return; }
 			uint32_t syncobj = 0;
-			if (do_cmd_submit(fd, 0xC0FFEE00u, nullptr, 0,
+			if (do_cmd_submit(device_fd, 0xC0FFEE00u, nullptr, 0,
 					  &syncobj) != 0 || syncobj == 0) {
 				++fails;
-				::close(fd);
+				::close(device_fd);
 				return;
 			}
-			if (do_syncobj_wait(fd, syncobj, kSubmitTimeoutNs) != 0)
+			if (do_syncobj_wait(device_fd, syncobj, kSubmitTimeoutNs) != 0)
 				++fails;
-			(void)do_syncobj_destroy(fd, syncobj);
-			::close(fd);
+			(void)do_syncobj_destroy(device_fd, syncobj);
+			::close(device_fd);
 		});
 	}
 	for (auto &t : threads)

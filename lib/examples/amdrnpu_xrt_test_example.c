@@ -69,7 +69,7 @@ static int open_amdrnpu_node(char *path_out, size_t path_sz)
 
 	while ((e = readdir(dir)) != NULL) {
 		long n;
-		int fd;
+		int device_fd;
 		char p[PATH_MAX];
 
 		if (strncmp(e->d_name, "amdrnpu.", 8) != 0)
@@ -80,13 +80,13 @@ static int open_amdrnpu_node(char *path_out, size_t path_sz)
 		if (n < 0 || n >= best)
 			continue;
 		snprintf(p, sizeof(p), "/dev/%s", e->d_name);
-		fd = open(p, O_RDWR | O_CLOEXEC);
-		if (fd < 0)
+		device_fd = open(p, O_RDWR | O_CLOEXEC);
+		if (device_fd < 0)
 			continue;
 		if (best_fd >= 0)
 			close(best_fd);
 		best = n;
-		best_fd = fd;
+		best_fd = device_fd;
 		snprintf(best_path, sizeof(best_path), "%s", p);
 	}
 	closedir(dir);
@@ -112,9 +112,9 @@ static int parse_u64(const char *s, uint64_t *out)
 }
 
 /* Absolute PA for a BO handle (fills descriptor karg entries). */
-static int buf_phys(int fd, uint32_t handle, uint64_t *pa_out)
+static int buf_phys(int device_fd, uint32_t handle, uint64_t *pa_out)
 {
-	return amdrnpu_buf_get_phys(fd, handle, pa_out, NULL);
+	return amdrnpu_buf_get_phys(device_fd, handle, pa_out, NULL);
 }
 
 struct karg_spec {
@@ -246,7 +246,7 @@ static int parse_cli(int argc, char **argv, struct cli_opts *o)
 	return 0;
 }
 
-static int load_file_to_rpu_bo(int fd, const char *path,
+static int load_file_to_rpu_bo(int device_fd, const char *path,
 				uint32_t *out_bo, void **out_map,
 				uint64_t *out_file_sz, uint64_t *out_alloc_sz)
 {
@@ -278,7 +278,7 @@ static int load_file_to_rpu_bo(int fd, const char *path,
 	file_sz  = (uint64_t)st.st_size;
 	alloc_sz = (file_sz + 4095ULL) & ~4095ULL;
 
-	rc = amdrnpu_buf_alloc(fd, AMDRNPU_MEMORY_RPU, alloc_sz, &bo);
+	rc = amdrnpu_buf_alloc(device_fd, AMDRNPU_MEMORY_RPU, alloc_sz, &bo);
 	if (rc) {
 		fprintf(stderr, "buf_alloc(%s, %llu): %s\n", path,
 			(unsigned long long)alloc_sz, strerror(-rc));
@@ -286,7 +286,7 @@ static int load_file_to_rpu_bo(int fd, const char *path,
 		return rc;
 	}
 
-	rc = amdrnpu_buf_mmap(fd, bo, alloc_sz, 0, alloc_sz, &map);
+	rc = amdrnpu_buf_mmap(device_fd, bo, alloc_sz, 0, alloc_sz, &map);
 	if (rc) {
 		fprintf(stderr, "buf_mmap(%s): %s\n", path, strerror(-rc));
 		fclose(fp);
@@ -304,7 +304,7 @@ static int load_file_to_rpu_bo(int fd, const char *path,
 	if (alloc_sz > file_sz)
 		memset((char *)map + file_sz, 0, alloc_sz - file_sz);
 
-	rc = amdrnpu_buf_sync_to_device(fd, bo, 0, 0);
+	rc = amdrnpu_buf_sync_to_device(device_fd, bo, 0, 0);
 	if (rc) {
 		fprintf(stderr, "buf_sync_to_device(%s): %s\n", path,
 			strerror(-rc));
@@ -320,7 +320,7 @@ static int load_file_to_rpu_bo(int fd, const char *path,
 err_unmap:
 	amdrnpu_buf_munmap(map, alloc_sz);
 err:
-	amdrnpu_buf_close(fd, bo);
+	amdrnpu_buf_close(device_fd, bo);
 	return rc;
 }
 
@@ -348,7 +348,7 @@ int main(int argc, char **argv)
 {
 	struct cli_opts opts;
 	char opened_path[PATH_MAX];
-	int fd = -1;
+	int device_fd = -1;
 	int rc = 0;
 
 	uint32_t elf_bo = 0;
@@ -379,12 +379,12 @@ int main(int argc, char **argv)
 	if (rc < 0) return 2;
 
 	if (opts.device[0]) {
-		fd = open(opts.device, O_RDWR | O_CLOEXEC);
-		if (fd < 0) { perror(opts.device); return 1; }
+		device_fd = open(opts.device, O_RDWR | O_CLOEXEC);
+		if (device_fd < 0) { perror(opts.device); return 1; }
 		snprintf(opened_path, sizeof(opened_path), "%s", opts.device);
 	} else {
-		fd = open_amdrnpu_node(opened_path, sizeof(opened_path));
-		if (fd < 0) {
+		device_fd = open_amdrnpu_node(opened_path, sizeof(opened_path));
+		if (device_fd < 0) {
 			fprintf(stderr,
 				"no amdrnpu node under /dev/amdrnpu.*\n");
 			return 1;
@@ -402,7 +402,7 @@ int main(int argc, char **argv)
 
 	/* args[1]/[2]: ELF */
 	if (opts.elf_file[0]) {
-		rc = load_file_to_rpu_bo(fd, opts.elf_file,
+		rc = load_file_to_rpu_bo(device_fd, opts.elf_file,
 					 &elf_bo, &elf_map,
 					 &elf_file_sz, &elf_alloc_sz);
 		if (rc) { fail("load ELF", rc); goto out; }
@@ -432,7 +432,7 @@ int main(int argc, char **argv)
 		struct karg_spec *ks = &opts.kargs[i];
 
 		if (ks->path[0]) {
-			rc = load_file_to_rpu_bo(fd, ks->path,
+			rc = load_file_to_rpu_bo(device_fd, ks->path,
 						 &kbo[i].handle, &kbo[i].map,
 						 &kbo[i].file_sz,
 						 &kbo[i].alloc_sz);
@@ -442,7 +442,7 @@ int main(int argc, char **argv)
 				g_fail = 1;
 				goto out;
 			}
-			rc = buf_phys(fd, kbo[i].handle, &kbo[i].pa);
+			rc = buf_phys(device_fd, kbo[i].handle, &kbo[i].pa);
 			if (rc) {
 				fprintf(stderr,
 					"buf_get_phys(arg[%u]): %s\n",
@@ -470,9 +470,9 @@ int main(int argc, char **argv)
 	if (desc_alloc_sz < 4096)
 		desc_alloc_sz = 4096;
 
-	rc = amdrnpu_buf_alloc(fd, AMDRNPU_MEMORY_RPU, desc_alloc_sz, &desc_bo);
+	rc = amdrnpu_buf_alloc(device_fd, AMDRNPU_MEMORY_RPU, desc_alloc_sz, &desc_bo);
 	if (rc) { fail("buf_alloc(desc)", rc); goto out; }
-	rc = amdrnpu_buf_mmap(fd, desc_bo, desc_alloc_sz, 0, desc_alloc_sz,
+	rc = amdrnpu_buf_mmap(device_fd, desc_bo, desc_alloc_sz, 0, desc_alloc_sz,
 			      &desc_map);
 	if (rc) { fail("buf_mmap(desc)", rc); goto out; }
 
@@ -501,7 +501,7 @@ int main(int argc, char **argv)
 		}
 	}
 
-	rc = amdrnpu_buf_sync_to_device(fd, desc_bo, 0, 0);
+	rc = amdrnpu_buf_sync_to_device(device_fd, desc_bo, 0, 0);
 	if (rc) { fail("buf_sync(desc)", rc); goto out; }
 	printf("desc BO:    handle=%u content=%u B (1 entry, %u kargs)\n",
 	       desc_bo, desc_content_sz, opts.n_kargs);
@@ -514,18 +514,18 @@ int main(int argc, char **argv)
 
 	/* args[5]: result writeback */
 	if (opts.want_result) {
-		rc = amdrnpu_buf_alloc(fd, AMDRNPU_MEMORY_RPU,
+		rc = amdrnpu_buf_alloc(device_fd, AMDRNPU_MEMORY_RPU,
 					    APU_XRT_TEST_RESULT_SIZE,
 					    &result_bo);
 		if (rc) { fail("buf_alloc(result)", rc); goto out; }
 
-		rc = amdrnpu_buf_mmap(fd, result_bo, 0, 0, 0, &result_map);
+		rc = amdrnpu_buf_mmap(device_fd, result_bo, 0, 0, 0, &result_map);
 		if (rc) {
 			fail("buf_mmap(result)", rc);
 			goto out;
 		}
 		memset(result_map, 0, APU_XRT_TEST_RESULT_SIZE);
-		rc = amdrnpu_buf_sync_to_device(fd, result_bo, 0, 0);
+		rc = amdrnpu_buf_sync_to_device(device_fd, result_bo, 0, 0);
 		if (rc) { fail("buf_sync(result)", rc); goto out; }
 
 		args[5].size             = APU_XRT_TEST_RESULT_SIZE;
@@ -539,7 +539,7 @@ int main(int argc, char **argv)
 	}
 
 	printf("submitting APU_XRT_TEST (%u args) ...\n", APU_XRT_TEST_NUM_ARGS);
-	rc = amdrnpu_cmd_submit(fd, APU_XRT_TEST, args, APU_XRT_TEST_NUM_ARGS,
+	rc = amdrnpu_cmd_submit(device_fd, APU_XRT_TEST, args, APU_XRT_TEST_NUM_ARGS,
 				&hdr, sizeof(hdr));
 	if (rc) {
 		fail("cmd_submit", rc);
@@ -548,7 +548,7 @@ int main(int argc, char **argv)
 	printf("syncobj_handle=%d\n", hdr.sync_handle);
 
 	rc = amdrnpu_syncobj_wait_complete(
-		fd, (uint32_t)hdr.sync_handle,
+		device_fd, (uint32_t)hdr.sync_handle,
 		(int64_t)opts.timeout_s * 1000000000LL, &fence_st);
 	if (rc) {
 		fail("syncobj_wait", rc);
@@ -561,7 +561,7 @@ int main(int argc, char **argv)
 	if (opts.want_result && result_map) {
 		struct apu_xrt_test_result res;
 
-		rc = amdrnpu_buf_sync_from_device(fd, result_bo, 0, 0);
+		rc = amdrnpu_buf_sync_from_device(device_fd, result_bo, 0, 0);
 		if (rc) { fail("buf_sync_from(result)", rc); goto out; }
 		memcpy(&res, result_map, sizeof(res));
 		printf("result: passed=%u iterations_done=%u "
@@ -578,23 +578,23 @@ out:
 	if (result_map)
 		amdrnpu_buf_munmap(result_map, APU_XRT_TEST_RESULT_SIZE);
 	if (result_bo)
-		amdrnpu_buf_close(fd, result_bo);
+		amdrnpu_buf_close(device_fd, result_bo);
 	if (desc_map)
 		amdrnpu_buf_munmap(desc_map, desc_alloc_sz);
 	if (desc_bo)
-		amdrnpu_buf_close(fd, desc_bo);
+		amdrnpu_buf_close(device_fd, desc_bo);
 	for (i = 0; i < APU_XRT_TEST_MAX_KARGS; ++i) {
 		if (kbo[i].map)
 			amdrnpu_buf_munmap(kbo[i].map, kbo[i].alloc_sz);
 		if (kbo[i].handle)
-			amdrnpu_buf_close(fd, kbo[i].handle);
+			amdrnpu_buf_close(device_fd, kbo[i].handle);
 	}
 	if (elf_map)
 		amdrnpu_buf_munmap(elf_map, elf_alloc_sz);
 	if (elf_bo)
-		amdrnpu_buf_close(fd, elf_bo);
-	if (fd >= 0)
-		close(fd);
+		amdrnpu_buf_close(device_fd, elf_bo);
+	if (device_fd >= 0)
+		close(device_fd);
 
 	if (g_fail || rc) {
 		printf("FAIL\n");

@@ -31,13 +31,13 @@ int open_amdrnpu_device(char *out_path, size_t out_sz)
 		char path[PATH_MAX];
 		std::snprintf(path, sizeof(path), "/dev/%s", e->d_name);
 
-		int fd = ::open(path, O_RDWR | O_CLOEXEC);
-		if (fd < 0)
+		int device_fd = ::open(path, O_RDWR | O_CLOEXEC);
+		if (device_fd < 0)
 			continue;
 
 		if (out_path && out_sz)
 			std::snprintf(out_path, out_sz, "%s", path);
-		found = fd;
+		found = device_fd;
 		break;
 	}
 	::closedir(dir);
@@ -59,12 +59,12 @@ uint64_t now_ns()
 	       static_cast<uint64_t>(ts.tv_nsec);
 }
 
-int do_cmd_submit(int fd, uint32_t command_op,
+int do_cmd_submit(int device_fd, uint32_t command_op,
 		  const struct amdrnpu_arg *args, uint32_t num_args,
 		  uint32_t *out_handle)
 {
 	struct amdrnpu_cmd_submit hdr {};
-	int rc = amdrnpu_cmd_submit(fd, command_op, args, num_args,
+	int rc = amdrnpu_cmd_submit(device_fd, command_op, args, num_args,
 				    &hdr, sizeof(hdr));
 	if (rc < 0)
 		return rc;
@@ -73,41 +73,41 @@ int do_cmd_submit(int fd, uint32_t command_op,
 	return 0;
 }
 
-int do_syncobj_wait(int fd, uint32_t handle, uint64_t timeout_ns)
+int do_syncobj_wait(int device_fd, uint32_t handle, uint64_t timeout_ns)
 {
 	int32_t status = 0;
 	// wait_complete returns 0 once the fence is signalled -- even when
 	// it carries an error (poll wakes on signalling; the error is only
 	// visible via fence_status). Fault subtests rely on that: "signalled
 	// with error" is still signalled, so the wait itself succeeds.
-	return amdrnpu_syncobj_wait_complete(fd, handle,
+	return amdrnpu_syncobj_wait_complete(device_fd, handle,
 					     static_cast<int64_t>(timeout_ns),
 					     &status);
 }
 
-int do_syncobj_destroy(int fd, uint32_t handle)
+int do_syncobj_destroy(int device_fd, uint32_t handle)
 {
-	(void)fd;
+	(void)device_fd;
 	if (::close(static_cast<int>(handle)) < 0)
 		return -errno;
 	return 0;
 }
 
-int do_buf_alloc(int fd, uint32_t mtype, uint64_t size, uint32_t *out_handle)
+int do_buf_alloc(int device_fd, uint32_t mtype, uint64_t size, uint32_t *out_handle)
 {
-	return amdrnpu_buf_alloc(fd, mtype, size, out_handle);
+	return amdrnpu_buf_alloc(device_fd, mtype, size, out_handle);
 }
 
-int do_gem_close(int fd, uint32_t handle)
+int do_gem_close(int device_fd, uint32_t handle)
 {
-	return amdrnpu_buf_close(fd, handle);
+	return amdrnpu_buf_close(device_fd, handle);
 }
 
-int do_buf_mmap(int fd, uint32_t handle, uint64_t size, void **out_map)
+int do_buf_mmap(int device_fd, uint32_t handle, uint64_t size, void **out_map)
 {
 	// offset=0, length=0 -> map the whole buffer (lib fills length from
 	// the registry). buf_size is reserved.
-	return amdrnpu_buf_mmap(fd, handle, size, 0, 0, out_map);
+	return amdrnpu_buf_mmap(device_fd, handle, size, 0, 0, out_map);
 }
 
 void do_buf_munmap(void *addr, uint64_t length)
@@ -115,27 +115,27 @@ void do_buf_munmap(void *addr, uint64_t length)
 	amdrnpu_buf_munmap(addr, length);
 }
 
-int do_buf_sync(int fd, uint32_t handle, uint32_t direction,
+int do_buf_sync(int device_fd, uint32_t handle, uint32_t direction,
 		uint64_t offset, uint64_t length)
 {
-	return amdrnpu_buf_sync(fd, handle, direction, offset, length);
+	return amdrnpu_buf_sync(device_fd, handle, direction, offset, length);
 }
 
-int do_syncobj_to_fence_fd(int fd, uint32_t handle, int *out_sf_fd)
+int do_syncobj_to_fence_fd(int device_fd, uint32_t handle, int *out_sf_fd)
 {
-	return amdrnpu_syncobj_to_fence_fd(fd, handle, out_sf_fd);
+	return amdrnpu_syncobj_to_fence_fd(device_fd, handle, out_sf_fd);
 }
 
-int do_syncobj_fence_status(int fd, uint32_t handle, int32_t *out_status)
+int do_syncobj_fence_status(int device_fd, uint32_t handle, int32_t *out_status)
 {
-	return amdrnpu_syncobj_fence_status(fd, handle, out_status);
+	return amdrnpu_syncobj_fence_status(device_fd, handle, out_status);
 }
 
-int do_syncobj_busy_poll(int fd, uint32_t handle,
+int do_syncobj_busy_poll(int device_fd, uint32_t handle,
 			 uint64_t max_wall_ns, uint64_t interval_ns,
 			 int32_t *out_status)
 {
-	return amdrnpu_syncobj_wait_busy_poll(fd, handle,
+	return amdrnpu_syncobj_wait_busy_poll(device_fd, handle,
 					      static_cast<int64_t>(max_wall_ns),
 					      interval_ns, out_status);
 }

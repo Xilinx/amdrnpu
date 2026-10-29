@@ -74,17 +74,17 @@ struct echo_sample {
  * ONCE (before the measured loop) into a function pointer, instead of branching
  * on a loop-invariant inside every timed iteration.
  */
-static int echo_wait_blocking(int fd, uint32_t handle, int64_t timeout_ns,
+static int echo_wait_blocking(int device_fd, uint32_t handle, int64_t timeout_ns,
 			      int32_t *status)
 {
-	return amdrnpu_syncobj_wait_complete(fd, handle, timeout_ns,
+	return amdrnpu_syncobj_wait_complete(device_fd, handle, timeout_ns,
 						  status);
 }
 
-static int echo_wait_busy_poll(int fd, uint32_t handle, int64_t timeout_ns,
+static int echo_wait_busy_poll(int device_fd, uint32_t handle, int64_t timeout_ns,
 			       int32_t *status)
 {
-	return amdrnpu_syncobj_wait_busy_poll(fd, handle, timeout_ns,
+	return amdrnpu_syncobj_wait_busy_poll(device_fd, handle, timeout_ns,
 						   BUSY_POLL_INTERVAL_NS,
 						   status);
 }
@@ -117,7 +117,7 @@ static int open_amdrnpu_scan(const char *want, char *out_path,
 
 	while ((e = readdir(dir)) != NULL) {
 		long n;
-		int fd;
+		int device_fd;
 		char p[PATH_MAX];
 
 		if (strncmp(e->d_name, "amdrnpu.", 8) != 0)
@@ -130,13 +130,13 @@ static int open_amdrnpu_scan(const char *want, char *out_path,
 		if (n < 0 || n >= best)
 			continue;
 		snprintf(p, sizeof(p), "/dev/%s", e->d_name);
-		fd = open(p, O_RDWR | O_CLOEXEC);
-		if (fd < 0)
+		device_fd = open(p, O_RDWR | O_CLOEXEC);
+		if (device_fd < 0)
 			continue;
 		if (best_fd >= 0)
 			close(best_fd);
 		best = n;
-		best_fd = fd;
+		best_fd = device_fd;
 		snprintf(best_path, sizeof(best_path), "%s", p);
 	}
 	closedir(dir);
@@ -148,27 +148,27 @@ static int open_amdrnpu_scan(const char *want, char *out_path,
 
 static int open_amdrnpu_device(const char *path, char *opened_path, size_t sz)
 {
-	int fd;
+	int device_fd;
 
 	if (path && path[0]) {
-		fd = open_amdrnpu_scan(path, opened_path, sz);
-		if (fd < 0)
+		device_fd = open_amdrnpu_scan(path, opened_path, sz);
+		if (device_fd < 0)
 			fprintf(stderr, "%s: not an accessible /dev/amdrnpu.N node\n",
 				path);
-		return fd;
+		return device_fd;
 	}
-	fd = open_amdrnpu_scan(NULL, opened_path, sz);
-	if (fd < 0)
+	device_fd = open_amdrnpu_scan(NULL, opened_path, sz);
+	if (device_fd < 0)
 		fprintf(stderr,
 			"no /dev/amdrnpu.* node found; pass --device\n");
-	return fd;
+	return device_fd;
 }
 
 /* ------------------------------------------------------------------ */
 /* echo round-trip for # iterations                                   */
 /* ------------------------------------------------------------------ */
 
-static int echo_roundtrip(int fd, uint32_t op, int64_t timeout_ns,
+static int echo_roundtrip(int device_fd, uint32_t op, int64_t timeout_ns,
 			  int busy_poll, unsigned int iterations,
 			  struct echo_sample *samples)
 {
@@ -183,7 +183,7 @@ static int echo_roundtrip(int fd, uint32_t op, int64_t timeout_ns,
 		int rc;
 
 		clock_gettime(CLOCK_MONOTONIC, &samples[i].t0);
-		rc = amdrnpu_cmd_submit(fd, op, NULL, 0, &hdr,
+		rc = amdrnpu_cmd_submit(device_fd, op, NULL, 0, &hdr,
 					     sizeof(hdr));
 		if (rc < 0) {
 			fprintf(stderr, "iter %u cmd_submit: %s (rc=%d)\n",
@@ -191,7 +191,7 @@ static int echo_roundtrip(int fd, uint32_t op, int64_t timeout_ns,
 			return rc;
 		}
 
-		rc = wait_fn(fd, (uint32_t)hdr.sync_handle,
+		rc = wait_fn(device_fd, (uint32_t)hdr.sync_handle,
 			     timeout_ns, &status);
 		clock_gettime(CLOCK_MONOTONIC, &samples[i].t1);
 		if (rc < 0) {
@@ -240,7 +240,7 @@ int main(int argc, char **argv)
 	int64_t timeout_ns;
 	struct echo_sample *raw = NULL;
 	uint64_t *samples = NULL;
-	int fd = -1;
+	int device_fd = -1;
 	int ret = 1;
 
 	for (int i = 1; i < argc; ++i) {
@@ -270,8 +270,8 @@ int main(int argc, char **argv)
 	}
 	timeout_ns = (int64_t)timeout_sec * 1000000000ll;
 
-	fd = open_amdrnpu_device(path, opened_path, sizeof(opened_path));
-	if (fd < 0)
+	device_fd = open_amdrnpu_device(path, opened_path, sizeof(opened_path));
+	if (device_fd < 0)
 		goto out;
 
 	raw = calloc(iterations, sizeof(*raw));
@@ -287,7 +287,7 @@ int main(int argc, char **argv)
 	       busy_poll ? "busy-poll" : "blocking");
 	fflush(stdout);
 
-	if (echo_roundtrip(fd, op, timeout_ns, busy_poll, iterations,
+	if (echo_roundtrip(device_fd, op, timeout_ns, busy_poll, iterations,
 			   raw) < 0) {
 		fprintf(stderr, "  [echo-lat] echo round-trips failed\n");
 		goto out;
@@ -333,8 +333,8 @@ int main(int argc, char **argv)
 out:
 	free(raw);
 	free(samples);
-	if (fd >= 0)
-		close(fd);
+	if (device_fd >= 0)
+		close(device_fd);
 	printf(ret == 0 ? "PASS\n" : "FAIL\n");
 	return ret;
 }

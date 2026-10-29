@@ -38,7 +38,7 @@
 
 struct amdrnpu_buf_entry {
 	int		used;
-	int		dev_fd;
+	int		device_fd;
 	uint32_t	handle;
 	int		dmabuf_fd;
 	uint64_t	size;
@@ -48,7 +48,7 @@ static pthread_mutex_t amdrnpu_reg_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct amdrnpu_buf_entry *amdrnpu_reg;
 static size_t amdrnpu_reg_cap;
 
-static int amdrnpu_reg_add(int dev_fd, uint32_t handle, int dmabuf_fd,
+static int amdrnpu_reg_add(int device_fd, uint32_t handle, int dmabuf_fd,
 			   uint64_t size)
 {
 	size_t i, slot = (size_t)-1;
@@ -77,7 +77,7 @@ static int amdrnpu_reg_add(int dev_fd, uint32_t handle, int dmabuf_fd,
 	}
 
 	amdrnpu_reg[slot].used = 1;
-	amdrnpu_reg[slot].dev_fd = dev_fd;
+	amdrnpu_reg[slot].device_fd = device_fd;
 	amdrnpu_reg[slot].handle = handle;
 	amdrnpu_reg[slot].dmabuf_fd = dmabuf_fd;
 	amdrnpu_reg[slot].size = size;
@@ -86,7 +86,7 @@ static int amdrnpu_reg_add(int dev_fd, uint32_t handle, int dmabuf_fd,
 }
 
 /* Look up an entry (leaving it in place). Returns 1 if found, else 0. */
-static int amdrnpu_reg_lookup(int dev_fd, uint32_t handle, int *out_dmabuf_fd,
+static int amdrnpu_reg_lookup(int device_fd, uint32_t handle, int *out_dmabuf_fd,
 			      uint64_t *out_size)
 {
 	int found = 0;
@@ -95,7 +95,7 @@ static int amdrnpu_reg_lookup(int dev_fd, uint32_t handle, int *out_dmabuf_fd,
 	pthread_mutex_lock(&amdrnpu_reg_lock);
 	for (i = 0; i < amdrnpu_reg_cap; i++) {
 		if (amdrnpu_reg[i].used &&
-		    amdrnpu_reg[i].dev_fd == dev_fd &&
+		    amdrnpu_reg[i].device_fd == device_fd &&
 		    amdrnpu_reg[i].handle == handle) {
 			if (out_dmabuf_fd)
 				*out_dmabuf_fd = amdrnpu_reg[i].dmabuf_fd;
@@ -110,7 +110,7 @@ static int amdrnpu_reg_lookup(int dev_fd, uint32_t handle, int *out_dmabuf_fd,
 }
 
 /* Look up and remove an entry. Returns 1 if found, else 0. */
-static int amdrnpu_reg_take(int dev_fd, uint32_t handle, int *out_dmabuf_fd,
+static int amdrnpu_reg_take(int device_fd, uint32_t handle, int *out_dmabuf_fd,
 			    uint64_t *out_size)
 {
 	int found = 0;
@@ -119,7 +119,7 @@ static int amdrnpu_reg_take(int dev_fd, uint32_t handle, int *out_dmabuf_fd,
 	pthread_mutex_lock(&amdrnpu_reg_lock);
 	for (i = 0; i < amdrnpu_reg_cap; i++) {
 		if (amdrnpu_reg[i].used &&
-		    amdrnpu_reg[i].dev_fd == dev_fd &&
+		    amdrnpu_reg[i].device_fd == device_fd &&
 		    amdrnpu_reg[i].handle == handle) {
 			if (out_dmabuf_fd)
 				*out_dmabuf_fd = amdrnpu_reg[i].dmabuf_fd;
@@ -142,7 +142,7 @@ static int amdrnpu_reg_take(int dev_fd, uint32_t handle, int *out_dmabuf_fd,
  * Kernel-side allocation (AMDRNPU_BUF_ALLOC): the driver picks the heap for
  * @memory_type and returns both the handle and an exported dma-buf fd.
  */
-static int amdrnpu_kernel_alloc(int fd, uint32_t memory_type, uint64_t size,
+static int amdrnpu_kernel_alloc(int device_fd, uint32_t memory_type, uint64_t size,
 				uint32_t *out_handle, int *out_dmabuf_fd)
 {
 	struct amdrnpu_buf_alloc arg;
@@ -151,22 +151,22 @@ static int amdrnpu_kernel_alloc(int fd, uint32_t memory_type, uint64_t size,
 	arg.size = size;
 	arg.memory_type = memory_type;
 
-	if (ioctl(fd, AMDRNPU_BUF_ALLOC, &arg))
+	if (ioctl(device_fd, AMDRNPU_BUF_ALLOC, &arg))
 		return -errno;
 
 	*out_handle = arg.handle;
-	*out_dmabuf_fd = arg.fd;
+	*out_dmabuf_fd = arg.dmabuf_fd;
 	return 0;
 }
 
-static int amdrnpu_unimport(int fd, uint32_t handle)
+static int amdrnpu_unimport(int device_fd, uint32_t handle)
 {
 	struct amdrnpu_buf_destroy arg;
 
 	memset(&arg, 0, sizeof(arg));
 	arg.handle = handle;
 
-	if (ioctl(fd, AMDRNPU_BUF_DESTROY, &arg))
+	if (ioctl(device_fd, AMDRNPU_BUF_DESTROY, &arg))
 		return -errno;
 	return 0;
 }
@@ -212,7 +212,7 @@ static int amdrnpu_poll_fence(int fence_fd, int timeout_ms)
 /* Public API                                                         */
 /* ------------------------------------------------------------------ */
 
-int amdrnpu_buf_alloc(int fd, uint32_t memory_type, uint64_t size,
+int amdrnpu_buf_alloc(int device_fd, uint32_t memory_type, uint64_t size,
 		      uint32_t *out_handle)
 {
 	int dmabuf_fd = -1;
@@ -226,13 +226,14 @@ int amdrnpu_buf_alloc(int fd, uint32_t memory_type, uint64_t size,
 	    memory_type != AMDRNPU_MEMORY_DEVICE)
 		AMDRNPU_TRACE_RET(buf_alloc_exit, -EINVAL);
 
-	ret = amdrnpu_kernel_alloc(fd, memory_type, size, &handle, &dmabuf_fd);
+	ret = amdrnpu_kernel_alloc(device_fd, memory_type, size, &handle,
+				   &dmabuf_fd);
 	if (ret)
 		AMDRNPU_TRACE_RET(buf_alloc_exit, ret);
 
-	ret = amdrnpu_reg_add(fd, handle, dmabuf_fd, size);
+	ret = amdrnpu_reg_add(device_fd, handle, dmabuf_fd, size);
 	if (ret) {
-		amdrnpu_unimport(fd, handle);
+		amdrnpu_unimport(device_fd, handle);
 		close(dmabuf_fd);
 		AMDRNPU_TRACE_RET(buf_alloc_exit, ret);
 	}
@@ -241,21 +242,21 @@ int amdrnpu_buf_alloc(int fd, uint32_t memory_type, uint64_t size,
 	AMDRNPU_TRACE_RET(buf_alloc_exit, 0);
 }
 
-int amdrnpu_buf_close(int fd, uint32_t handle)
+int amdrnpu_buf_close(int device_fd, uint32_t handle)
 {
 	int dmabuf_fd = -1;
 	int ret;
 
 	AMDRNPU_TRACE1(buf_close_enter, handle);
-	if (!amdrnpu_reg_take(fd, handle, &dmabuf_fd, NULL))
+	if (!amdrnpu_reg_take(device_fd, handle, &dmabuf_fd, NULL))
 		AMDRNPU_TRACE_RET(buf_close_exit, -ENOENT);
 
-	ret = amdrnpu_unimport(fd, handle);
+	ret = amdrnpu_unimport(device_fd, handle);
 	close(dmabuf_fd);
 	AMDRNPU_TRACE_RET(buf_close_exit, ret);
 }
 
-int amdrnpu_buf_get_phys(int fd, uint32_t handle, uint64_t *out_pa,
+int amdrnpu_buf_get_phys(int device_fd, uint32_t handle, uint64_t *out_pa,
 			 uint64_t *out_size)
 {
 	struct amdrnpu_buf_query arg = {
@@ -265,10 +266,10 @@ int amdrnpu_buf_get_phys(int fd, uint32_t handle, uint64_t *out_pa,
 
 	if (!out_pa)
 		return -EINVAL;
-	if (!amdrnpu_reg_lookup(fd, handle, NULL, NULL))
+	if (!amdrnpu_reg_lookup(device_fd, handle, NULL, NULL))
 		return -ENOENT;
 
-	ret = ioctl(fd, AMDRNPU_BUF_QUERY, &arg);
+	ret = ioctl(device_fd, AMDRNPU_BUF_QUERY, &arg);
 	if (ret)
 		return -errno;
 
@@ -278,7 +279,7 @@ int amdrnpu_buf_get_phys(int fd, uint32_t handle, uint64_t *out_pa,
 	return 0;
 }
 
-int amdrnpu_buf_mmap(int fd, uint32_t handle, uint64_t buf_size,
+int amdrnpu_buf_mmap(int device_fd, uint32_t handle, uint64_t buf_size,
 		     uint64_t offset, uint64_t length, void **out_map)
 {
 	int dmabuf_fd = -1;
@@ -291,7 +292,7 @@ int amdrnpu_buf_mmap(int fd, uint32_t handle, uint64_t buf_size,
 	AMDRNPU_TRACE1(buf_mmap_enter, handle);
 	if (!out_map)
 		AMDRNPU_TRACE_RET(buf_mmap_exit, -EINVAL);
-	if (!amdrnpu_reg_lookup(fd, handle, &dmabuf_fd, &size))
+	if (!amdrnpu_reg_lookup(device_fd, handle, &dmabuf_fd, &size))
 		AMDRNPU_TRACE_RET(buf_mmap_exit, -ENOENT);
 	if (offset > size)
 		AMDRNPU_TRACE_RET(buf_mmap_exit, -EINVAL);
@@ -324,7 +325,7 @@ void amdrnpu_buf_munmap(void *addr, uint64_t length)
  * Map [@offset, @offset + @length).  mmap(2) requires a page-aligned offset,
  * so the mapped base may precede @offset; @out_ptr points at @offset.
  */
-static int amdrnpu_buf_map_section(int fd, uint32_t handle, uint64_t offset,
+static int amdrnpu_buf_map_section(int device_fd, uint32_t handle, uint64_t offset,
 				   uint64_t length, void **out_base,
 				   uint64_t *out_map_len, void **out_ptr)
 {
@@ -346,7 +347,7 @@ static int amdrnpu_buf_map_section(int fd, uint32_t handle, uint64_t offset,
 	if (map_len > SIZE_MAX)
 		return -EINVAL;
 
-	ret = amdrnpu_buf_mmap(fd, handle, 0, map_off, map_len, &map);
+	ret = amdrnpu_buf_mmap(device_fd, handle, 0, map_off, map_len, &map);
 	if (ret)
 		return ret;
 
@@ -356,7 +357,7 @@ static int amdrnpu_buf_map_section(int fd, uint32_t handle, uint64_t offset,
 	return 0;
 }
 
-int amdrnpu_buf_write(int fd, uint32_t handle, const void *src,
+int amdrnpu_buf_write(int device_fd, uint32_t handle, const void *src,
 		      uint64_t offset, uint64_t length)
 {
 	uint64_t map_len;
@@ -368,7 +369,7 @@ int amdrnpu_buf_write(int fd, uint32_t handle, const void *src,
 	if (!src)
 		return -EINVAL;
 
-	ret = amdrnpu_buf_map_section(fd, handle, offset, length,
+	ret = amdrnpu_buf_map_section(device_fd, handle, offset, length,
 				      &map, &map_len, &dst);
 	if (ret)
 		return ret;
@@ -378,7 +379,7 @@ int amdrnpu_buf_write(int fd, uint32_t handle, const void *src,
 	return 0;
 }
 
-int amdrnpu_buf_read(int fd, uint32_t handle, void *dst, uint64_t offset,
+int amdrnpu_buf_read(int device_fd, uint32_t handle, void *dst, uint64_t offset,
 		     uint64_t length)
 {
 	uint64_t map_len;
@@ -390,7 +391,7 @@ int amdrnpu_buf_read(int fd, uint32_t handle, void *dst, uint64_t offset,
 	if (!dst)
 		return -EINVAL;
 
-	ret = amdrnpu_buf_map_section(fd, handle, offset, length,
+	ret = amdrnpu_buf_map_section(device_fd, handle, offset, length,
 				      &map, &map_len, &src);
 	if (ret)
 		return ret;
@@ -400,7 +401,7 @@ int amdrnpu_buf_read(int fd, uint32_t handle, void *dst, uint64_t offset,
 	return 0;
 }
 
-int amdrnpu_buf_sync(int fd, uint32_t handle, uint32_t direction,
+int amdrnpu_buf_sync(int device_fd, uint32_t handle, uint32_t direction,
 		     uint64_t offset, uint64_t length)
 {
 	struct dma_buf_sync arg;
@@ -410,7 +411,7 @@ int amdrnpu_buf_sync(int fd, uint32_t handle, uint32_t direction,
 	(void)length; /* reserved */
 
 	AMDRNPU_TRACE2(buf_sync_enter, handle, (int)direction);
-	if (!amdrnpu_reg_lookup(fd, handle, &dmabuf_fd, NULL))
+	if (!amdrnpu_reg_lookup(device_fd, handle, &dmabuf_fd, NULL))
 		AMDRNPU_TRACE_RET(buf_sync_exit, -ENOENT);
 
 	memset(&arg, 0, sizeof(arg));
@@ -426,7 +427,7 @@ int amdrnpu_buf_sync(int fd, uint32_t handle, uint32_t direction,
 	AMDRNPU_TRACE_RET(buf_sync_exit, 0);
 }
 
-int amdrnpu_cmd_submit(int fd, uint32_t command_op,
+int amdrnpu_cmd_submit(int device_fd, uint32_t command_op,
 		       const struct amdrnpu_arg *args, uint32_t num_args,
 		       struct amdrnpu_cmd_submit *hdr_out, size_t hdr_out_sz)
 {
@@ -454,7 +455,7 @@ int amdrnpu_cmd_submit(int fd, uint32_t command_op,
 		memcpy(cmd->args, args,
 		       (size_t)num_args * sizeof(struct amdrnpu_arg));
 
-	if (ioctl(fd, AMDRNPU_CMD_SUBMIT, buf)) {
+	if (ioctl(device_fd, AMDRNPU_CMD_SUBMIT, buf)) {
 		int e = -errno;
 
 		free(buf);
@@ -466,10 +467,10 @@ int amdrnpu_cmd_submit(int fd, uint32_t command_op,
 	AMDRNPU_TRACE_RET(cmd_submit_exit, 0);
 }
 
-int amdrnpu_syncobj_fence_status(int fd, uint32_t syncobj_handle,
+int amdrnpu_syncobj_fence_status(int device_fd, uint32_t syncobj_handle,
 				 int32_t *out_fence_status)
 {
-	(void)fd; /* reserved: state lives on the sync_file fd */
+	(void)device_fd; /* reserved: state lives on the sync_file device_fd */
 
 	AMDRNPU_TRACE1(fence_status_enter, (int)syncobj_handle);
 	if (!out_fence_status)
@@ -480,12 +481,12 @@ int amdrnpu_syncobj_fence_status(int fd, uint32_t syncobj_handle,
 					       out_fence_status));
 }
 
-int amdrnpu_syncobj_wait_complete(int fd, uint32_t syncobj_handle,
+int amdrnpu_syncobj_wait_complete(int device_fd, uint32_t syncobj_handle,
 				  int64_t timeout_ns, int32_t *out_wait_status)
 {
 	int fence_fd = (int)syncobj_handle;
 
-	(void)fd; /* reserved */
+	(void)device_fd; /* reserved */
 
 	AMDRNPU_TRACE2(wait_complete_enter, fence_fd, (int)timeout_ns);
 	if (!out_wait_status || timeout_ns < 0)
@@ -509,7 +510,7 @@ int amdrnpu_syncobj_wait_complete(int fd, uint32_t syncobj_handle,
 			  amdrnpu_fence_status(fence_fd, out_wait_status));
 }
 
-int amdrnpu_syncobj_wait_busy_poll(int fd, uint32_t syncobj_handle,
+int amdrnpu_syncobj_wait_busy_poll(int device_fd, uint32_t syncobj_handle,
 				   int64_t max_wall_ns, uint64_t interval_ns,
 				   int32_t *out_fence_status)
 {
@@ -521,17 +522,17 @@ int amdrnpu_syncobj_wait_busy_poll(int fd, uint32_t syncobj_handle,
 
 	AMDRNPU_TRACE2(busy_poll_enter, (int)syncobj_handle, (int)interval_ns);
 	AMDRNPU_TRACE_RET(busy_poll_exit,
-			  amdrnpu_syncobj_wait_complete(fd, syncobj_handle,
+			  amdrnpu_syncobj_wait_complete(device_fd, syncobj_handle,
 							max_wall_ns,
 							out_fence_status));
 }
 
-int amdrnpu_syncobj_to_fence_fd(int fd, uint32_t syncobj_handle,
+int amdrnpu_syncobj_to_fence_fd(int device_fd, uint32_t syncobj_handle,
 				int *out_fence_fd)
 {
 	int nf;
 
-	(void)fd; /* reserved */
+	(void)device_fd; /* reserved */
 
 	AMDRNPU_TRACE1(to_fence_fd_enter, (int)syncobj_handle);
 	if (!out_fence_fd)

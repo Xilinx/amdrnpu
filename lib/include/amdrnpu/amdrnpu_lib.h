@@ -49,7 +49,7 @@ extern "C" {
 /**
  * amdrnpu_buf_alloc - allocate a driver-owned buffer; returns an opaque handle.
  *
- * @fd:		open /dev/amdrnpu.N descriptor.
+ * @device_fd:		open /dev/amdrnpu.N descriptor.
  * @memory_type: target memory domain, an enum amdrnpu_memory_type
  *		(AMDRNPU_MEMORY_DEVICE / AMDRNPU_MEMORY_DEFAULT for device
  *		memory, AMDRNPU_MEMORY_RPU for RPU/firmware memory).  The driver
@@ -62,25 +62,25 @@ extern "C" {
  * The library owns the underlying dma-buf fd for the handle; release it with
  * amdrnpu_buf_close().  Returns 0 on success or a negative errno.
  */
-AMDRNPU_LIB_API int amdrnpu_buf_alloc(int fd, uint32_t memory_type,
+AMDRNPU_LIB_API int amdrnpu_buf_alloc(int device_fd, uint32_t memory_type,
 				      uint64_t size, uint32_t *out_handle);
 
 /**
  * amdrnpu_buf_close - release a handle from amdrnpu_buf_alloc().
  *
- * @fd:		open /dev/amdrnpu.N descriptor (same as passed to buf_alloc).
+ * @device_fd:		open /dev/amdrnpu.N descriptor (same as passed to buf_alloc).
  * @handle:	handle returned by amdrnpu_buf_alloc().
  *
  * Drops the driver's import and closes the library-owned dma-buf fd.  If a
  * submitted command still references the buffer, the backing memory stays alive
  * until that command completes.  Returns 0 on success or a negative errno.
  */
-AMDRNPU_LIB_API int amdrnpu_buf_close(int fd, uint32_t handle);
+AMDRNPU_LIB_API int amdrnpu_buf_close(int device_fd, uint32_t handle);
 
 /**
  * amdrnpu_buf_get_phys - return the DMA/physical address of an imported BO.
  *
- * @fd:		open /dev/amdrnpu.N descriptor.
+ * @device_fd:		open /dev/amdrnpu.N descriptor.
  * @handle:	handle from amdrnpu_buf_alloc().
  * @out_pa:	on success, firmware-domain physical address.
  * @out_size:	optional; contiguous mapped size (pass NULL to ignore).
@@ -89,13 +89,13 @@ AMDRNPU_LIB_API int amdrnpu_buf_close(int fd, uint32_t handle);
  * (the driver only rewrites top-level wire BO args, not in-descriptor
  * karg entries).  Returns 0 on success or a negative errno.
  */
-AMDRNPU_LIB_API int amdrnpu_buf_get_phys(int fd, uint32_t handle,
+AMDRNPU_LIB_API int amdrnpu_buf_get_phys(int device_fd, uint32_t handle,
 					 uint64_t *out_pa, uint64_t *out_size);
 
 /**
  * amdrnpu_buf_mmap - CPU-map a (sub)range of a buffer.
  *
- * @fd:		open /dev/amdrnpu.N descriptor (same as passed to buf_alloc).
+ * @device_fd:		open /dev/amdrnpu.N descriptor (same as passed to buf_alloc).
  * @handle:	handle from amdrnpu_buf_alloc().
  * @buf_size:	reserved; the library tracks the allocation size internally and
  *		ignores this argument (pass 0 or the allocation size).
@@ -106,7 +106,7 @@ AMDRNPU_LIB_API int amdrnpu_buf_get_phys(int fd, uint32_t handle,
  * The mapping is PROT_READ|PROT_WRITE, MAP_SHARED on the buffer's dma-buf.
  * Returns 0 on success or a negative errno.
  */
-AMDRNPU_LIB_API int amdrnpu_buf_mmap(int fd, uint32_t handle,
+AMDRNPU_LIB_API int amdrnpu_buf_mmap(int device_fd, uint32_t handle,
 				     uint64_t buf_size,
 				     uint64_t offset, uint64_t length,
 				     void **out_map);
@@ -117,7 +117,7 @@ AMDRNPU_LIB_API void amdrnpu_buf_munmap(void *addr, uint64_t length);
 /**
  * amdrnpu_buf_write - copy bytes from userspace into a buffer.
  *
- * @fd:		open /dev/amdrnpu.N descriptor (same as passed to buf_alloc).
+ * @device_fd:		open /dev/amdrnpu.N descriptor (same as passed to buf_alloc).
  * @handle:	handle from amdrnpu_buf_alloc().
  * @src:	source userspace virtual address.
  * @offset:	byte offset into the buffer at which to start writing.
@@ -127,14 +127,14 @@ AMDRNPU_LIB_API void amdrnpu_buf_munmap(void *addr, uint64_t length);
  * Copies bytes from userspace into a buffer with a temporary CPU mapping and
  * memcpy().  Returns 0 on success or a negative errno.
  */
-AMDRNPU_LIB_API int amdrnpu_buf_write(int fd, uint32_t handle,
+AMDRNPU_LIB_API int amdrnpu_buf_write(int device_fd, uint32_t handle,
 				      const void *src, uint64_t offset,
 				      uint64_t length);
 
 /**
  * amdrnpu_buf_read - copy bytes from a buffer into userspace.
  *
- * @fd:		open /dev/amdrnpu.N descriptor (same as passed to buf_alloc).
+ * @device_fd:		open /dev/amdrnpu.N descriptor (same as passed to buf_alloc).
  * @handle:	handle from amdrnpu_buf_alloc().
  * @dst:	destination userspace virtual address.
  * @offset:	byte offset into the buffer at which to start reading.
@@ -144,13 +144,13 @@ AMDRNPU_LIB_API int amdrnpu_buf_write(int fd, uint32_t handle,
  * Copies bytes from a buffer into userspace with a temporary CPU mapping and
  * memcpy().  Returns 0 on success or a negative errno.
  */
-AMDRNPU_LIB_API int amdrnpu_buf_read(int fd, uint32_t handle, void *dst,
+AMDRNPU_LIB_API int amdrnpu_buf_read(int device_fd, uint32_t handle, void *dst,
 				     uint64_t offset, uint64_t length);
 
 /**
  * amdrnpu_buf_sync - CPU cache maintenance around device DMA.
  *
- * @fd:		open /dev/amdrnpu.N descriptor (same as passed to buf_alloc).
+ * @device_fd:		open /dev/amdrnpu.N descriptor (same as passed to buf_alloc).
  * @handle:	handle from amdrnpu_buf_alloc().
  * @direction:	AMDRNPU_BUF_SYNC_TO_DEVICE (flush CPU writes) or
  *		AMDRNPU_BUF_SYNC_FROM_DEVICE (invalidate before CPU read).
@@ -161,23 +161,23 @@ AMDRNPU_LIB_API int amdrnpu_buf_read(int fd, uint32_t handle, void *dst,
  * Issues DMA_BUF_IOCTL_SYNC on the buffer's dma-buf fd.  Returns 0 on success
  * or a negative errno.
  */
-AMDRNPU_LIB_API int amdrnpu_buf_sync(int fd, uint32_t handle,
+AMDRNPU_LIB_API int amdrnpu_buf_sync(int device_fd, uint32_t handle,
 				     uint32_t direction,
 				     uint64_t offset, uint64_t length);
 
 /** Flush a CPU-written buffer so device DMA sees it. */
-static inline int amdrnpu_buf_sync_to_device(int fd, uint32_t handle,
+static inline int amdrnpu_buf_sync_to_device(int device_fd, uint32_t handle,
 					     uint64_t offset, uint64_t length)
 {
-	return amdrnpu_buf_sync(fd, handle,
+	return amdrnpu_buf_sync(device_fd, handle,
 				AMDRNPU_BUF_SYNC_TO_DEVICE, offset, length);
 }
 
 /** Invalidate a buffer after device DMA before the CPU reads it. */
-static inline int amdrnpu_buf_sync_from_device(int fd, uint32_t handle,
+static inline int amdrnpu_buf_sync_from_device(int device_fd, uint32_t handle,
 					       uint64_t offset, uint64_t length)
 {
-	return amdrnpu_buf_sync(fd, handle,
+	return amdrnpu_buf_sync(device_fd, handle,
 				AMDRNPU_BUF_SYNC_FROM_DEVICE, offset, length);
 }
 
@@ -188,7 +188,7 @@ static inline int amdrnpu_buf_sync_from_device(int fd, uint32_t handle,
  * @args[0 .. @num_args-1] (scalar args with @size == 0, buffer args with
  * @size != 0 referencing a handle from amdrnpu_buf_alloc()).
  *
- * @fd:		open /dev/amdrnpu.N descriptor.
+ * @device_fd:		open /dev/amdrnpu.N descriptor.
  * @hdr_out:	receives the returned header (at least the fixed part); on
  *		success @hdr_out->sync_handle is a sync_file fd the caller owns.
  * @hdr_out_sz:	size of @hdr_out; must be >= offsetof(..., args).
@@ -197,7 +197,7 @@ static inline int amdrnpu_buf_sync_from_device(int fd, uint32_t handle,
  * @hdr_out->sync_handle), then close(2) the fd.  Returns 0 on success or a
  * negative errno.
  */
-AMDRNPU_LIB_API int amdrnpu_cmd_submit(int fd,
+AMDRNPU_LIB_API int amdrnpu_cmd_submit(int device_fd,
 				       uint32_t command_op,
 				       const struct amdrnpu_arg *args,
 				       uint32_t num_args,
@@ -207,7 +207,7 @@ AMDRNPU_LIB_API int amdrnpu_cmd_submit(int fd,
 /**
  * amdrnpu_syncobj_wait_complete - wait for or probe a submission's completion.
  *
- * @fd:		reserved; the completion handle carries the state, so the device
+ * @device_fd:		reserved; the completion handle carries the state, so the device
  *		fd is not needed and this argument is ignored.
  * @syncobj_handle: the sync_file fd returned in amdrnpu_cmd_submit()'s
  *		@hdr_out->sync_handle.
@@ -221,7 +221,7 @@ AMDRNPU_LIB_API int amdrnpu_cmd_submit(int fd,
  * status was written (including a still-pending probe), -ETIMEDOUT if the
  * deadline expired while pending, or a negative errno on failure.
  */
-AMDRNPU_LIB_API int amdrnpu_syncobj_wait_complete(int fd,
+AMDRNPU_LIB_API int amdrnpu_syncobj_wait_complete(int device_fd,
 						  uint32_t syncobj_handle,
 						  int64_t timeout_ns,
 						  int32_t *out_wait_status);
@@ -229,14 +229,14 @@ AMDRNPU_LIB_API int amdrnpu_syncobj_wait_complete(int fd,
 /**
  * amdrnpu_syncobj_fence_status - non-blocking completion status query.
  *
- * @fd:		reserved; ignored (see amdrnpu_syncobj_wait_complete()).
+ * @device_fd:		reserved; ignored (see amdrnpu_syncobj_wait_complete()).
  * @syncobj_handle: the sync_file fd from amdrnpu_cmd_submit().
  * @out_fence_status: >0 signalled, 0 pending, <0 fence errno.
  *
  * Does not close the handle.  Safe in a polling loop.  Returns 0 on a
  * successful query or a negative errno on failure.
  */
-AMDRNPU_LIB_API int amdrnpu_syncobj_fence_status(int fd,
+AMDRNPU_LIB_API int amdrnpu_syncobj_fence_status(int device_fd,
 						 uint32_t syncobj_handle,
 						 int32_t *out_fence_status);
 
@@ -246,7 +246,7 @@ AMDRNPU_LIB_API int amdrnpu_syncobj_fence_status(int fd,
  * No way to query command status ahead of the response message yet, so there
  * is nothing to busy-poll; prefer amdrnpu_syncobj_wait_complete() directly.
  *
- * @fd:		reserved; ignored (see amdrnpu_syncobj_wait_complete()).
+ * @device_fd:		reserved; ignored (see amdrnpu_syncobj_wait_complete()).
  * @syncobj_handle: the sync_file fd from amdrnpu_cmd_submit().
  * @max_wall_ns: forwarded as amdrnpu_syncobj_wait_complete()'s @timeout_ns.
  * @interval_ns: reserved; ignored (no dedicated busy-poll path yet).
@@ -254,7 +254,7 @@ AMDRNPU_LIB_API int amdrnpu_syncobj_fence_status(int fd,
  *
  * Does not close the handle.  Returns 0 on success or a negative errno.
  */
-AMDRNPU_LIB_API int amdrnpu_syncobj_wait_busy_poll(int fd,
+AMDRNPU_LIB_API int amdrnpu_syncobj_wait_busy_poll(int device_fd,
 						   uint32_t syncobj_handle,
 						   int64_t max_wall_ns,
 						   uint64_t interval_ns,
@@ -263,7 +263,7 @@ AMDRNPU_LIB_API int amdrnpu_syncobj_wait_busy_poll(int fd,
 /**
  * amdrnpu_syncobj_to_fence_fd - obtain a poll(2)-able fence fd for a submission.
  *
- * @fd:		reserved; ignored (see amdrnpu_syncobj_wait_complete()).
+ * @device_fd:		reserved; ignored (see amdrnpu_syncobj_wait_complete()).
  * @syncobj_handle: the sync_file fd from amdrnpu_cmd_submit().
  * @out_fence_fd: on success, a new fd (dup, O_CLOEXEC) the caller must close.
  *
@@ -271,7 +271,7 @@ AMDRNPU_LIB_API int amdrnpu_syncobj_wait_busy_poll(int fd,
  * duplicate suitable for a blocking poll(2).  Returns 0 on success or a
  * negative errno.
  */
-AMDRNPU_LIB_API int amdrnpu_syncobj_to_fence_fd(int fd,
+AMDRNPU_LIB_API int amdrnpu_syncobj_to_fence_fd(int device_fd,
 						uint32_t syncobj_handle,
 						int *out_fence_fd);
 

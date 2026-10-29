@@ -204,19 +204,19 @@ enum amdrnpu_memory_type {
  * @flags:	reserved, must be 0.
  * @handle:	out; must be 0 on entry.  Buffer handle, same namespace and
  *		semantics as one returned by AMDRNPU_BUF_IMPORT.
- * @fd:		out; must be 0 on entry.  dma-buf fd exported by the driver for
- *		CPU access (mmap(2), DMA_BUF_IOCTL_SYNC) and sharing.
+ * @dmabuf_fd:	out; must be 0 on entry.  dma-buf fd exported by the driver
+ *		for CPU access (mmap(2), DMA_BUF_IOCTL_SYNC) and sharing.
  *
  * The memory is freed once both @handle has been released (AMDRNPU_BUF_DESTROY
- * or closing the device fd) and every reference to the dma-buf (@fd, mappings,
- * other importers) is gone.
+ * or closing the device fd) and every reference to the dma-buf (@dmabuf_fd,
+ * mappings, other importers) is gone.
  */
 struct amdrnpu_buf_alloc {
 	__u64 size;
 	__u32 memory_type;
 	__u32 flags;
 	__u32 handle;
-	__s32 fd;
+	__s32 dmabuf_fd;
 };
 
 #define AMDRNPU_BUF_ALLOC \

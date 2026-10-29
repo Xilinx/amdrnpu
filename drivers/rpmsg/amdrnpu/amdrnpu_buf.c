@@ -314,11 +314,11 @@ int amdrnpu_ioctl_buf_alloc(struct amdrnpu_client *client, void __user *uarg)
 	struct dma_buf *dmabuf;
 	struct amdrnpu_bo *bo;
 	u32 handle;
-	int fd, ret;
+	int dmabuf_fd, ret;
 
 	if (copy_from_user(&arg, uarg, sizeof(arg)))
 		return -EFAULT;
-	if (arg.flags || arg.handle || arg.fd)
+	if (arg.flags || arg.handle || arg.dmabuf_fd)
 		return -EINVAL;
 	if (!arg.size || arg.size > AMDRNPU_BUF_ALLOC_MAX)
 		return -EINVAL;
@@ -366,9 +366,9 @@ int amdrnpu_ioctl_buf_alloc(struct amdrnpu_client *client, void __user *uarg)
 	buf->size = bo->size;
 	kref_init(&buf->ref);
 
-	fd = get_unused_fd_flags(O_CLOEXEC);
-	if (fd < 0) {
-		ret = fd;
+	dmabuf_fd = get_unused_fd_flags(O_CLOEXEC);
+	if (dmabuf_fd < 0) {
+		ret = dmabuf_fd;
 		goto err_put_buf;
 	}
 
@@ -377,7 +377,7 @@ int amdrnpu_ioctl_buf_alloc(struct amdrnpu_client *client, void __user *uarg)
 		goto err_put_fd;
 
 	arg.handle = handle;
-	arg.fd = fd;
+	arg.dmabuf_fd = dmabuf_fd;
 	if (copy_to_user(uarg, &arg, sizeof(arg))) {
 		/* A racing AMDRNPU_BUF_DESTROY may already have dropped it. */
 		if (xa_cmpxchg(&client->buf_xa, handle, buf, NULL,
@@ -387,11 +387,11 @@ int amdrnpu_ioctl_buf_alloc(struct amdrnpu_client *client, void __user *uarg)
 		goto err_put_fd;
 	}
 
-	fd_install(fd, dmabuf->file);
+	fd_install(dmabuf_fd, dmabuf->file);
 	return 0;
 
 err_put_fd:
-	put_unused_fd(fd);
+	put_unused_fd(dmabuf_fd);
 err_put_buf:
 	if (buf)
 		amdrnpu_buf_put(buf);

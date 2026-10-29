@@ -178,7 +178,7 @@ static int open_amdrnpu_scan(const char *want, char *out_path,
 
 	while ((e = readdir(dir)) != NULL) {
 		long n;
-		int fd;
+		int device_fd;
 		char p[PATH_MAX];
 
 		if (strncmp(e->d_name, "amdrnpu.", 8) != 0)
@@ -191,13 +191,13 @@ static int open_amdrnpu_scan(const char *want, char *out_path,
 		if (n < 0 || n >= best)
 			continue;
 		snprintf(p, sizeof(p), "/dev/%s", e->d_name);
-		fd = open(p, O_RDWR | O_CLOEXEC);
-		if (fd < 0)
+		device_fd = open(p, O_RDWR | O_CLOEXEC);
+		if (device_fd < 0)
 			continue;
 		if (best_fd >= 0)
 			close(best_fd);
 		best = n;
-		best_fd = fd;
+		best_fd = device_fd;
 		snprintf(best_path, sizeof(best_path), "%s", p);
 	}
 	closedir(dir);
@@ -213,20 +213,20 @@ static int open_amdrnpu_scan(const char *want, char *out_path,
  */
 static int open_amdrnpu_device(const char *path, char *opened_path, size_t sz)
 {
-	int fd;
+	int device_fd;
 
 	if (path && path[0]) {
-		fd = open_amdrnpu_scan(path, opened_path, sz);
-		if (fd < 0)
+		device_fd = open_amdrnpu_scan(path, opened_path, sz);
+		if (device_fd < 0)
 			fprintf(stderr, "%s: not an accessible /dev/amdrnpu.N node\n",
 				path);
-		return fd;
+		return device_fd;
 	}
-	fd = open_amdrnpu_scan(NULL, opened_path, sz);
-	if (fd < 0)
+	device_fd = open_amdrnpu_scan(NULL, opened_path, sz);
+	if (device_fd < 0)
 		fprintf(stderr,
 			"no /dev/amdrnpu.* node found; pass --device explicitly\n");
-	return fd;
+	return device_fd;
 }
 
 /* ------------------------------------------------------------------ */
@@ -239,7 +239,7 @@ static int do_device(const char *opened_path)
 	return 0;
 }
 
-static int do_buf_alloc(int fd, int argc, char **argv)
+static int do_buf_alloc(int device_fd, int argc, char **argv)
 {
 	uint32_t mtype, handle = 0;
 	uint64_t size;
@@ -255,18 +255,18 @@ static int do_buf_alloc(int fd, int argc, char **argv)
 
 	printf("buf_alloc type=%s size=%" PRIu64 "\n",
 	       memory_type_str(mtype), size);
-	rc = amdrnpu_buf_alloc(fd, mtype, size, &handle);
+	rc = amdrnpu_buf_alloc(device_fd, mtype, size, &handle);
 	if (rc)
 		return report("buf_alloc", rc);
 	printf("  -> buffer_handle=%u\n", handle);
-	rc = amdrnpu_buf_close(fd, handle);
+	rc = amdrnpu_buf_close(device_fd, handle);
 	if (rc)
 		return report("buf_close (cleanup)", rc);
 	printf("  -> closed\n");
 	return 0;
 }
 
-static int do_cmd_submit(int fd, int argc, char **argv)
+static int do_cmd_submit(int device_fd, int argc, char **argv)
 {
 	struct amdrnpu_arg args[16];
 	struct amdrnpu_cmd_submit hdr;
@@ -292,7 +292,7 @@ static int do_cmd_submit(int fd, int argc, char **argv)
 
 	memset(&hdr, 0, sizeof(hdr));
 	printf("Sending AMDRNPU_CMD_SUBMIT op=0x%08x num_args=%d\n", op, n);
-	rc = amdrnpu_cmd_submit(fd, op, args, (uint32_t)n,
+	rc = amdrnpu_cmd_submit(device_fd, op, args, (uint32_t)n,
 				     &hdr, sizeof(hdr));
 	if (rc)
 		return report("cmd_submit", rc);
@@ -301,7 +301,7 @@ static int do_cmd_submit(int fd, int argc, char **argv)
 	return 0;
 }
 
-static int do_syncobj_wait(int fd, int argc, char **argv)
+static int do_syncobj_wait(int device_fd, int argc, char **argv)
 {
 	uint32_t handle;
 	int64_t timeout_ns = AMDRNPU_DEFAULT_WAIT_NS;
@@ -318,7 +318,7 @@ static int do_syncobj_wait(int fd, int argc, char **argv)
 
 	printf("Waiting on completion handle=%u timeout_ns=%" PRId64 "\n",
 	       handle, timeout_ns);
-	rc = amdrnpu_syncobj_wait_complete(fd, handle, timeout_ns, &status);
+	rc = amdrnpu_syncobj_wait_complete(device_fd, handle, timeout_ns, &status);
 	if (rc)
 		return report("syncobj_wait", rc);
 	printf("  -> status=%" PRId32
@@ -338,7 +338,7 @@ static int do_syncobj_wait(int fd, int argc, char **argv)
  * Cleanup is best-effort: we tear down both BOs even on failure so we
  * don't leak buffer handles between runs.
  */
-static int do_fw_echo(int fd, int argc, char **argv)
+static int do_fw_echo(int device_fd, int argc, char **argv)
 {
 	uint32_t rsp_bo = 0, extra_bo = 0;
 	void *map = MAP_FAILED;
@@ -360,13 +360,13 @@ static int do_fw_echo(int fd, int argc, char **argv)
 	       v1, v2);
 
 	printf("[1/8] buf_alloc rpu rsp size=%u\n", AMDRNPU_FW_RSP_BO_SIZE);
-	rc = amdrnpu_buf_alloc(fd, AMDRNPU_MEMORY_RPU,
+	rc = amdrnpu_buf_alloc(device_fd, AMDRNPU_MEMORY_RPU,
 				    AMDRNPU_FW_RSP_BO_SIZE, &rsp_bo);
 	if (rc) { ret = report("buf_alloc(rpu)", rc); goto out; }
 	printf("      -> rsp_bo=%u\n", rsp_bo);
 
 	printf("[2/8] buf_alloc device extra size=%u\n", AMDRNPU_FW_EXTRA_BO_SIZE);
-	rc = amdrnpu_buf_alloc(fd, AMDRNPU_MEMORY_DEVICE,
+	rc = amdrnpu_buf_alloc(device_fd, AMDRNPU_MEMORY_DEVICE,
 				    AMDRNPU_FW_EXTRA_BO_SIZE, &extra_bo);
 	if (rc) { ret = report("buf_alloc(device)", rc); goto out; }
 	printf("      -> extra_bo=%u\n", extra_bo);
@@ -374,7 +374,7 @@ static int do_fw_echo(int fd, int argc, char **argv)
 	/* CPU-map the response BO via the library (mmap on the buffer's
 	 * dma-buf).  offset=0, length=0 maps the whole allocation.
 	 */
-	rc = amdrnpu_buf_mmap(fd, rsp_bo, 0, 0, 0, &map);
+	rc = amdrnpu_buf_mmap(device_fd, rsp_bo, 0, 0, 0, &map);
 	if (rc) {
 		ret = report("buf_mmap(rsp_bo)", rc);
 		map = MAP_FAILED;
@@ -401,9 +401,9 @@ static int do_fw_echo(int fd, int argc, char **argv)
 	 *         but exercises the contract.
 	 */
 	printf("[4/8] buf_sync TO_DEVICE (rsp_bo canary + extra_bo)\n");
-	rc = amdrnpu_buf_sync_to_device(fd, rsp_bo, 0, 0);
+	rc = amdrnpu_buf_sync_to_device(device_fd, rsp_bo, 0, 0);
 	if (rc) { ret = report("buf_sync(rsp_bo, to_device)", rc); goto out; }
-	rc = amdrnpu_buf_sync_to_device(fd, extra_bo, 0, 0);
+	rc = amdrnpu_buf_sync_to_device(device_fd, extra_bo, 0, 0);
 	if (rc) { ret = report("buf_sync(extra_bo, to_device)", rc); goto out; }
 
 	memset(args, 0, sizeof(args));
@@ -420,7 +420,7 @@ static int do_fw_echo(int fd, int argc, char **argv)
 
 	memset(&hdr, 0, sizeof(hdr));
 	printf("[5/8] cmd_submit op=0x%08x num_args=4\n", AMDRNPU_FW_ECHO_OP);
-	rc = amdrnpu_cmd_submit(fd, AMDRNPU_FW_ECHO_OP, args, 4,
+	rc = amdrnpu_cmd_submit(device_fd, AMDRNPU_FW_ECHO_OP, args, 4,
 				     &hdr, sizeof(hdr));
 	if (rc) { ret = report("cmd_submit", rc); goto out; }
 	printf("      -> syncobj_handle=%d\n", hdr.sync_handle);
@@ -428,7 +428,7 @@ static int do_fw_echo(int fd, int argc, char **argv)
 	printf("[6/8] syncobj_wait (timeout=%" PRId64 "ns)\n",
 	       AMDRNPU_DEFAULT_WAIT_NS);
 	rc = amdrnpu_syncobj_wait_complete(
-		fd, (uint32_t)hdr.sync_handle,
+		device_fd, (uint32_t)hdr.sync_handle,
 		AMDRNPU_DEFAULT_WAIT_NS, &fence_st);
 	if (rc) { ret = report("syncobj_wait", rc); goto out; }
 	printf("      -> fence_status=%" PRId32 "\n", fence_st);
@@ -452,7 +452,7 @@ static int do_fw_echo(int fd, int argc, char **argv)
 	 * before sscanf so we read the freshly-DMA'd ASCII reply.
 	 */
 	printf("[7/8] buf_sync FROM_DEVICE (invalidate CPU view)\n");
-	rc = amdrnpu_buf_sync_from_device(fd, rsp_bo, 0, 0);
+	rc = amdrnpu_buf_sync_from_device(device_fd, rsp_bo, 0, 0);
 	if (rc) { ret = report("buf_sync(from_device)", rc); goto out; }
 
 	printf("[8/8] parse RPU reply\n");
@@ -479,9 +479,9 @@ out:
 	if (map != MAP_FAILED)
 		amdrnpu_buf_munmap(map, AMDRNPU_FW_RSP_BO_SIZE);
 	if (extra_bo)
-		(void)amdrnpu_buf_close(fd, extra_bo);
+		(void)amdrnpu_buf_close(device_fd, extra_bo);
 	if (rsp_bo)
-		(void)amdrnpu_buf_close(fd, rsp_bo);
+		(void)amdrnpu_buf_close(device_fd, rsp_bo);
 	if (ret == 0)
 		printf("=== fw_echo: PASSED ===\n");
 	else
@@ -496,7 +496,7 @@ out:
  * "is the driver alive?" smoke test that doesn't require firmware
  * cooperation beyond signaling completion.
  */
-static int do_lifecycle(int fd)
+static int do_lifecycle(int device_fd)
 {
 	uint32_t bo = 0;
 	struct amdrnpu_cmd_submit hdr;
@@ -506,20 +506,20 @@ static int do_lifecycle(int fd)
 	printf("=== lifecycle: alloc + no-op submit + wait + close ===\n");
 
 	printf("[1/4] buf_alloc device size=4096\n");
-	rc = amdrnpu_buf_alloc(fd, AMDRNPU_MEMORY_DEVICE, 4096, &bo);
+	rc = amdrnpu_buf_alloc(device_fd, AMDRNPU_MEMORY_DEVICE, 4096, &bo);
 	if (rc) { ret = report("buf_alloc", rc); goto out; }
 	printf("      -> bo=%u\n", bo);
 
 	memset(&hdr, 0, sizeof(hdr));
 	printf("[2/4] cmd_submit op=0 num_args=0 (no-op)\n");
-	rc = amdrnpu_cmd_submit(fd, 0, NULL, 0, &hdr, sizeof(hdr));
+	rc = amdrnpu_cmd_submit(device_fd, 0, NULL, 0, &hdr, sizeof(hdr));
 	if (rc) { ret = report("cmd_submit", rc); goto out; }
 	printf("      -> syncobj_handle=%d\n", hdr.sync_handle);
 
 	printf("[3/4] syncobj_wait (timeout=%" PRId64 "ns)\n",
 	       AMDRNPU_DEFAULT_WAIT_NS);
 	rc = amdrnpu_syncobj_wait_complete(
-		fd, (uint32_t)hdr.sync_handle,
+		device_fd, (uint32_t)hdr.sync_handle,
 		AMDRNPU_DEFAULT_WAIT_NS, &fence_st);
 	if (rc) {
 		/* A no-op submit may not be honored by every firmware build;
@@ -534,7 +534,7 @@ static int do_lifecycle(int fd)
 out:
 	if (bo) {
 		printf("[4/4] buf_close bo=%u\n", bo);
-		int rc2 = amdrnpu_buf_close(fd, bo);
+		int rc2 = amdrnpu_buf_close(device_fd, bo);
 		if (rc2)
 			(void)report("buf_close (cleanup)", rc2);
 	}
@@ -572,7 +572,7 @@ int main(int argc, char **argv)
 	const char *path = NULL;
 	char opened_path[PATH_MAX] = {0};
 	int idx = 1;
-	int fd, rc;
+	int device_fd, rc;
 	const char *cmd;
 	char **rest;
 	int nrest;
@@ -600,8 +600,8 @@ int main(int argc, char **argv)
 		return 2;
 	}
 
-	fd = open_amdrnpu_device(path, opened_path, sizeof(opened_path));
-	if (fd < 0)
+	device_fd = open_amdrnpu_device(path, opened_path, sizeof(opened_path));
+	if (device_fd < 0)
 		return 1;
 
 	cmd = argv[idx];
@@ -609,17 +609,17 @@ int main(int argc, char **argv)
 	nrest = argc - idx - 1;
 
 	if      (strcmp(cmd, "device")       == 0) rc = do_device(opened_path);
-	else if (strcmp(cmd, "buf_alloc")    == 0) rc = do_buf_alloc(fd, nrest, rest);
-	else if (strcmp(cmd, "cmd_submit")   == 0) rc = do_cmd_submit(fd, nrest, rest);
-	else if (strcmp(cmd, "syncobj_wait") == 0) rc = do_syncobj_wait(fd, nrest, rest);
-	else if (strcmp(cmd, "fw_echo")      == 0) rc = do_fw_echo(fd, nrest, rest);
-	else if (strcmp(cmd, "lifecycle")    == 0) rc = do_lifecycle(fd);
+	else if (strcmp(cmd, "buf_alloc")    == 0) rc = do_buf_alloc(device_fd, nrest, rest);
+	else if (strcmp(cmd, "cmd_submit")   == 0) rc = do_cmd_submit(device_fd, nrest, rest);
+	else if (strcmp(cmd, "syncobj_wait") == 0) rc = do_syncobj_wait(device_fd, nrest, rest);
+	else if (strcmp(cmd, "fw_echo")      == 0) rc = do_fw_echo(device_fd, nrest, rest);
+	else if (strcmp(cmd, "lifecycle")    == 0) rc = do_lifecycle(device_fd);
 	else {
 		fprintf(stderr, "Unknown command: %s\n", cmd);
 		usage(argv[0]);
 		rc = 2;
 	}
 
-	close(fd);
+	close(device_fd);
 	return rc;
 }
