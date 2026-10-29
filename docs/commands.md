@@ -147,7 +147,7 @@ Variable-length ioctl payload: the **UAPI** type is
 Firmware opcodes and scalar tags are defined by the RPU image; the
 pattern below matches a common six-argument layout (tag + size + buffer
 slice per direction). `bo0_hd` / `bo1_hd` are handles from
-`AMDRNPU_BUF_IMPORT` on the same device fd.
+`AMDRNPU_BUF_ALLOC` (or `AMDRNPU_BUF_IMPORT`) on the same device fd.
 
 ```c
 #define OP_CODE_CMD0  0x00000001u

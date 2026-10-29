@@ -30,9 +30,10 @@ Rebuild and load via remoteproc after updating the ELF on the target.
 ## Linux
 
 - `amdrnpu.ko` loaded and bound to the `amdrnpu` RPMsg channel
-- An RPU-reachable, contiguous dma-buf heap for the RPU buffers (e.g. backed
-  by `rpu_gem_cma@20000000` at `0x20000000`, 512 MiB, in the official
-  Versal-net layout)
+- An RPU-reachable `shared-dma-pool` reserved-memory region for the RPU
+  buffers. The driver uses `rpu_gem_cma` by default (`rpu_gem_cma@20000000`
+  at `0x20000000`, 512 MiB, in the official Versal-net layout); choose a
+  different node with `/sys/kernel/config/amdrnpu/rpu_region`.
 - Demo allocates **both buffers as RPU BOs** (`AMDRNPU_MEMORY_RPU`) so firmware can
   access the resolved physical addresses.
 - Example opens **`/dev/amdrnpu.N`** (the driver is a miscdevice); CPU mapping is

@@ -1,4 +1,4 @@
-# Platform integration (device tree & dma-buf heaps)
+# Platform integration (device tree & reserved memory)
 
 **`amdrnpu` has no device-tree binding of its own.** It is a pure rpmsg
 client: the module registers one `rpmsg_driver` whose `id_table` matches
@@ -14,7 +14,9 @@ platform infrastructure the driver *depends on*:
 1. the **remoteproc** (R5F) node and its firmware, which brings up the
    rpmsg channel;
 2. the **OpenAMP reserved-memory** used by the rpmsg transport; and
-3. the **dma-buf heaps** userspace allocates command buffers from.
+3. the **reserved-memory regions** the driver allocates command buffers
+   from (`AMDRNPU_BUF_ALLOC`). The driver finds these by node name; it
+   does not need any properties or nodes of its own added to the DT.
 
 ---
 
@@ -25,13 +27,13 @@ flowchart TB
     subgraph DT["Device tree"]
         RPROC["remoteproc R5F node<br/>(e.g. xlnx,zynqmp-r5f)<br/>firmware-name, mboxes, ..."]
         RMEM["reserved-memory<br/>(OpenAMP vrings + resource table)"]
-        HEAPS["dma-buf heap sources<br/>(reserved-memory pools /<br/>system heap)"]
+        POOLS["reserved-memory pools<br/>rpu_gem_cma@..., buffer@..."]
     end
 
     subgraph KERN["Kernel"]
         RP["remoteproc + rpmsg core"]
         RDR["amdrnpu rpmsg_driver"]
-        HEAPDEV["/dev/dma_heap/*"]
+        CFG["configfs<br/>amdrnpu/{rpu,device}_region"]
     end
 
     subgraph USER["User space"]
@@ -41,16 +43,17 @@ flowchart TB
     RPROC --> RP
     RMEM -. vrings .-> RP
     RP -- "channel 'amdrnpu'" --> RDR
-    HEAPS --> HEAPDEV
-    APP -- "alloc dma-buf" --> HEAPDEV
-    APP -- "BUF_IMPORT(fd)" --> RDR
+    CFG -- "region names" --> RDR
+    POOLS -- "looked up by node name" --> RDR
+    APP -- "BUF_ALLOC(memory_type)" --> RDR
 ```
 
 The driver walks up from the bound rpmsg channel to the first ancestor
-device with a DT node — that is the **remoteproc device** — and uses it
-as the DMA domain for firmware-visible buffers
-(`AMDRNPU_BUF_IMPORT_FW`). Everything else about placement comes from the
-heap the buffer was allocated from.
+device with a DT node — that is the **remoteproc device** — and uses its
+DMA configuration for firmware-visible buffers (`AMDRNPU_MEMORY_RPU`
+allocations and `AMDRNPU_BUF_IMPORT_FW` imports). Physical placement of
+an allocated buffer comes from the region configured for its memory
+type (§4).
 
 ---
 
@@ -68,8 +71,8 @@ Requirements:
   channel (`amdrnpu_ept.c` in the RPU firmware).
 - The remoteproc node must have an `of_node` (it does, being a DT
   device) so the driver can resolve the firmware DMA domain by walking
-  the rpmsg parent chain. On non-DT platforms, `AMDRNPU_BUF_IMPORT_FW`
-  imports fail with `-ENODEV`.
+  the rpmsg parent chain. On non-DT platforms, `AMDRNPU_MEMORY_RPU`
+  allocations and `AMDRNPU_BUF_IMPORT_FW` imports fail with `-ENODEV`.
 
 Multiple R5Fs each advertising the channel produce multiple
 `/dev/amdrnpu.N` nodes, indexed in bind order by a module-global
@@ -96,29 +99,35 @@ These addresses must match the RPU firmware's OpenAMP overlay.
 
 ---
 
-## 4. Command buffers come from dma-buf heaps
+## 4. Command buffers come from reserved-memory regions
 
-The driver imports buffers; it never allocates them. Userspace obtains a
-dma-buf from a **dma-buf heap** and imports the fd with
-`AMDRNPU_BUF_IMPORT`. The imported buffer must be **physically
-contiguous** (the driver rejects a scattered SG table), and to be
-usable by the RPU it must live in an RPU-reachable region.
+`AMDRNPU_BUF_ALLOC` (and so the library's `amdrnpu_buf_alloc()`)
+allocates each buffer from one `shared-dma-pool` node under
+`/reserved-memory`, chosen by memory type:
 
-Two DMA domains exist, selected by the import `flags`:
+| `memory_type` | configfs attribute | Default node name | DMA domain |
+|---|---|---|---|
+| `AMDRNPU_MEMORY_RPU` | `/sys/kernel/config/amdrnpu/rpu_region` | `rpu_gem_cma` | remoteproc device's DMA configuration, 32-bit mask |
+| `AMDRNPU_MEMORY_DEVICE` | `/sys/kernel/config/amdrnpu/device_region` | `buffer` | 64-bit mask |
 
-| `flags` | Attach device | Placement source |
-|---------|---------------|------------------|
-| `AMDRNPU_BUF_IMPORT_DEVICE` (0) | accelerator misc device (64-bit mask) | the device-visible heap |
-| `AMDRNPU_BUF_IMPORT_FW` (`1<<0`) | remoteproc device | an RPU-reachable heap |
+The lookup is by **node name**, not label or phandle, so no DT changes
+are needed. A name without a unit address matches any unit address
+(`rpu_gem_cma` matches `rpu_gem_cma@20000000`); if more than one node
+matches, write the full name (`name@address`). A region is bound on the
+first allocation of its type, and its attribute returns `-EBUSY` on
+write from then until the device is released.
 
-The library's `amdrnpu_buf_alloc()` selects the matching heap and import
-flag for `AMDRNPU_MEMORY_RPU` vs `AMDRNPU_MEMORY_DEVICE`.
+Requirements on each region:
 
-### Reserved-memory-backed heaps
+- `compatible = "shared-dma-pool"`, either `reusable` (CMA) or `no-map`.
+  Allocations are physically contiguous in both cases.
+- For the RPU region: below 4 GiB, and inside the span the RPU
+  firmware's MPU/MMU maps, so the RPU can dereference the address it is
+  given.
+- Don't point a region at memory something else owns exclusively, such
+  as the firmware's own carveouts.
 
-An RPU-reachable, contiguous pool is typically exposed as a dma-buf
-heap. For example, a `shared-dma-pool` reserved-memory region that the
-RPU firmware also maps (its MPU/MMU must cover the same physical span):
+For example, the VEK385 layout these defaults match:
 
 ```dts
 reserved-memory {
@@ -126,40 +135,51 @@ reserved-memory {
     #size-cells = <2>;
     ranges;
 
-    /*
-     * RPU-reachable contiguous pool (below 4 GiB). Exposed to userspace
-     * as a dma-buf heap; buffers allocated here are imported with
-     * AMDRNPU_BUF_IMPORT_FW so the RPU can dereference their DMA address.
-     */
-    rpu_reserved@20000000 {
+    /* AMDRNPU_MEMORY_RPU: RPU-reachable pool below 4 GiB. */
+    rpu_gem_cma@20000000 {
         compatible = "shared-dma-pool";
         reusable;
         reg = <0x0 0x20000000 0x0 0x20000000>; /* 512 MiB */
     };
+
+    /* AMDRNPU_MEMORY_DEVICE: high-DDR pool. */
+    buffer@50000000000 {
+        compatible = "shared-dma-pool";
+        reusable;
+        linux,cma-default;
+        reg = <0x500 0x00000000 0x2 0x00000000>; /* 8 GiB */
+    };
 };
 ```
 
-How a reserved-memory region becomes a `/dev/dma_heap/*` node is
-platform-specific (e.g. a CMA heap or a dedicated reserved-memory heap
-exporter). The key contract for `amdrnpu` is only that the resulting
-dma-buf is **physically contiguous** and, for firmware use,
-**RPU-reachable**.
+Buffers brought in with `AMDRNPU_BUF_IMPORT` don't use these regions;
+their exporter decides placement. An imported buffer must be
+**physically contiguous** (the driver rejects a scattered SG table) and,
+for firmware use (`AMDRNPU_BUF_IMPORT_FW`), **RPU-reachable**.
 
 ---
 
 ## 5. Common pitfalls
 
-- **RPU can't see the buffer.** If an `AMDRNPU_BUF_IMPORT_FW` buffer is
-  allocated from a pool the RPU firmware doesn't map, the RPU faults
-  when it dereferences the DMA address. Allocate firmware buffers from
-  an RPU-reachable heap and ensure the firmware MPU covers that span.
+- **`AMDRNPU_BUF_ALLOC` fails with `-ENODEV`.** No `/reserved-memory`
+  child matches the configured name, or the node is not an initialised
+  `shared-dma-pool`. Check `dmesg` and the names under
+  `/sys/kernel/config/amdrnpu/`. An ambiguous name fails with `-EINVAL`;
+  use the full `name@address`.
+- **Can't change the region (`-EBUSY`).** The region is already bound by
+  an earlier allocation. Set the configfs attribute before the first
+  `AMDRNPU_BUF_ALLOC` of that type.
+- **RPU can't see the buffer.** If an RPU buffer comes from a pool the
+  RPU firmware doesn't map, the RPU faults when it dereferences the DMA
+  address. Make sure the firmware MPU covers the RPU region (or, for
+  imports, the exporter's pool).
 - **Non-contiguous dma-buf.** Import fails with `-EINVAL` if the mapped
-  scatter-gather table is not a single contiguous run. Use a heap that
-  guarantees contiguity (CMA / carveout), not the generic system heap
-  for firmware-visible buffers.
-- **FW domain on a non-DT platform.** `AMDRNPU_BUF_IMPORT_FW` returns
-  `-ENODEV` when the rpmsg channel has no DT-backed ancestor to use as
-  the remoteproc DMA device.
+  scatter-gather table is not a single contiguous run. Export from a
+  pool that guarantees contiguity (CMA / carveout), not the generic
+  system heap.
+- **FW domain on a non-DT platform.** `AMDRNPU_MEMORY_RPU` allocations
+  and `AMDRNPU_BUF_IMPORT_FW` imports return `-ENODEV` when the rpmsg
+  channel has no DT-backed ancestor to use as the remoteproc DMA device.
 - **Wrong / missing channel name.** The driver only binds to an rpmsg
   channel named exactly **`amdrnpu`**. Confirm the firmware's OpenAMP
   endpoint name.
@@ -170,7 +190,7 @@ dma-buf is **physically contiguous** and, for firmware use,
 
 - [`architecture.md`](architecture.md) — rpmsg binding, DMA domains, and
   the miscdevice.
-- [`buffer-management.md`](buffer-management.md) — dma-buf import,
-  contiguity, and handle lifetime.
-- [`lib-userspace-flow.md`](lib-userspace-flow.md) — how the library
-  picks a heap for `AMDRNPU_MEMORY_*`.
+- [`buffer-management.md`](buffer-management.md) — buffer allocation,
+  dma-buf import, contiguity, and handle lifetime.
+- [`lib-userspace-flow.md`](lib-userspace-flow.md) — the library's
+  `amdrnpu_buf_alloc()` and `AMDRNPU_MEMORY_*`.

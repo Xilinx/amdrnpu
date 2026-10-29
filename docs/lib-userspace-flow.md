@@ -8,10 +8,10 @@ The **ABI** (structs, ioctl numbers) lives in
 [`include/uapi/amdrnpu/amdrnpu.h`](../include/uapi/amdrnpu/amdrnpu.h).
 
 Applications may call **raw ioctls** instead; the library only reduces
-boilerplate (dma-buf-heap allocation, buffer packing, `sync_file`
-waiting via `poll(2)` / `SYNC_IOC_FILE_INFO`, and cache maintenance via
-`DMA_BUF_IOCTL_SYNC`). The library uses **no libdrm** — it talks to the
-char device and dma-buf/dma-heap/sync_file interfaces directly.
+boilerplate (buffer allocation and dma-buf fd tracking, buffer packing,
+`sync_file` waiting via `poll(2)` / `SYNC_IOC_FILE_INFO`, and cache
+maintenance via `DMA_BUF_IOCTL_SYNC`). The library uses **no libdrm** —
+it talks to the char device and dma-buf/sync_file interfaces directly.
 
 > **Frozen ABI.** The public function signatures are a stable interface;
 > existing callers depend on them, so arity and types do not change.
@@ -34,9 +34,11 @@ See also [`buffer-management.md`](buffer-management.md) and
 
 ## 1. Buffer flow (allocate / map / sync / release)
 
-**`amdrnpu_buf_alloc()`** allocates a dma-buf from the heap that matches
-`memory_type` and imports it (`AMDRNPU_BUF_IMPORT`) in one step,
-returning an opaque handle. Map it with **`amdrnpu_buf_mmap()`**
+**`amdrnpu_buf_alloc()`** issues `AMDRNPU_BUF_ALLOC`: the driver
+allocates the buffer from the reserved-memory region configured for
+`memory_type` and returns an opaque handle plus a dma-buf fd, which the
+library keeps. It requires a driver with that ioctl; there is no
+userspace fallback. Map it with **`amdrnpu_buf_mmap()`**
 (page-aligned offset/length; `offset == 0`, `length == 0` maps the whole
 buffer) and unmap with **`amdrnpu_buf_munmap()`** — both operate on the
 buffer's **dma-buf**, not the device node.
@@ -50,21 +52,19 @@ Release the handle with **`amdrnpu_buf_close()`** (`AMDRNPU_BUF_DESTROY`
 + closing the library-owned dma-buf fd). If a submitted command still
 references the buffer, the backing memory stays alive until that command
 completes (see
-[buffer-management §4](buffer-management.md#4-in-flight-command-pins)).
+[buffer-management §5](buffer-management.md#5-in-flight-command-pins)).
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant App
     participant Lib as amdrnpu_lib
-    participant HEAP as /dev/dma_heap/*
     participant K as amdrnpu.ko
 
     App->>Lib: amdrnpu_buf_alloc(fd, memory_type, size, &handle)
-    Lib->>HEAP: allocate contiguous dma-buf
-    HEAP-->>Lib: dma-buf fd (library-owned)
-    Lib->>K: ioctl(AMDRNPU_BUF_IMPORT, {dmabuf_fd, flags})
-    K-->>Lib: handle
+    Lib->>K: ioctl(AMDRNPU_BUF_ALLOC, {size, memory_type})
+    K->>K: dma_alloc_coherent() from the region for memory_type
+    K-->>Lib: handle + dmabuf_fd (library-owned)
     Lib-->>App: 0
 
     App->>Lib: amdrnpu_buf_mmap(fd, handle, 0, off, len, &map)
@@ -75,10 +75,13 @@ sequenceDiagram
     Lib->>K: ioctl(AMDRNPU_BUF_DESTROY, {handle})
 ```
 
-| `memory_type` | Domain / import flag | Typical use |
+| `memory_type` | Region (default) / DMA domain | Typical use |
 |----------------|----------------------|----------------|
-| `AMDRNPU_MEMORY_RPU` (`0`) | RPU heap, imported `AMDRNPU_BUF_IMPORT_FW` | firmware-visible buffers the RPU dereferences |
-| `AMDRNPU_MEMORY_DEVICE` (`1`, `AMDRNPU_MEMORY_DEFAULT`) | device heap, imported `AMDRNPU_BUF_IMPORT_DEVICE` | accelerator/device-visible buffers (default) |
+| `AMDRNPU_MEMORY_RPU` (`0`) | `rpu_region` (`rpu_gem_cma`), RPU/firmware domain | firmware-visible buffers the RPU dereferences |
+| `AMDRNPU_MEMORY_DEVICE` (`1`, `AMDRNPU_MEMORY_DEFAULT`) | `device_region` (`buffer`), device domain | accelerator/device-visible buffers (default) |
+
+The region names are set under `/sys/kernel/config/amdrnpu/`; see
+[buffer-management §2](buffer-management.md#2-allocation-amdrnpu_buf_alloc).
 
 ---
 

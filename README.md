@@ -4,15 +4,15 @@ A small Linux **rpmsg char-device driver** + **userspace runtime library** that
 brokers buffer sharing and command submission between application code on the
 APU and firmware running on a remote Cortex-R52 (RPU) over RPMsg. The driver is
 a `miscdevice` that exposes a char node (`/dev/amdrnpu.N`) with a tiny custom
-ioctl surface under the `'R'` magic (buffer import/destroy + command submit);
+ioctl surface under the `'R'` magic (buffer alloc/import/destroy + command submit);
 completion is reported as a poll(2)-able `sync_file` fd. The library is a thin
 wrapper around that surface.
 
 > **Not a DRM driver.** Earlier revisions were a DRM render-node driver (GEM /
 > dumb buffers / syncobj / PRIME on `/dev/dri/*`). That model has been replaced
-> by the rpmsg char device described here: buffers are plain dma-buf objects
-> imported from a dma-buf heap, and completion uses `sync_file` instead of
-> `drm_syncobj`.
+> by the rpmsg char device described here: buffers are plain dma-buf objects,
+> allocated by the driver from a reserved-memory region (or imported from
+> elsewhere), and completion uses `sync_file` instead of `drm_syncobj`.
 
 Designed to be built either standalone (out-of-tree against any kernel
 checkout) or via Yocto using the included `meta-amdrnpu` layer.
@@ -24,7 +24,9 @@ amdrnpu/
 ├── drivers/rpmsg/amdrnpu/           # out-of-tree kernel module (rpmsg char device)
 │   ├── amdrnpu_drv.c           # miscdevice (/dev/amdrnpu.N), file ops, module init
 │   ├── amdrnpu_rpmsg.c         # rpmsg_driver: probe/remove/callback + wire send
-│   ├── amdrnpu_buf.c           # BUF_IMPORT/BUF_DESTROY: dma-buf attach + arg address resolution
+│   ├── amdrnpu_buf.c           # BUF_ALLOC/IMPORT/DESTROY/QUERY: dma-buf export/attach + arg address resolution
+│   ├── amdrnpu_heap.c          # reserved-memory region per memory type, for BUF_ALLOC
+│   ├── amdrnpu_configfs.c      # /sys/kernel/config/amdrnpu: region names
 │   ├── amdrnpu_cmd.{c,h}       # CMD_SUBMIT lifecycle, dma_fence + sync_file completion
 │   ├── amdrnpu_internal.h
 │   ├── Kbuild
@@ -59,18 +61,19 @@ and the user-space library include it directly.
 
 ## UAPI at a glance
 
-Three custom ioctls under magic `'R'`:
+Five custom ioctls under magic `'R'`:
 
 | Ioctl | Purpose |
 |---|---|
-| `AMDRNPU_BUF_IMPORT`  | Import an external **dma-buf** (typically allocated by userspace from a dma-buf heap such as `/dev/dma_heap/reserved`) for use as a command-buffer argument. `flags` selects the DMA domain — `AMDRNPU_BUF_IMPORT_DEVICE` (the accelerator) or `AMDRNPU_BUF_IMPORT_FW` (the RPU/firmware remoteproc device, so the emitted address is the one the RPU dereferences). Returns an opaque `handle`. |
-| `AMDRNPU_BUF_DESTROY` | Release an imported buffer `handle`. If an in-flight command still references it, the underlying attachment lives until that command completes. |
+| `AMDRNPU_BUF_ALLOC`   | Allocate a physically contiguous buffer for a `memory_type` — `AMDRNPU_MEMORY_RPU` (RPU-reachable, in the firmware DMA domain) or `AMDRNPU_MEMORY_DEVICE` (the accelerator). The driver allocates from the reserved-memory node configured for that type (`/sys/kernel/config/amdrnpu/rpu_region` / `device_region`, default `rpu_gem_cma` / `buffer`) and exports it as a dma-buf. Returns an opaque `handle` and a `dmabuf_fd`. |
+| `AMDRNPU_BUF_IMPORT`  | Import an external **dma-buf** (from a dma-buf heap or another driver) for use as a command-buffer argument. `flags` selects the DMA domain — `AMDRNPU_BUF_IMPORT_DEVICE` (the accelerator) or `AMDRNPU_BUF_IMPORT_FW` (the RPU/firmware remoteproc device, so the emitted address is the one the RPU dereferences). Returns an opaque `handle`. |
+| `AMDRNPU_BUF_DESTROY` | Release a buffer `handle`. If an in-flight command still references it, the buffer lives until that command completes. |
+| `AMDRNPU_BUF_QUERY`   | Return a buffer `handle`'s DMA address and size. |
 | `AMDRNPU_CMD_SUBMIT`  | Submit a command to the RPU. Args are an array of `struct amdrnpu_arg` entries; each is either a scalar QWORD (`size == 0`) or a buffer slice `(buffer_handle, offset)` (`size != 0`) that the driver resolves to an RPU-side DMA address. On success `sync_handle` is a **`sync_file` fd** the caller `poll()`s (`POLLIN`) or waits on for completion. |
 
 There is no DRM surface. CPU mapping (`mmap(2)`) and cache maintenance
 (`DMA_BUF_IOCTL_SYNC`) are performed on the buffer's dma-buf fd directly; the
-library wraps allocation-from-heap, import, mmap, and sync so callers don't have
-to.
+library wraps allocation, mmap, and sync so callers don't have to.
 
 ## Building
 
@@ -139,7 +142,7 @@ CMake options forwarded to the lib build:
 
 The runtime library uses **no libdrm** — buffers are dma-buf objects and
 completion is a `sync_file` fd, so it talks to the char device and the
-dma-buf / dma-heap / sync_file interfaces directly. There is no external
+dma-buf / sync_file interfaces directly. There is no external
 library dependency for the build.
 
 Downstream projects can consume the library via either CMake
@@ -224,8 +227,8 @@ uint32_t in_bo, out_bo;
 struct amdrnpu_cmd_submit hdr;
 int32_t status = 0;
 
-/* buf_alloc allocates from the matching dma-buf heap AND imports the
- * buffer in one step, returning a handle for use in amdrnpu_arg.bo. */
+/* buf_alloc has the driver allocate from the memory type's reserved-memory
+ * region (AMDRNPU_BUF_ALLOC), returning a handle for use in amdrnpu_arg.bo. */
 amdrnpu_buf_alloc(fd, AMDRNPU_MEMORY_DEVICE, SZ_16M, &in_bo);
 amdrnpu_buf_alloc(fd, AMDRNPU_MEMORY_DEVICE, SZ_8M, &out_bo);
 
@@ -245,8 +248,8 @@ amdrnpu_buf_close(fd, out_bo);
 close(fd);
 ```
 
-For the raw-`ioctl` path (no library): allocate a dma-buf from a heap
-(e.g. `/dev/dma_heap/reserved`), `AMDRNPU_BUF_IMPORT` it, build a
+For the raw-`ioctl` path (no library): `AMDRNPU_BUF_ALLOC` a buffer (or
+`AMDRNPU_BUF_IMPORT` a dma-buf from elsewhere), build a
 `struct amdrnpu_cmd_submit`, `ioctl(fd, AMDRNPU_CMD_SUBMIT, ...)`, then
 `poll()` the returned `sync_handle`. The full ABI is documented in
 [`include/uapi/amdrnpu/amdrnpu.h`](include/uapi/amdrnpu/amdrnpu.h).
@@ -269,7 +272,7 @@ Highlights:
   DMA domains.
 - [`docs/devicetree-binding.md`](docs/devicetree-binding.md) — platform
   integration: no DT binding of its own; how the rpmsg channel,
-  remoteproc node, and dma-buf heaps are wired in.
+  remoteproc node, and reserved-memory regions are wired in.
 - [`docs/buffer-management.md`](docs/buffer-management.md) — buffer
   lifecycle, in-flight command pinning, handle release semantics.
 - [`docs/commands.md`](docs/commands.md) — `AMDRNPU_CMD_SUBMIT` wire

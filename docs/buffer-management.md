@@ -1,48 +1,55 @@
 # Buffer Management
 
-This document describes how userspace provides, references, and releases
+This document describes how userspace obtains, references, and releases
 buffers through the `amdrnpu` driver.
 
-The driver does **not allocate buffer memory**. Userspace allocates a
-dma-buf — typically from a dma-buf heap such as
-`/dev/dma_heap/reserved` — and **imports** it into the driver with
-**`AMDRNPU_BUF_IMPORT`**. The driver attaches the dma-buf to a DMA
-domain, verifies it is physically contiguous, records its DMA address,
-and returns an opaque per-file **handle**. That handle is what a
-`struct amdrnpu_arg` buffer slice refers to; the driver programs
-`dma_addr + offset` on the wire when the buffer is used by a command.
+A buffer handle comes from one of two ioctls:
+
+- **`AMDRNPU_BUF_ALLOC`** — the driver allocates a physically
+  contiguous buffer from the reserved-memory region configured for the
+  requested memory type, exports it as a dma-buf, and returns both a
+  handle and the dma-buf fd. This is what the library's
+  **`amdrnpu_buf_alloc()`** uses.
+- **`AMDRNPU_BUF_IMPORT`** — userspace brings a dma-buf allocated
+  elsewhere (a dma-buf heap, another driver). The driver attaches it to
+  a DMA domain, verifies it is physically contiguous, and returns a
+  handle.
+
+Either way the driver records the buffer's DMA address and returns an
+opaque per-file **handle**. That handle is what a `struct amdrnpu_arg`
+buffer slice refers to; the driver programs `dma_addr + offset` on the
+wire when the buffer is used by a command.
 
 CPU mapping and cache maintenance are performed by userspace **on the
-dma-buf fd directly** (`mmap(2)`, `DMA_BUF_IOCTL_SYNC`) — not through
-this driver. The library wraps this in `amdrnpu_buf_mmap()` /
+dma-buf fd** (`mmap(2)`, `DMA_BUF_IOCTL_SYNC`), not through the device
+node. The library wraps this in `amdrnpu_buf_mmap()` /
 `amdrnpu_buf_sync()`.
 
 **Userspace helpers:** [`lib-userspace-flow.md`](lib-userspace-flow.md)
-covers **`amdrnpu_buf_alloc()`** (heap allocate + import in one step),
-**`amdrnpu_buf_close()`**, **`amdrnpu_buf_mmap()`**, and
-**`amdrnpu_buf_sync()`**, and how they line up with the ioctl flow
-below.
+covers **`amdrnpu_buf_alloc()`**, **`amdrnpu_buf_close()`**,
+**`amdrnpu_buf_mmap()`**, and **`amdrnpu_buf_sync()`**, and how they
+line up with the ioctl flow below.
 
-Each imported buffer is **reference-counted** (`struct amdrnpu_buf`,
-`kref`). The per-client handle table owns one reference; each in-flight
-command that references the buffer holds another. The dma-buf attachment
-is torn down only when the last reference is dropped — **not**
-necessarily when the handle is destroyed.
+Each buffer is **reference-counted** (`struct amdrnpu_buf`, `kref`). The
+per-client handle table owns one reference; each in-flight command that
+references the buffer holds another. The buffer is torn down only when
+the last reference is dropped — **not** necessarily when the handle is
+destroyed.
 
 ---
 
 ## 1. Lifecycle overview
 
-An imported buffer is **`Live`** from `AMDRNPU_BUF_IMPORT` until its
-last reference is released. `AMDRNPU_BUF_DESTROY` (or file close) drops
-the handle-table reference; if a command still pins the buffer, the
-attachment survives until that command completes.
+A buffer is **`Live`** from `AMDRNPU_BUF_ALLOC` / `AMDRNPU_BUF_IMPORT`
+until its last reference is released. `AMDRNPU_BUF_DESTROY` (or file
+close) drops the handle-table reference; if a command still pins the
+buffer, it survives until that command completes.
 
 ```mermaid
 stateDiagram-v2
     direction LR
 
-    [*] --> Live : AMDRNPU_BUF_IMPORT, refcount = 1 (handle)
+    [*] --> Live : AMDRNPU_BUF_ALLOC / AMDRNPU_BUF_IMPORT, refcount = 1 (handle)
 
     Live --> Freed : last reference released (refcount 1 to 0)
     Freed --> [*]
@@ -50,8 +57,8 @@ stateDiagram-v2
 
 | Holder | Acquired by | Released by |
 |---|---|---|
-| Handle-table entry | `AMDRNPU_BUF_IMPORT` (one ref) | **`AMDRNPU_BUF_DESTROY`** / **`amdrnpu_buf_close()`**, or implicit teardown on `close()` of the device fd |
-| In-flight command pin | `AMDRNPU_CMD_SUBMIT` with a buffer arg (`size != 0`) | Terminal `AMDRNPU_RSP_*`, submit-failure cleanup, or drain on channel unbind / module unload (see §4) |
+| Handle-table entry | `AMDRNPU_BUF_ALLOC` / `AMDRNPU_BUF_IMPORT` (one ref) | **`AMDRNPU_BUF_DESTROY`** / **`amdrnpu_buf_close()`**, or implicit teardown on `close()` of the device fd |
+| In-flight command pin | `AMDRNPU_CMD_SUBMIT` with a buffer arg (`size != 0`) | Terminal `AMDRNPU_RSP_*`, submit-failure cleanup, or drain on channel unbind / module unload (see §5) |
 
 ```mermaid
 sequenceDiagram
@@ -59,9 +66,9 @@ sequenceDiagram
     participant U as Userspace
     participant BUF as amdrnpu_buf (kref)
     participant CMD as in-flight amdrnpu_cmd
-    Note over BUF: refcount = 0 (not yet imported)
+    Note over BUF: refcount = 0 (no handle yet)
 
-    U->>BUF: AMDRNPU_BUF_IMPORT(fd)
+    U->>BUF: AMDRNPU_BUF_ALLOC / AMDRNPU_BUF_IMPORT
     Note over BUF: refcount = 1 (handle table)
 
     U->>CMD: AMDRNPU_CMD_SUBMIT(bo = h)
@@ -71,23 +78,82 @@ sequenceDiagram
     Note over BUF: refcount = 1 (cmd pin only)
 
     CMD-->>BUF: command terminates → amdrnpu_buf_put()
-    Note over BUF: refcount = 0 → detach + dma_buf_put
+    Note over BUF: refcount = 0 → release
 ```
 
 ---
 
-## 2. Import: `AMDRNPU_BUF_IMPORT`
+## 2. Allocation: `AMDRNPU_BUF_ALLOC`
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant U as Userspace
-    participant HEAP as dma-buf heap
+    participant K as amdrnpu_buf.c
+    participant HEAP as amdrnpu_heap.c
+    participant DMABUF as dma-buf core
+
+    U->>K: ioctl(AMDRNPU_BUF_ALLOC, {size, memory_type})
+    K->>HEAP: amdrnpu_heap_get(memory_type)
+    Note over HEAP: first use: look up the region node,<br/>bind it to a private DMA device
+    K->>K: dma_alloc_coherent(heap dev, PAGE_ALIGN(size))
+    K->>DMABUF: dma_buf_export()
+    K->>K: xa_alloc(&client->buf_xa) → handle
+    K-->>U: handle + dmabuf_fd
+```
+
+**Inputs and outputs (`struct amdrnpu_buf_alloc`):**
+
+| Field | Meaning |
+|-------|---------|
+| `size` | allocation size in bytes, rounded up to a whole page |
+| `memory_type` | `AMDRNPU_MEMORY_RPU` or `AMDRNPU_MEMORY_DEVICE` (see below) |
+| `flags` | reserved, must be 0 |
+| `handle` | must be 0 on entry; **output**: opaque per-file handle for `amdrnpu_arg.bo.buffer_handle` |
+| `dmabuf_fd` | must be 0 on entry; **output**: dma-buf fd for `mmap(2)`, `DMA_BUF_IOCTL_SYNC`, and sharing |
+
+**Memory regions.** Each memory type is backed by one
+`shared-dma-pool` node under `/reserved-memory`, looked up by **node
+name** (no device-tree changes or labels are required). Both reusable
+(CMA) and `no-map` pools are supported.
+
+| `memory_type` | configfs attribute | Default node | DMA domain |
+|---|---|---|---|
+| `AMDRNPU_MEMORY_RPU` (`0`) | `/sys/kernel/config/amdrnpu/rpu_region` | `rpu_gem_cma` | the remoteproc device's, 32-bit mask — the address the RPU dereferences |
+| `AMDRNPU_MEMORY_DEVICE` (`1`) | `/sys/kernel/config/amdrnpu/device_region` | `buffer` | 64-bit mask — the accelerator view |
+
+A name without `@` matches the node name with any unit address
+(`rpu_gem_cma` matches `rpu_gem_cma@20000000`); if more than one node
+matches, use the full name. A region is bound on the first allocation
+of its type and stays bound until the rpmsg channel is removed and the
+last user of the device (open fd or allocated buffer) is gone; while it
+is bound, writing its configfs attribute fails with `-EBUSY`. To use a
+different region, write the attribute before the first allocation:
+
+```sh
+echo rpu_gem_cma@20000000 > /sys/kernel/config/amdrnpu/rpu_region
+```
+
+**Failure modes:** `-EFAULT`; `-EINVAL` (non-zero `flags` / `handle` /
+`dmabuf_fd`, `size` of 0 or over 4 GiB minus one page, unknown
+`memory_type`, or an
+ambiguous region name); `-ENODEV` (region not found, or not an
+initialised `shared-dma-pool`); `-ENOMEM` (region exhausted).
+
+---
+
+## 3. Import: `AMDRNPU_BUF_IMPORT`
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as Userspace
+    participant EXP as dma-buf exporter
     participant K as amdrnpu_buf.c
     participant DMABUF as dma-buf core
 
-    U->>HEAP: allocate a contiguous dma-buf
-    HEAP-->>U: dma-buf fd
+    U->>EXP: allocate a contiguous dma-buf
+    EXP-->>U: dma-buf fd
     U->>K: ioctl(AMDRNPU_BUF_IMPORT, {fd, flags})
     K->>DMABUF: dma_buf_get(fd)
     K->>DMABUF: dma_buf_attach(dmabuf, attach_dev)
@@ -125,16 +191,22 @@ error from `dma_buf_get` / `dma_buf_attach` /
 
 ---
 
-## 3. CPU mapping and cache sync (on the dma-buf, not the driver)
+## 4. CPU mapping and cache sync (on the dma-buf, not the driver)
 
-The driver imports buffers for **device DMA only**. Everything the CPU
-does with the buffer — mapping it, and cache maintenance around device
-DMA — happens on the **dma-buf fd** using standard kernel interfaces:
+Everything the CPU does with a buffer — mapping it, and cache
+maintenance around device DMA — happens on the **dma-buf fd** using
+standard kernel interfaces:
 
 - **`mmap(2)`** on the dma-buf fd gives a CPU mapping.
 - **`DMA_BUF_IOCTL_SYNC`** with `DMA_BUF_SYNC_START` /
   `DMA_BUF_SYNC_END` (and the `TO_DEVICE` / `FROM_DEVICE` direction
   bits) performs cache maintenance.
+
+For an imported buffer, both are handled by its exporter. For a buffer
+from `AMDRNPU_BUF_ALLOC`, the driver is the exporter: the memory comes
+from `dma_alloc_coherent()`, so `mmap(2)` gives a coherent mapping and
+`DMA_BUF_IOCTL_SYNC` has nothing to do (it succeeds as a no-op). Code
+that brackets device DMA with sync calls works unchanged for both.
 
 The library wraps these:
 
@@ -158,7 +230,7 @@ Typical flow around a command that DMAs a userspace-filled input buffer:
 
 ---
 
-## 4. In-flight command pins
+## 5. In-flight command pins
 
 A buffer referenced by a command argument (any `amdrnpu_arg` with
 `size != 0`) is pinned by the driver for the command's lifetime.
@@ -180,7 +252,7 @@ sequenceDiagram
 
     Note over U,BUF: BUF_DESTROY may run after submit returns; the pin keeps the buffer alive
     U->>BUF: AMDRNPU_BUF_DESTROY(h)
-    Note over BUF: handle-table ref dropped; attachment survives via cmd pin
+    Note over BUF: handle-table ref dropped; buffer survives via cmd pin
 
     RPU-->>CMD: terminal response over rpmsg
     CMD->>BUF: amdrnpu_buf_put() for each bo_ref
@@ -193,14 +265,15 @@ cleanup, channel-unbind drain (`-ENOTCONN`), and module unload
 
 **Userspace:** after a successful submit you may call
 **`AMDRNPU_BUF_DESTROY`** / **`amdrnpu_buf_close()`** as soon as you no
-longer need the handle for your own lookups; the buffer stays attached
+longer need the handle for your own lookups; the buffer stays alive
 until the command finishes and drops its pin.
 
 ---
 
-## 5. Release / cleanup
+## 6. Release / cleanup
 
-An imported buffer is torn down when its refcount reaches **0**. Paths:
+A buffer's handle-side state is torn down when its refcount reaches
+**0**. Paths:
 
 - **`AMDRNPU_BUF_DESTROY`** / **`amdrnpu_buf_close()`** on the handle
   (`xa_erase` + `amdrnpu_buf_put`).
@@ -212,21 +285,29 @@ An imported buffer is torn down when its refcount reaches **0**. Paths:
 When the last reference goes away, `amdrnpu_buf_release()` runs:
 
 ```c
-dma_buf_unmap_attachment_unlocked(buf->attach, buf->sgt, DMA_BIDIRECTIONAL);
-dma_buf_detach(buf->dmabuf, buf->attach);
+if (buf->attach) {		/* imported buffers only */
+	dma_buf_unmap_attachment_unlocked(buf->attach, buf->sgt, DMA_BIDIRECTIONAL);
+	dma_buf_detach(buf->dmabuf, buf->attach);
+}
 dma_buf_put(buf->dmabuf);
 ```
 
+For an allocated buffer, that `dma_buf_put()` drops only the driver's
+own reference. The memory goes back to its region
+(`dma_free_coherent()`) once every other dma-buf reference is gone too:
+the `dmabuf_fd` returned by `AMDRNPU_BUF_ALLOC` (the library closes it
+in `amdrnpu_buf_close()`), any `mmap(2)` mapping, and any other
+importer. This can be after the device fd is closed.
+
 While a command still pins a buffer, `AMDRNPU_BUF_DESTROY` only drops
-the handle-table reference — the attachment (and the underlying dma-buf)
-survive until the submit completes.
+the handle-table reference — the buffer survives until the submit
+completes.
 
 ---
 
-## 6. Userspace sketch
+## 7. Userspace sketch
 
-Using the library, which allocates from the correct dma-buf heap and
-imports in one step:
+Using the library, which allocates through `AMDRNPU_BUF_ALLOC`:
 
 ```c
 #include <errno.h>
@@ -257,18 +338,20 @@ int main(void)
 }
 ```
 
-A raw ioctl caller would instead allocate its own dma-buf (e.g. via a
-dma-buf heap), call `AMDRNPU_BUF_IMPORT` with the fd, `mmap`/
-`DMA_BUF_IOCTL_SYNC` on that dma-buf fd, and `AMDRNPU_BUF_DESTROY` when
-done.
+A raw ioctl caller issues `AMDRNPU_BUF_ALLOC` itself, uses the returned
+`dmabuf_fd` for `mmap`/`DMA_BUF_IOCTL_SYNC`, and when done calls
+`AMDRNPU_BUF_DESTROY` and closes `dmabuf_fd`. To use memory from
+elsewhere, it instead passes that dma-buf's fd to `AMDRNPU_BUF_IMPORT`.
 
 ---
 
-## 7. See also
+## 8. See also
 
 - [`architecture.md`](architecture.md) — the two DMA domains and how the
-  driver imports dma-bufs.
+  driver allocates and imports dma-bufs.
+- [`devicetree-binding.md`](devicetree-binding.md) — the reserved-memory
+  regions behind each memory type.
 - [`commands.md`](commands.md) — `amdrnpu_arg` buffer references and how
   they become wire DMA addresses.
 - [`lib-userspace-flow.md`](lib-userspace-flow.md) — the library API for
-  allocate, import, map, sync, and release.
+  allocate, map, sync, and release.

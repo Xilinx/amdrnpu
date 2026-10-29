@@ -9,8 +9,9 @@ Everything below describes the driver under
 [`drivers/rpmsg/amdrnpu/`](../drivers/rpmsg/amdrnpu/).
 
 `amdrnpu` is a **lightweight rpmsg char driver**, not a DRM driver. It
-exposes a miscdevice (`/dev/amdrnpu.N`), imports userspace-allocated
-dma-buf objects, forwards opaque commands to firmware over rpmsg, and
+exposes a miscdevice (`/dev/amdrnpu.N`), allocates buffers from
+reserved-memory regions and exports them as dma-bufs (or imports
+dma-bufs allocated elsewhere), forwards opaque commands to firmware over rpmsg, and
 reports completion through a per-command `dma_fence` exported as a
 `sync_file` fd.
 
@@ -27,7 +28,6 @@ handles the actual hardware (AIE/NPU, sensors, etc.).
 flowchart LR
     subgraph User["User space (APU)"]
         APP["Application<br/>(libamdrnpu + custom code)"]
-        HEAP["dma-buf heap<br/>/dev/dma_heap/*"]
     end
 
     subgraph Kernel["Kernel space (APU)"]
@@ -38,33 +38,37 @@ flowchart LR
         DMABUF["dma-buf core"]
     end
 
+    MEM["reserved-memory regions<br/>(rpu_gem_cma, buffer)"]
+
     subgraph RPU["RPU (R5F)"]
         FW["RPU firmware<br/>(OpenAMP / RPMsg)"]
         AIE["AIE / NPU access"]
     end
 
-    APP -- "ioctl(CMD_SUBMIT,<br/>BUF_IMPORT, BUF_DESTROY)" --> MISC
-    APP -- "alloc dma-buf,<br/>mmap, DMA_BUF_IOCTL_SYNC" --> HEAP
-    HEAP -- "dma-buf fd" --> APP
+    APP -- "ioctl(BUF_ALLOC, BUF_IMPORT,<br/>BUF_DESTROY, CMD_SUBMIT)" --> MISC
+    APP -- "mmap, DMA_BUF_IOCTL_SYNC<br/>on the dma-buf fd" --> DMABUF
     MISC --> TESS
-    TESS -- "dma_buf_attach /<br/>map_attachment" --> DMABUF
+    TESS -- "dma_alloc_coherent" --> MEM
+    TESS -- "dma_buf_export /<br/>dma_buf_attach" --> DMABUF
     TESS -- "rpmsg_send /<br/>callback" --> RPMSG
     RPMSG <-- "vring" --> FW
     REMOTEPROC -- "boots,<br/>provides channel" --> RPU
-    HEAP -. "shared physical memory" .-> FW
+    MEM -. "shared physical memory" .-> FW
     FW --> AIE
 ```
 
-**Key idea.** Buffer memory is **allocated in userspace** from a dma-buf
-heap (e.g. `/dev/dma_heap/reserved`) and shared with the RPU. Userspace
-imports each dma-buf into the driver with **`AMDRNPU_BUF_IMPORT`**; the
-driver attaches it to the appropriate DMA domain, verifies it is
-physically contiguous, and records its DMA address. When the buffer is
-used as a command argument, the driver emits that DMA address on the
-wire. CPU mapping and cache maintenance are performed by userspace on
-the dma-buf fd directly (`mmap(2)`, `DMA_BUF_IOCTL_SYNC`), not through
-this driver. Control messages (wire commands and responses) flow over
-rpmsg.
+**Key idea.** Userspace asks the driver for a buffer with
+**`AMDRNPU_BUF_ALLOC`**. The driver allocates it from the
+reserved-memory region configured for the requested memory type, in the
+matching DMA domain, exports it as a dma-buf, and returns a handle plus
+the dma-buf fd. Alternatively, userspace can bring a dma-buf from
+elsewhere with **`AMDRNPU_BUF_IMPORT`**; the driver attaches it to the
+requested DMA domain and verifies it is physically contiguous. Either
+way the driver records the buffer's DMA address and emits it on the wire
+when the buffer is used as a command argument. CPU mapping and cache
+maintenance are performed by userspace on the dma-buf fd (`mmap(2)`,
+`DMA_BUF_IOCTL_SYNC`). Control messages (wire commands and responses)
+flow over rpmsg.
 
 ---
 
@@ -80,7 +84,9 @@ flowchart TB
         DRV["amdrnpu_drv.c<br/>miscdevice, file ops,<br/>module init/exit"]
         RPMSG["amdrnpu_rpmsg.c<br/>rpmsg_driver:<br/>probe / remove / callback,<br/>rpmsg_send"]
         CMD["amdrnpu_cmd.c<br/>ioctl router, dma_fence,<br/>sync_file, cmd_xa"]
-        BUF["amdrnpu_buf.c<br/>dma-buf import/destroy,<br/>arg address resolution"]
+        BUF["amdrnpu_buf.c<br/>dma-buf alloc/export,<br/>import/destroy,<br/>arg address resolution"]
+        HEAPC["amdrnpu_heap.c<br/>reserved-memory region<br/>per memory type"]
+        CFGFS["amdrnpu_configfs.c<br/>region names"]
     end
 
     subgraph KAPI["Kernel APIs"]
@@ -88,6 +94,8 @@ flowchart TB
         DMABUF["dma-buf"]
         SYNCF["sync_file / dma_fence"]
         RPMSGC["rpmsg core"]
+        RMEM["reserved-memory /<br/>DMA API"]
+        CFGC["configfs"]
     end
 
     FOPS --> DRV
@@ -97,6 +105,10 @@ flowchart TB
     CMD --> RPMSG
     CMD --- SYNCF
     BUF --- DMABUF
+    BUF --> HEAPC
+    HEAPC --> CFGFS
+    HEAPC --- RMEM
+    CFGFS --- CFGC
     DRV --- MISCC
     RPMSG --- RPMSGC
 ```
@@ -106,7 +118,9 @@ flowchart TB
 | `amdrnpu_drv.c` | miscdevice registration (`misc_register`, `/dev/amdrnpu.N`), file `open`/`release`, `unlocked_ioctl`/`compat_ioctl` hooks, per-`amdrnpu_dev` refcounting, and module init/exit (which register/unregister the rpmsg driver). Sets a 64-bit DMA mask on the misc device so >32-bit device buffers are not bounced. |
 | `amdrnpu_rpmsg.c` | The `rpmsg_driver` bound to channel `"amdrnpu"`. `probe` allocates one `struct amdrnpu_dev`, names it `amdrnpu.<idx>`, registers the miscdevice, and records the remoteproc device (for the FW DMA domain). `remove` deregisters the node and drains in-flight commands. `callback` decodes the `amdrnpu_wire_rsp` and dispatches it. `amdrnpu_rpmsg_send_cmd()` sends `amdrnpu_wire_cmd`. |
 | `amdrnpu_cmd.c` | Command lifecycle: the `amdrnpu_ioctl` switch; per-submission `dma_fence` wrapped in a `sync_file`; **driver-owned command ids** in `cmd_xa` (`xa_alloc_cyclic`, wire `seq`); argument resolution (`amdrnpu_resolve_args`); response dispatch and drain. Completion is asynchronous with many commands in flight. |
-| `amdrnpu_buf.c` | `AMDRNPU_BUF_IMPORT` / `AMDRNPU_BUF_DESTROY`: `dma_buf_get` + `dma_buf_attach` + `dma_buf_map_attachment`, physical-contiguity check, per-client handle table (`buf_xa`), and kref-based buffer lifetime. |
+| `amdrnpu_buf.c` | `AMDRNPU_BUF_ALLOC`: `dma_alloc_coherent` from the memory type's region and `dma_buf_export` (the driver is the exporter). `AMDRNPU_BUF_IMPORT`: `dma_buf_get` + `dma_buf_attach` + `dma_buf_map_attachment` and a physical-contiguity check. `AMDRNPU_BUF_DESTROY` / `AMDRNPU_BUF_QUERY`, the per-client handle table (`buf_xa`), and kref-based buffer lifetime. |
+| `amdrnpu_heap.c` | One memory pool per memory type. On first use, finds the configured `shared-dma-pool` node under `/reserved-memory` by node name and binds it (reusable or `no-map`) to a driver-private platform device carrying that type's DMA configuration. Released with the `amdrnpu_dev`. |
+| `amdrnpu_configfs.c` | `/sys/kernel/config/amdrnpu/{rpu_region,device_region}`: the reserved-memory node name for each memory type (defaults `rpu_gem_cma`, `buffer`). A write fails with `-EBUSY` while the region is bound. |
 
 ---
 
@@ -170,13 +184,14 @@ subsequent ioctls simply fail once `rpdev` is `NULL`.
 
 ## 4. DMA domains
 
-Imported buffers are attached to one of two devices, selected by the
-`flags` field of `struct amdrnpu_buf_import`:
+Every buffer lives in one of two DMA domains. For an allocated buffer
+it is selected by `memory_type` in `struct amdrnpu_buf_alloc`; for an
+imported buffer, by `flags` in `struct amdrnpu_buf_import`:
 
-| `flags` | Attach device | Emitted DMA address |
-|---------|---------------|---------------------|
-| `AMDRNPU_BUF_IMPORT_DEVICE` (`0`, default) | the misc device (`mdev.this_device`) | accelerator/device view |
-| `AMDRNPU_BUF_IMPORT_FW` (`1<<0`) | the remoteproc device (`rproc_dev`) | the address the RPU dereferences |
+| Allocated (`memory_type`) | Imported (`flags`) | DMA device | Emitted DMA address |
+|---|---|---|---|
+| `AMDRNPU_MEMORY_DEVICE` (`1`, default) | `AMDRNPU_BUF_IMPORT_DEVICE` (`0`, default) | 64-bit mask (import: the misc device, `mdev.this_device`) | accelerator/device view |
+| `AMDRNPU_MEMORY_RPU` (`0`) | `AMDRNPU_BUF_IMPORT_FW` (`1<<0`) | the remoteproc device's DMA configuration (import: `rproc_dev`; alloc: a private device configured from its DT node, 32-bit mask) | the address the RPU dereferences |
 
 The misc device carries a 64-bit DMA mask
 (`dma_coerce_mask_and_coherent(DMA_BIT_MASK(64))`) so device-domain
@@ -196,14 +211,16 @@ static struct device *amdrnpu_rproc_dev(struct rpmsg_device *rpdev)
 }
 ```
 
-If no such ancestor exists (non-DT platforms), FW-domain imports return
-`-ENODEV`.
+If no such ancestor exists (non-DT platforms), FW-domain imports and
+`AMDRNPU_MEMORY_RPU` allocations return `-ENODEV`.
 
-Because the driver only *imports* dma-bufs, it never allocates backing
-memory and never performs cache maintenance. The heap the userspace
-buffer came from determines its physical placement and reachability;
-for RPU-visible buffers, userspace must allocate from an RPU-reachable,
-physically contiguous pool.
+For an allocated buffer, the configured reserved-memory region determines
+its physical placement; the RPU region must lie in memory the RPU can
+reach. Allocated memory is coherent (`dma_alloc_coherent`), so the
+driver performs no cache maintenance on it. For an imported buffer, the
+exporter determines placement and handles cache maintenance; for
+RPU-visible buffers it must come from an RPU-reachable, physically
+contiguous pool.
 
 ---
 
@@ -212,15 +229,18 @@ physically contiguous pool.
 The driver presents itself as a miscdevice (`/dev/amdrnpu.N`). Userspace
 gets:
 
-- **Three ioctls** (magic `'R'`, ABI v1):
+- **Five ioctls** (magic `'R'`, ABI v1):
+  - **`AMDRNPU_BUF_ALLOC`** — allocate a buffer from the region for a
+    memory type; returns a per-file `handle` and a `dmabuf_fd`.
   - **`AMDRNPU_BUF_IMPORT`** — import a dma-buf fd, returns a per-file
     `handle`.
   - **`AMDRNPU_BUF_DESTROY`** — release a `handle`.
+  - **`AMDRNPU_BUF_QUERY`** — return a `handle`'s DMA address and size.
   - **`AMDRNPU_CMD_SUBMIT`** — submit a command; returns a `sync_handle`
     (a `sync_file` fd).
-- **Per-file handle space.** Buffer handles from `AMDRNPU_BUF_IMPORT`
-  are scoped to the open file (`struct amdrnpu_client.buf_xa`) and freed
-  on `close()`.
+- **Per-file handle space.** Buffer handles from `AMDRNPU_BUF_ALLOC` and
+  `AMDRNPU_BUF_IMPORT` are scoped to the open file
+  (`struct amdrnpu_client.buf_xa`) and released on `close()`.
 - **CPU mapping and cache sync happen on the dma-buf**, not the device
   node: `mmap(2)` and `DMA_BUF_IOCTL_SYNC` on the dma-buf fd. The
   library hides this behind `amdrnpu_buf_mmap()` / `amdrnpu_buf_sync()`.
@@ -276,7 +296,7 @@ The rpmsg probe assembles all of the above — see
 
 - [`commands.md`](commands.md) — command submission, the async
   many-in-flight lifecycle, and the per-command `sync_file`.
-- [`buffer-management.md`](buffer-management.md) — dma-buf import,
-  handle scoping, and in-flight command pins.
+- [`buffer-management.md`](buffer-management.md) — buffer allocation
+  and dma-buf import, handle scoping, and in-flight command pins.
 - [`devicetree-binding.md`](devicetree-binding.md) — how the rpmsg
-  channel and buffer heaps are wired into device tree.
+  channel and the reserved-memory regions are wired into device tree.
