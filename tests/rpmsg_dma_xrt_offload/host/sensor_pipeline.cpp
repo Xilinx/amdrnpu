@@ -8,8 +8,11 @@
 //                      MDB5 PCIe-DMA rpmsg link, one APU_XRT_BATCH_RUN per frame
 //   sensors N..2N-1 -> the local Strix/Krackan NPU through XRT, N runs per frame
 //
-// A frame is complete when all 2N OFMs are ready; a final step (TBD, simulated
-// with --post-us) then consumes them and releases the frame's buffers.
+// A frame is complete when all 2N OFMs are ready; a final step then consumes
+// them and releases the frame's buffers. With --fusion-* the final step runs a
+// fusion model on the local NPU over all 2N OFMs (each re-laid out on the host
+// from its producer's HW layout into the fusion model's IFM layout); otherwise
+// it is simulated with --post-us.
 //
 // Sync modes. Default: the one sync point per frame is at the finish - the
 // final step waits until both sides finished their batch for frame f; the
@@ -42,6 +45,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <csignal>
@@ -102,6 +106,17 @@ struct Opts {
 		 strix_sz_ofm = 1000;
 	int strix_arg_ifm = 3, strix_arg_wts = 4, strix_arg_spill = 5, strix_arg_ofm = 6,
 	    strix_arg_ctrl = 7;
+
+	// Fusion (final step on the local NPU): all 2N sensor OFMs -> one model.
+	// Fusion input k = sensor k (0..N-1 = T20 RPU, N..2N-1 = local Strix NPU).
+	bool use_fusion = false;
+	std::string fusion_xclbin, fusion_elf, fusion_wts, fusion_golden;
+	std::vector<int> fusion_arg_ifm;            // [fusion input]
+	int fusion_arg_spill = -1, fusion_arg_wts = -1, fusion_arg_ofm = -1, fusion_arg_ctrl = -1;
+	uint64_t fusion_sz_ifm = 0, fusion_sz_wts = 0, fusion_sz_spill = 0, fusion_sz_ofm = 0;
+	// HW layouts "FMT:d0,d1,..", e.g. HCWNC8:7,256,7,1,8, and the logical feature C,H,W
+	std::string rpu_ofm_layout, strix_ofm_layout, fusion_ifm_layout;
+	uint32_t feat_c = 2048, feat_h = 7, feat_w = 7;
 };
 
 void usage(const char *argv0)
@@ -140,8 +155,24 @@ void usage(const char *argv0)
 "                       (checked every frame)\n"
 "  --no-strix           RPU side only\n"
 "\n"
+"Fusion step (local NPU, replaces the simulated final step; needs both sides):\n"
+"  --fusion-dir DIR     VAIML partition dir: DIR/unified-2x4x4.xclbin, DIR/ctrl.elf,\n"
+"                       DIR/wts32.bin (each overridable below)\n"
+"  --fusion-xclbin FILE --fusion-elf FILE --fusion-wts FILE\n"
+"  --fusion-ifm-args A0,..  kernel-arg index of fusion input k (one per sensor,\n"
+"                       2N values; input k = sensor k: 0..N-1 T20, N..2N-1 Strix)\n"
+"  --fusion-args S,W,O,C  kernel-arg index of spill,wts,ofm,ctrl-pkt (-1 = none)\n"
+"  --fusion-sizes I,W,S,O ifm (each),wts,spill,ofm bytes\n"
+"  --rpu-ofm-layout L   --strix-ofm-layout L   --fusion-ifm-layout L\n"
+"                       HW layouts \"FMT:d0,d1,..\" (flexmlrt-hsi.json hw_format /\n"
+"                       hw_shape), e.g. HCWNC8:7,256,7,1,8 or NCHW:1,2048,7,8;\n"
+"                       OFMs are re-laid out into the fusion IFMs on the host\n"
+"  --feat-shape C,H,W   logical feature map carried between them (default 2048,7,7)\n"
+"  --fusion-golden FILE expected fusion OFM (checked every frame)\n"
+"\n"
 "Options:\n"
 "  --save-out DIR       write frame 0's OFMs to DIR/{rpu,strix}_s<i>.bin\n"
+"                       (and DIR/fusion_ofm.bin with the fusion step)\n"
 "  --csv FILE           per-frame timings (ns since start)\n"
 "  --timeout-s N        per-command timeout (default 60)\n"
 "  --poll-us N          RPU completion poll interval (default 0 = busy poll)\n"
@@ -174,7 +205,7 @@ template <typename T> std::vector<T> split_num(const std::string &s, size_t n, c
 Opts parse(int argc, char **argv)
 {
 	Opts o;
-	std::string strix_dir;
+	std::string strix_dir, fusion_dir, fusion_ifm_args;
 	for (int i = 1; i < argc; ++i) {
 		std::string a = argv[i];
 		auto val = [&]() -> std::string {
@@ -223,6 +254,30 @@ Opts parse(int argc, char **argv)
 			o.strix_arg_ofm = v[3]; o.strix_arg_ctrl = v[4];
 		}
 		else if (a == "--no-strix")     o.use_strix = false;
+		else if (a == "--fusion-dir")   fusion_dir = val();
+		else if (a == "--fusion-xclbin") o.fusion_xclbin = val();
+		else if (a == "--fusion-elf")   o.fusion_elf = val();
+		else if (a == "--fusion-wts")   o.fusion_wts = val();
+		else if (a == "--fusion-golden") o.fusion_golden = val();
+		else if (a == "--fusion-ifm-args") fusion_ifm_args = val();
+		else if (a == "--fusion-args") {
+			auto v = split(val());
+			if (v.size() != 4)
+				throw std::runtime_error("--fusion-args takes 4 values");
+			o.fusion_arg_spill = std::stoi(v[0]); o.fusion_arg_wts = std::stoi(v[1]);
+			o.fusion_arg_ofm = std::stoi(v[2]); o.fusion_arg_ctrl = std::stoi(v[3]);
+		}
+		else if (a == "--fusion-sizes") {
+			auto v = split_num<uint64_t>(val(), 4, "--fusion-sizes");
+			o.fusion_sz_ifm = v[0]; o.fusion_sz_wts = v[1]; o.fusion_sz_spill = v[2]; o.fusion_sz_ofm = v[3];
+		}
+		else if (a == "--rpu-ofm-layout")    o.rpu_ofm_layout = val();
+		else if (a == "--strix-ofm-layout")  o.strix_ofm_layout = val();
+		else if (a == "--fusion-ifm-layout") o.fusion_ifm_layout = val();
+		else if (a == "--feat-shape") {
+			auto v = split_num<uint32_t>(val(), 3, "--feat-shape");
+			o.feat_c = v[0]; o.feat_h = v[1]; o.feat_w = v[2];
+		}
 		else if (a == "-h" || a == "--help") { usage(argv[0]); std::exit(0); }
 		else throw std::runtime_error("unknown option: " + a);
 	}
@@ -230,6 +285,24 @@ Opts parse(int argc, char **argv)
 		if (o.strix_xclbin.empty()) o.strix_xclbin = strix_dir + "/unified-2x4x4.xclbin";
 		if (o.strix_elf.empty())    o.strix_elf = strix_dir + "/ctrl.elf";
 		if (o.strix_wts.empty())    o.strix_wts = strix_dir + "/wts32.bin";
+	}
+	if (!fusion_dir.empty()) {
+		if (o.fusion_xclbin.empty()) o.fusion_xclbin = fusion_dir + "/unified-2x4x4.xclbin";
+		if (o.fusion_elf.empty())    o.fusion_elf = fusion_dir + "/ctrl.elf";
+		if (o.fusion_wts.empty())    o.fusion_wts = fusion_dir + "/wts32.bin";
+	}
+	o.use_fusion = !o.fusion_elf.empty();
+	if (o.use_fusion) {
+		if (!o.use_rpu || !o.use_strix)
+			throw std::runtime_error("the fusion step needs both sides (no --no-rpu / --no-strix)");
+		o.fusion_arg_ifm = split_num<int>(fusion_ifm_args, 2 * o.sensors, "--fusion-ifm-args (2N values)");
+		if (o.fusion_xclbin.empty() || o.fusion_wts.empty() || o.fusion_arg_wts < 0 ||
+		    o.fusion_arg_ofm < 0 || !o.fusion_sz_ifm || !o.fusion_sz_wts || !o.fusion_sz_ofm)
+			throw std::runtime_error("fusion step needs --fusion-dir (or xclbin/elf/wts), "
+						 "--fusion-args and --fusion-sizes");
+		if (o.rpu_ofm_layout.empty() || o.strix_ofm_layout.empty() || o.fusion_ifm_layout.empty())
+			throw std::runtime_error("fusion step needs --rpu-ofm-layout, --strix-ofm-layout "
+						 "and --fusion-ifm-layout");
 	}
 
 	if (!o.use_rpu && !o.use_strix)
@@ -319,7 +392,91 @@ struct FrameStat {
 	// final step
 	uint64_t ready = 0, post_start = 0, post_end = 0;
 	uint32_t rpu_mismatch = 0, strix_mismatch = 0;
+	// fusion (inside the final step)
+	uint64_t fus_pack = 0, fus_exec = 0, fus_d2h = 0;
+	uint32_t fusion_mismatch = 0;
 };
+
+// ---------------------------------------------------------------------------
+// HW tensor layouts (flexmlrt-hsi.json hw_format / hw_shape)
+// ---------------------------------------------------------------------------
+// "HCWNC8:7,256,7,1,8": one token per dim, row-major. N/H/W index the logical
+// batch/row/column; the C tokens, outer to inner, are the mixed-radix digits
+// of the logical channel. Positions beyond the logical C,H,W are padding.
+struct Layout {
+	std::string spec;
+	std::vector<char> kind;      // 'N' 'H' 'W' 'C'
+	std::vector<uint64_t> dim, stride;
+	uint64_t bytes = 1;
+
+	explicit Layout(const std::string &s) : spec(s)
+	{
+		auto colon = s.find(':');
+		if (colon == std::string::npos)
+			throw std::runtime_error("layout '" + s + "': expected FMT:d0,d1,..");
+		const std::string fmt = s.substr(0, colon);
+		for (size_t i = 0; i < fmt.size(); ++i) {
+			if (!std::strchr("NHWC", fmt[i]))
+				throw std::runtime_error("layout '" + s + "': unknown dim '" + fmt[i] + "'");
+			kind.push_back(fmt[i]);
+			while (i + 1 < fmt.size() && std::isdigit(static_cast<unsigned char>(fmt[i + 1])))
+				++i;                          // block size is given by the shape
+		}
+		for (auto &d : split(s.substr(colon + 1)))
+			dim.push_back(std::stoull(d));
+		if (dim.size() != kind.size())
+			throw std::runtime_error("layout '" + s + "': " + std::to_string(kind.size()) +
+						 " dims in format, " + std::to_string(dim.size()) + " in shape");
+		stride.assign(dim.size(), 1);
+		for (size_t i = dim.size(); i-- > 0;) {
+			stride[i] = bytes;
+			bytes *= dim[i];
+		}
+	}
+
+	uint64_t extent(char k) const
+	{
+		uint64_t e = 1;
+		for (size_t i = 0; i < kind.size(); ++i)
+			if (kind[i] == k)
+				e *= dim[i];
+		return e;
+	}
+
+	uint64_t offset(uint64_t c, uint64_t h, uint64_t w) const
+	{
+		uint64_t off = 0;
+		for (size_t i = kind.size(); i-- > 0;) {
+			uint64_t idx = 0;
+			switch (kind[i]) {
+			case 'H': idx = h; break;
+			case 'W': idx = w; break;
+			case 'C': idx = c % dim[i]; c /= dim[i]; break;
+			default: break;                  // N = 0
+			}
+			off += idx * stride[i];
+		}
+		return off;
+	}
+};
+
+// Byte gather table src -> dst for a logical C x H x W int8 feature map.
+std::vector<std::pair<uint32_t, uint32_t>> relayout_map(const Layout &src, const Layout &dst,
+							 uint32_t c, uint32_t h, uint32_t w)
+{
+	for (const Layout *l : {&src, &dst})
+		if (l->extent('C') < c || l->extent('H') < h || l->extent('W') < w || l->extent('N') != 1)
+			throw std::runtime_error("layout " + l->spec + " cannot hold C,H,W " + std::to_string(c) +
+						 "," + std::to_string(h) + "," + std::to_string(w));
+	std::vector<std::pair<uint32_t, uint32_t>> m;
+	m.reserve(static_cast<size_t>(c) * h * w);
+	for (uint32_t ci = 0; ci < c; ++ci)
+		for (uint32_t hi = 0; hi < h; ++hi)
+			for (uint32_t wi = 0; wi < w; ++wi)
+				m.emplace_back(static_cast<uint32_t>(src.offset(ci, hi, wi)),
+					       static_cast<uint32_t>(dst.offset(ci, hi, wi)));
+	return m;
+}
 
 std::atomic<bool> g_sigint{false};
 rbc_client *g_rbc = nullptr;
@@ -668,6 +825,130 @@ struct StrixSide {
 };
 
 // ---------------------------------------------------------------------------
+// Fusion step on the local NPU: 2N sensor OFMs -> one VAIML model
+// ---------------------------------------------------------------------------
+// The consumer handles one frame at a time, so a single buffer set is enough:
+// all kernel args are bound once at setup and every frame only re-lays out the
+// 2N OFMs into the fusion IFMs, runs, and reads the OFM back.
+struct FusionSide {
+	const Opts &o;
+	xrt::device dev;
+	xrt::hw_context hwctx;
+	xrt::elf elf;
+	xrt::module mod;
+	xrt::kernel kern;
+	xrt::run run;
+	xrt::bo wts, spill, ofm;
+	std::vector<xrt::bo> ifm;                   // [fusion input]
+	std::vector<std::pair<uint32_t, uint32_t>> map_rpu, map_strix;
+	std::vector<uint8_t> golden;
+	bool shared_hwctx = false;
+
+	uint64_t hwctx_ns = 0, elf_ns = 0, wts_ns = 0;
+
+	explicit FusionSide(const Opts &opts) : o(opts) {}
+
+	void setup(StrixSide &strix)
+	{
+		const Layout rpu_l(o.rpu_ofm_layout), strix_l(o.strix_ofm_layout), fus_l(o.fusion_ifm_layout);
+		if (rpu_l.bytes != o.rpu_sz_ofm || strix_l.bytes != o.strix_sz_ofm || fus_l.bytes != o.fusion_sz_ifm)
+			throw std::runtime_error("layout sizes (rpu " + std::to_string(rpu_l.bytes) + ", strix " +
+						 std::to_string(strix_l.bytes) + ", fusion ifm " + std::to_string(fus_l.bytes) +
+						 ") do not match --rpu-ofm / --strix-sizes / --fusion-sizes");
+		map_rpu = relayout_map(rpu_l, fus_l, o.feat_c, o.feat_h, o.feat_w);
+		map_strix = relayout_map(strix_l, fus_l, o.feat_c, o.feat_h, o.feat_w);
+
+		uint64_t t = now_ns();
+		dev = strix.dev;
+		xrt::xclbin xclbin{o.fusion_xclbin};
+		// raw compare: xrt::uuid's operator== would pull in libuuid
+		const xrt::uuid fus_id = xclbin.get_uuid(), strix_id = strix.hwctx.get_xclbin_uuid();
+		if (std::memcmp(fus_id.get(), strix_id.get(), sizeof(xuid_t)) == 0) {
+			hwctx = strix.hwctx;                // same overlay: share the Strix context
+			shared_hwctx = true;
+		} else {
+			hwctx = xrt::hw_context{dev, dev.register_xclbin(xclbin)};
+		}
+		hwctx_ns = now_ns() - t;
+
+		t = now_ns();
+		auto bytes = load_elf(o.fusion_elf);
+		elf = xrt::elf{reinterpret_cast<const char *>(bytes.data()), bytes.size()};
+		mod = xrt::module{elf};
+		kern = xrt::ext::kernel{hwctx, mod, "DPU"};
+		run = xrt::run{kern};
+		elf_ns = now_ns() - t;
+
+		t = now_ns();
+		wts = xrt::ext::bo{dev, o.fusion_sz_wts};
+		{
+			auto d = read_file(o.fusion_wts);
+			std::memset(wts.map<char *>(), 0, o.fusion_sz_wts);
+			std::memcpy(wts.map<char *>(), d.data(), std::min<size_t>(d.size(), o.fusion_sz_wts));
+		}
+		wts.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+		wts_ns = now_ns() - t;
+
+		for (size_t k = 0; k < o.fusion_arg_ifm.size(); ++k) {
+			ifm.push_back(xrt::ext::bo{dev, o.fusion_sz_ifm});
+			std::memset(ifm.back().map<char *>(), 0, o.fusion_sz_ifm);   // padding stays 0
+		}
+		ofm = xrt::ext::bo{dev, o.fusion_sz_ofm};
+		std::memset(ofm.map<char *>(), 0, o.fusion_sz_ofm);
+		ofm.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+
+		run.set_arg(0, 3);
+		run.set_arg(1, 0);
+		run.set_arg(2, 0);
+		for (size_t k = 0; k < ifm.size(); ++k)
+			run.set_arg(o.fusion_arg_ifm[k], ifm[k]);
+		run.set_arg(o.fusion_arg_wts, wts);
+		run.set_arg(o.fusion_arg_ofm, ofm);
+		if (o.fusion_arg_spill >= 0 && o.fusion_sz_spill) {
+			spill = xrt::ext::bo{dev, o.fusion_sz_spill};
+			run.set_arg(o.fusion_arg_spill, spill);
+		}
+		if (o.fusion_arg_ctrl >= 0)
+			run.set_arg(o.fusion_arg_ctrl, 0);
+
+		if (!o.fusion_golden.empty())
+			golden = read_file(o.fusion_golden);
+	}
+
+	// ofm_r / ofm_s: the frame's N RPU and N Strix OFMs (host memory).
+	const uint8_t *frame(const std::vector<const uint8_t *> &ofm_r, const std::vector<const uint8_t *> &ofm_s,
+			     FrameStat &fs)
+	{
+		uint64_t t = now_ns();
+		for (size_t k = 0; k < ifm.size(); ++k) {
+			const bool from_rpu = k < ofm_r.size();
+			const uint8_t *src = from_rpu ? ofm_r[k] : ofm_s[k - ofm_r.size()];
+			auto *dst = ifm[k].map<uint8_t *>();
+			for (const auto &e : from_rpu ? map_rpu : map_strix)
+				dst[e.second] = src[e.first];
+			ifm[k].sync(XCL_BO_SYNC_BO_TO_DEVICE);
+		}
+		fs.fus_pack = now_ns() - t;
+
+		t = now_ns();
+		run.start();
+		auto state = run.wait(std::chrono::seconds(o.timeout_s));
+		if (state != ERT_CMD_STATE_COMPLETED)
+			throw std::runtime_error("fusion run state " + std::to_string(static_cast<int>(state)));
+		fs.fus_exec = now_ns() - t;
+
+		t = now_ns();
+		ofm.sync(XCL_BO_SYNC_BO_FROM_DEVICE);
+		fs.fus_d2h = now_ns() - t;
+
+		const auto *out = ofm.map<const uint8_t *>();
+		if (!golden.empty())
+			fs.fusion_mismatch = std::memcmp(out, golden.data(), std::min<size_t>(o.fusion_sz_ofm, golden.size())) != 0;
+		return out;
+	}
+};
+
+// ---------------------------------------------------------------------------
 // Report
 // ---------------------------------------------------------------------------
 struct Agg {
@@ -694,7 +975,7 @@ void one(const char *name, uint64_t ns, const char *note = "")
 	std::printf("  %-34s %10.3f  %s\n", name, ns / 1e6, note);
 }
 
-void report(const Opts &o, const RpuSide *rpu, const StrixSide *strix,
+void report(const Opts &o, const RpuSide *rpu, const StrixSide *strix, const FusionSide *fusion,
 	    const std::vector<FrameStat> &fs, uint32_t n, uint64_t t0)
 {
 	std::printf("\n== Setup (once), ms\n");
@@ -713,6 +994,11 @@ void report(const Opts &o, const RpuSide *rpu, const StrixSide *strix,
 		one("Strix ELF parse + module + kernel", strix->elf_ns, "incl. one xrt::run per sensor, reused every batch");
 		one("Strix weights BO + sync", strix->wts_ns);
 	}
+	if (fusion) {
+		one("Fusion xclbin + hw_context", fusion->hwctx_ns, fusion->shared_hwctx ? "shares the Strix hw_context" : "");
+		one("Fusion ELF parse + module + kernel", fusion->elf_ns, "args bound once");
+		one("Fusion weights BO + sync", fusion->wts_ns);
+	}
 	if (!n)
 		return;
 
@@ -720,7 +1006,8 @@ void report(const Opts &o, const RpuSide *rpu, const StrixSide *strix,
 	Agg s_wait, s_h2d, s_set, s_exec, s_inf, s_d2h, s_total;
 	Agg r_sync, s_sync, window, start_skew;
 	Agg lat, skew, post, held;
-	uint32_t rpu_late = 0, mism_r = 0, mism_s = 0;
+	Agg f_pack, f_exec, f_d2h, f_total;
+	uint32_t rpu_late = 0, mism_r = 0, mism_s = 0, mism_f = 0;
 	for (uint32_t f = 0; f < n; ++f) {
 		const auto &x = fs[f];
 		if (rpu) {
@@ -746,6 +1033,11 @@ void report(const Opts &o, const RpuSide *rpu, const StrixSide *strix,
 			start_skew.add(x.rpu_start > x.strix_start ? x.rpu_start - x.strix_start
 								   : x.strix_start - x.rpu_start);
 			window.add(std::max(x.rpu_end, x.strix_end) - std::min(x.rpu_start, x.strix_start));
+		}
+		if (fusion) {
+			f_pack.add(x.fus_pack); f_exec.add(x.fus_exec); f_d2h.add(x.fus_d2h);
+			f_total.add(x.fus_pack + x.fus_exec + x.fus_d2h);
+			mism_f += x.fusion_mismatch;
 		}
 		lat.add(x.ready - x.arrival);
 		post.add(x.post_end - x.post_start);
@@ -792,8 +1084,15 @@ void report(const Opts &o, const RpuSide *rpu, const StrixSide *strix,
 		window.print("frame batch window", "first batch start -> last batch done");
 
 	}
-	post.print("final step", "simulated (--post-us)");
-	held.print("arrival -> OFMs released");
+	if (fusion) {
+		std::printf("  fusion (%zu sensor OFMs -> 1, local NPU):\n", fusion->ifm.size());
+		f_pack.print("re-layout OFMs + IFMs to device", "host gather + BO sync");
+		f_exec.print("execution", "start -> wait");
+		f_d2h.print("OFM from device", "BO sync");
+		f_total.print("fusion total");
+	}
+	post.print("final step", fusion ? "fusion + checks (+ --post-us)" : "simulated (--post-us)");
+	held.print("arrival -> OFMs released", fusion ? "latency incl. fusion" : "");
 
 	const uint64_t span = fs[n - 1].post_end - std::min(t0, fs[0].arrival);
 	std::printf("\n== Throughput: %.2f frames/s, %.1f inferences/s (%u frames in %.3f s)\n",
@@ -802,6 +1101,8 @@ void report(const Opts &o, const RpuSide *rpu, const StrixSide *strix,
 	if ((rpu && !rpu->golden.empty()) || (strix && !strix->golden.empty()))
 		std::printf("== OFM check: RPU %u mismatching, Strix %u mismatching (of %u frames x %u sensors)\n",
 			    mism_r, mism_s, n, o.sensors);
+	if (fusion && !fusion->golden.empty())
+		std::printf("== Fusion OFM check: %u of %u frames mismatching\n", mism_f, n);
 }
 
 void write_csv(const std::string &path, const std::vector<FrameStat> &fs, uint32_t n, uint64_t t0)
@@ -810,7 +1111,7 @@ void write_csv(const std::string &path, const std::vector<FrameStat> &fs, uint32
 	auto r = [&](uint64_t t) { return t ? static_cast<int64_t>(t - t0) : -1; };
 	f << "frame,arrival,rpu_start,rpu_sync_wait,rpu_slot_wait,rpu_h2d,rpu_exec,rpu_aie_exec,rpu_d2h,rpu_end,"
 	     "strix_start,strix_sync_wait,strix_slot_wait,strix_h2d,strix_setarg,strix_exec,strix_d2h,strix_end,"
-	     "ready,post_start,post_end\n";
+	     "ready,post_start,post_end,fus_pack,fus_exec,fus_d2h\n";
 	for (uint32_t i = 0; i < n; ++i) {
 		const auto &x = fs[i];
 		f << i << ',' << r(x.arrival) << ',' << r(x.rpu_start) << ',' << x.rpu_sync_wait << ',' << x.rpu_slot_wait << ','
@@ -818,7 +1119,7 @@ void write_csv(const std::string &path, const std::vector<FrameStat> &fs, uint32
 		  << r(x.rpu_end) << ',' << r(x.strix_start) << ',' << x.strix_sync_wait << ',' << x.strix_slot_wait << ','
 		  << x.strix_h2d << ',' << x.strix_setarg << ',' << x.strix_exec << ',' << x.strix_d2h
 		  << ',' << r(x.strix_end) << ',' << r(x.ready) << ',' << r(x.post_start) << ','
-		  << r(x.post_end) << '\n';
+		  << r(x.post_end) << ',' << x.fus_pack << ',' << x.fus_exec << ',' << x.fus_d2h << '\n';
 	}
 }
 
@@ -837,6 +1138,7 @@ int main(int argc, char **argv)
 
 	std::unique_ptr<RpuSide> rpu;
 	std::unique_ptr<StrixSide> strix;
+	std::unique_ptr<FusionSide> fusion;
 	Pipeline pl(o);
 	auto &fs = pl.stats();
 	std::atomic<bool> failed{false};
@@ -858,6 +1160,14 @@ int main(int argc, char **argv)
 			strix = std::make_unique<StrixSide>(o);
 			strix->setup();
 			std::printf("Strix hw_context + kernel created (ELF parsed once)\n");
+		}
+		if (o.use_fusion) {
+			fusion = std::make_unique<FusionSide>(o);
+			fusion->setup(*strix);
+			std::printf("Fusion kernel created (%zu inputs, %s hw_context; %s -> %s, %s -> %s)\n",
+				    fusion->ifm.size(), fusion->shared_hwctx ? "shares the Strix" : "own",
+				    o.rpu_ofm_layout.c_str(), o.fusion_ifm_layout.c_str(),
+				    o.strix_ofm_layout.c_str(), o.fusion_ifm_layout.c_str());
 		}
 	} catch (const std::exception &e) {
 		std::cerr << "setup failed: " << e.what() << "\n";
@@ -913,7 +1223,6 @@ int main(int argc, char **argv)
 					for (auto &b : strix->slots[slot].ofm)
 						ofm_s.push_back(b.map<const uint8_t *>());
 
-				// ---- next step goes here: all 2N OFMs of frame f ----
 				auto differs = [](const uint8_t *p, size_t n, const std::vector<uint8_t> &g) {
 					return std::memcmp(p, g.data(), std::min(n, g.size())) != 0;
 				};
@@ -921,6 +1230,11 @@ int main(int argc, char **argv)
 					x.rpu_mismatch += differs(ofm_r[i], o.rpu_sz_ofm, rpu->golden[i]);
 				for (size_t i = 0; i < ofm_s.size() && !strix->golden.empty(); ++i)
 					x.strix_mismatch += differs(ofm_s[i], o.strix_sz_ofm, strix->golden[i]);
+
+				// Next step: fuse all 2N OFMs of frame f into one output.
+				const uint8_t *fused = fusion ? fusion->frame(ofm_r, ofm_s, x) : nullptr;
+				if (fused && f == 0 && !o.save_dir.empty())
+					write_file(o.save_dir + "/fusion_ofm.bin", fused, o.fusion_sz_ofm);
 				if (o.post_us)
 					std::this_thread::sleep_for(std::chrono::microseconds(o.post_us));
 
@@ -966,13 +1280,13 @@ int main(int argc, char **argv)
 		rpu->teardown();
 	std::signal(SIGINT, SIG_DFL);
 
-	report(o, rpu.get(), strix.get(), fs, n, pl.t0());
+	report(o, rpu.get(), strix.get(), fusion.get(), fs, n, pl.t0());
 	if (!o.csv.empty())
 		write_csv(o.csv, fs, n, pl.t0());
 
 	bool ok = !failed && n == o.frames && (!rpu || rpu->destroyed);
 	for (uint32_t f = 0; f < n; ++f)
-		ok &= !fs[f].rpu_mismatch && !fs[f].strix_mismatch;
+		ok &= !fs[f].rpu_mismatch && !fs[f].strix_mismatch && !fs[f].fusion_mismatch;
 	std::printf("%s\n", ok ? "PASS" : "FAIL");
 	return ok ? 0 : 1;
 }
