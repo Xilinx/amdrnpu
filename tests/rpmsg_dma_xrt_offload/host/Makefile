@@ -18,6 +18,13 @@
 CC     := gcc
 CFLAGS := -O2 -g -std=c11 -Wall -Wextra
 CFLAGS += $(EXTRA_CFLAGS)
+CXX      := g++
+CXXFLAGS := -O2 -g -std=c++17 -Wall -Wextra
+CXXFLAGS += $(EXTRA_CXXFLAGS)
+
+# Native XRT (only for sensor_pipeline, which also drives the local
+# Strix-class NPU); the target is skipped from 'all' when XRT is not installed.
+XRT ?= /opt/xilinx/xrt
 
 # Auto-locate the amdrnpu tree pieces (override with make RPMSG=... etc.).
 RPMSG_CANDIDATES := ../../../lib/src/rpmsg-lite ./rpmsg-lite ../rpmsg-lite .
@@ -45,6 +52,9 @@ LDLIBS := -lz
 # fixed karg layout, OFM readback) and the APU_XRT_SETS_TEST (one kernel,
 # N arg sets) host. All reuse the same transport.
 BINS := xrt_offload_host resnet_offload_host sets_host sets_host_trace
+ifneq ($(wildcard $(XRT)/include/xrt/xrt_device.h),)
+BINS += sensor_pipeline
+endif
 
 all: $(BINS)
 
@@ -70,7 +80,21 @@ sets_host: sets_host.c $(TRANSPORT)
 sets_host_trace: sets_host_trace.c $(TRANSPORT)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $^ $(LDLIBS) -o $@
 
+# T20 RPU (xrt_batches, via rpu_batch_client) + local NPU (XRT) frame pipeline.
+SP_OBJS := $(patsubst %.c,sp_obj/%.o,$(notdir rpu_batch_client.c $(TRANSPORT)))
+sp_obj/%.o: %.c rpu_batch_client.h
+	@mkdir -p sp_obj
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
+sp_obj/%.o: $(RPMSG)/%.c
+	@mkdir -p sp_obj
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
+
+sensor_pipeline: sensor_pipeline.cpp rpu_batch_client.h $(SP_OBJS)
+	$(CXX) $(CXXFLAGS) $(CPPFLAGS) -I$(XRT)/include sensor_pipeline.cpp $(SP_OBJS) \
+		-L$(XRT)/lib -Wl,-rpath,$(XRT)/lib -lxrt_coreutil -lpthread $(LDLIBS) -o $@
+
 clean:
-	rm -f $(BINS)
+	rm -f $(BINS) sensor_pipeline
+	rm -rf sp_obj
 
 .PHONY: all clean
