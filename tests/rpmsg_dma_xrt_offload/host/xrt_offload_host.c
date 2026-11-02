@@ -50,6 +50,11 @@
 #define POOL_ALIGN         0x1000u   /* page-align every pool allocation */
 #define RESULT_POISON      0xFFFFFFFFu /* result.passed sentinel = "not written yet" */
 #define POLL_INTERVAL_MS   10u         /* delay between completion checks (poll mode) */
+/* After completion is seen via the DDR result word, keep polling this long for
+ * the rpmsg reply. The RPU writes the result before it sends the reply, so
+ * without this the host can deinit (clearing DRIVER_OK) before the reply goes
+ * out and the RPU's rpmsg_send fails with RPMSG_ERR_NO_BUFF (-2002). */
+#define REPLY_WAIT_MS      500u
 
 /* ---------------------------------------------------------------------------
  * Config (inline INI parser). Covers the Link A vring geometry + the two
@@ -963,9 +968,23 @@ int main(int argc, char **argv)
 			sleep_ms(POLL_INTERVAL_MS);
 		}
 	}
-	signal(SIGINT, SIG_DFL);
 	printf("completion seen after %lu check(s), t+%.3fs\n",
 	       chk + 1, (double)(now_ns() - t_send) / 1e9);
+	if (!rsp.got) {
+		/* Completion came from the DDR result word: give the RPU time to
+		 * send its rpmsg reply before deinit clears DRIVER_OK. */
+		uint64_t reply_deadline = now_ns() + (uint64_t)REPLY_WAIT_MS * 1000000ull;
+		while (!rsp.got && !g_stop && now_ns() < reply_deadline) {
+			if (rpmsg_lite_dma_poll(&ctx) < 0)
+				break;
+			if (!rsp.got)
+				sleep_ms(1);
+		}
+		if (!rsp.got)
+			fprintf(stderr, "no rpmsg reply within %u ms after DDR completion\n",
+				REPLY_WAIT_MS);
+	}
+	signal(SIGINT, SIG_DFL);
 	if (rsp.got) {
 		printf("response:   seq=%u type=%u (%s)\n", rsp.seq, rsp.rsp_type, rsp_str(rsp.rsp_type));
 		if (rsp.rsp_type != AMDRNPU_WIRE_RSP_COMPLETE) { ret = 1; goto out_dma; }
