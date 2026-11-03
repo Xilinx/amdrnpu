@@ -22,6 +22,7 @@
 #        ./launch-sensor-pipeline.sh feat --frames 1000
 #        ./launch-sensor-pipeline.sh fusion --frames 1000
 #        ./launch-sensor-pipeline.sh orig-final --lockstep --slots 1
+#        ./launch-sensor-pipeline.sh orig-final --strix-slots 1   # ping-pong on T20 only
 #        ./launch-sensor-pipeline.sh --slots 1          # no overlap, for comparison
 #        ./launch-sensor-pipeline.sh --no-rpu           # local NPU only
 #        ./launch-sensor-pipeline.sh --no-strix         # T20 RPU only

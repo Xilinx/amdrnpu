@@ -25,6 +25,8 @@
 // Ping-pong: --slots S (default 2) buffer sets per side. Frame f uses slot
 // f % S, so both producers start frame f+1 while the final step still holds
 // frame f's OFMs; a producer only waits when the final step is S frames behind.
+// --rpu-slots / --strix-slots override S per side, e.g. --strix-slots 1 keeps
+// the local batch of f+1 from queueing on the local NPU behind f's final step.
 //
 // Setup happens once per side: RPU CREATE (ELF parsed once, hw_context +
 // kernel + run on the RPU) and the Strix hw_context + ELF module + kernel.
@@ -86,9 +88,12 @@ struct Opts {
 	uint32_t sensors = 3;          // per side
 	uint32_t frames = 100;
 	uint32_t slots = 2;            // 2 = ping-pong, 1 = serialized with the final step
+	uint32_t rpu_slots = 0;        // per-side override, 0 = --slots
+	uint32_t strix_slots = 0;
 	double   fps = 0;              // 0 = free-running
 	uint32_t post_us = 0;          // simulated final step
 	bool lockstep = false;         // also sync batch starts (see top)
+	bool rpu_spill_every_batch = false; // re-zero the T20 spills over MDB5 before every batch
 	std::string save_dir;          // OFMs of frame 0
 	std::string csv;               // per-frame timings
 	bool verbose = false, trace_dma = false;
@@ -141,6 +146,8 @@ void usage(const char *argv0)
 "  --sensors N          sensors per side (default 3; RPU side <= 8)\n"
 "  --frames F           frames to run (default 100)\n"
 "  --slots S            buffer sets per side (default 2 = ping-pong; 1 = no overlap)\n"
+"  --rpu-slots S        T20 RPU buffer sets (default --slots)\n"
+"  --strix-slots S      local Strix buffer sets (default --slots)\n"
 "  --fps R              sensor frame rate (default 0 = as fast as possible)\n"
 "  --post-us US         simulated final-step time per frame (default 0)\n"
 "  --lockstep           start both sides' batch f together: wait until both\n"
@@ -149,7 +156,10 @@ void usage(const char *argv0)
 "T20 RPU side (RPU_APP = xrt_batches.elf):\n"
 "  --rpu-elf FILE       AIE control ELF (zlib or raw)\n"
 "  --rpu-wts FILE       weights (sent once, CREATE)\n"
-"  --rpu-ifm F[,F..]    IFM file: one for all sensors, or one per sensor\n"
+"  --rpu-ifm F[,F..]    IFM file: one for all sensors, or one per sensor (written once)\n"
+"  --rpu-spill-every-batch  re-zero the T20 spills over MDB5 before every batch\n"
+"                       (default: zeroed once at setup; the spill only lives in\n"
+"                       T20 DDR, so there is no host copy to sync)\n"
 "  --rpu-spill SIZE     spill bytes per sensor (default 2408448)\n"
 "  --rpu-ofm SIZE       OFM bytes per sensor (default 1000)\n"
 "  --rpu-args W,I,S,O   kernel-arg index of wts,ifm,spill,ofm (default 0,1,2,3)\n"
@@ -161,7 +171,7 @@ void usage(const char *argv0)
 "  --strix-dir DIR      VAIML partition dir: DIR/unified-2x4x4.xclbin, DIR/ctrl.elf,\n"
 "                       DIR/wts32.bin (each overridable below)\n"
 "  --strix-xclbin FILE  --strix-elf FILE  --strix-wts FILE\n"
-"  --strix-ifm F[,F..]  IFM file: one for all sensors, or one per sensor\n"
+"  --strix-ifm F[,F..]  IFM file: one for all sensors, or one per sensor (synced once)\n"
 "  --strix-sizes I,W,S,O  ifm,wts,spill,ofm bytes (default 200704,26772456,301056,1000)\n"
 "  --strix-args I,W,S,O,C kernel-arg index of ifm,wts,spill,ofm,ctrl-pkt (default 3,4,5,6,7)\n"
 "  --strix-golden F[,F..] expected OFM: one for all sensors, or one per sensor\n"
@@ -243,9 +253,12 @@ Opts parse(int argc, char **argv)
 		else if (a == "--sensors")      o.sensors = num();
 		else if (a == "--frames")       o.frames = num();
 		else if (a == "--slots")        o.slots = num();
+		else if (a == "--rpu-slots")    o.rpu_slots = num();
+		else if (a == "--strix-slots")  o.strix_slots = num();
 		else if (a == "--fps")          o.fps = std::stod(val());
 		else if (a == "--post-us")      o.post_us = num();
 		else if (a == "--lockstep")     o.lockstep = true;
+		else if (a == "--rpu-spill-every-batch") o.rpu_spill_every_batch = true;
 		else if (a == "--save-out")     o.save_dir = val();
 		else if (a == "--csv")          o.csv = val();
 		else if (a == "--timeout-s")    o.timeout_s = num();
@@ -378,6 +391,10 @@ Opts parse(int argc, char **argv)
 		throw std::runtime_error("--no-rpu and --no-strix: nothing to run");
 	if (!o.sensors || !o.frames || !o.slots)
 		throw std::runtime_error("--sensors, --frames and --slots must be > 0");
+	if (!o.rpu_slots)
+		o.rpu_slots = o.slots;
+	if (!o.strix_slots)
+		o.strix_slots = o.slots;
 	auto check_ifm = [&](std::vector<std::string> &v, const char *opt) {
 		if (v.empty())
 			return;
@@ -441,6 +458,12 @@ std::vector<uint8_t> load_elf(const std::string &path)
 	return v;
 }
 
+uint64_t file_size(const std::string &path)
+{
+	std::ifstream f(path, std::ios::binary | std::ios::ate);
+	return f ? static_cast<uint64_t>(f.tellg()) : 0;
+}
+
 int top1(const uint8_t *p, size_t n)
 {
 	const auto *s = reinterpret_cast<const int8_t *>(p);
@@ -453,10 +476,10 @@ int top1(const uint8_t *p, size_t n)
 struct FrameStat {
 	uint64_t arrival = 0;          // sensor data available (fps) / first producer start
 	// RPU
-	uint64_t rpu_start = 0, rpu_sync_wait = 0, rpu_slot_wait = 0, rpu_h2d = 0, rpu_exec = 0, rpu_d2h = 0, rpu_end = 0;
+	uint64_t rpu_start = 0, rpu_sync_wait = 0, rpu_slot_wait = 0, rpu_spill_h2d = 0, rpu_exec = 0, rpu_d2h = 0, rpu_end = 0;
 	apu_xrt_batch_result rres{};
 	// Strix
-	uint64_t strix_start = 0, strix_sync_wait = 0, strix_slot_wait = 0, strix_h2d = 0, strix_setarg = 0,
+	uint64_t strix_start = 0, strix_sync_wait = 0, strix_slot_wait = 0, strix_spill_h2d = 0, strix_setarg = 0,
 		 strix_exec = 0, strix_d2h = 0, strix_end = 0;
 	// final step
 	uint64_t ready = 0, post_start = 0, post_end = 0;
@@ -465,7 +488,7 @@ struct FrameStat {
 	uint64_t fus_pack = 0, fus_exec = 0, fus_d2h = 0;
 	uint32_t fusion_mismatch = 0;
 	// final runs (inside the final step)
-	uint64_t fin_exec = 0, fin_d2h = 0;
+	uint64_t fin_spill_h2d = 0, fin_setarg = 0, fin_exec = 0, fin_d2h = 0;
 	uint32_t final_mismatch = 0;
 };
 
@@ -570,9 +593,11 @@ public:
 
 	// Producer side: block until frame f's sensor data has arrived, (with
 	// --lockstep) both sides finished batch f-1, and frame f's slot is free
-	// (the final step is done with frame f - slots). Returns false on abort.
-	bool acquire(uint32_t f, uint64_t *sync_wait, uint64_t *slot_wait, uint64_t *start)
+	// (the final step is done with frame f - this side's slots). Returns false
+	// on abort.
+	bool acquire(bool is_rpu, uint32_t f, uint64_t *sync_wait, uint64_t *slot_wait, uint64_t *start)
 	{
+		const uint32_t slots = is_rpu ? o_.rpu_slots : o_.strix_slots;
 		if (o_.fps > 0) {
 			const uint64_t at = t0_ + static_cast<uint64_t>(f * 1e9 / o_.fps);
 			while (now_ns() < at && !aborted())
@@ -587,7 +612,7 @@ public:
 			});
 		*sync_wait = now_ns() - t;
 		t = now_ns();
-		wait(lk, [&] { return f < consumed_ + o_.slots || abort_; });
+		wait(lk, [&] { return f < consumed_ + slots || abort_; });
 		*slot_wait = now_ns() - t;
 		*start = now_ns();
 		auto &a = fs_[f].arrival;
@@ -678,8 +703,9 @@ struct RpuSide {
 	std::vector<Slot> slots;
 	std::vector<std::vector<uint8_t>> golden;   // [sensor], empty = no check
 
-	// setup timings
-	uint64_t setup_sync_ns = 0;
+	// sizes (bytes) and setup timings
+	uint64_t sz_elf = 0, sz_elf_file = 0, sz_wts = 0;
+	uint64_t elf_sync_ns = 0, wts_sync_ns = 0, ifm_sync_ns = 0, spill_zero_ns = 0;
 	rbc_cmd_stat create{}, destroy{};
 	bool destroyed = false;
 
@@ -699,6 +725,9 @@ struct RpuSide {
 
 		auto elf = load_elf(o.rpu_elf);
 		auto wts = read_file(o.rpu_wts);
+		sz_elf = elf.size();
+		sz_elf_file = file_size(o.rpu_elf);
+		sz_wts = wts.size();
 		for (auto &p : o.rpu_ifm) {
 			ifm.push_back(read_file(p));
 			if (sz_ifm && ifm.back().size() != sz_ifm)
@@ -710,7 +739,7 @@ struct RpuSide {
 
 		chk(rbc_alloc(c, RBC_POOL_RPU, elf.size(), &elf_pa), "alloc ELF");
 		chk(rbc_alloc(c, RBC_POOL_DEV, wts.size(), &wts_pa), "alloc wts");
-		slots.resize(o.slots);
+		slots.resize(o.rpu_slots);
 		for (auto &s : slots) {
 			s.ifm_pa.resize(o.sensors); s.spill_pa.resize(o.sensors); s.ofm_pa.resize(o.sensors);
 			s.ofm.assign(o.sensors, std::vector<uint8_t>(o.rpu_sz_ofm));
@@ -724,25 +753,38 @@ struct RpuSide {
 		// once: ELF + weights to the device, spills zeroed, CREATE
 		uint64_t t = now_ns();
 		chk(rbc_write(c, elf_pa, elf.data(), elf.size()), "sync ELF");
+		elf_sync_ns = now_ns() - t;
+		t = now_ns();
 		chk(rbc_write(c, wts_pa, wts.data(), wts.size()), "sync wts");
-		setup_sync_ns = now_ns() - t;
+		wts_sync_ns = now_ns() - t;
+		t = now_ns();
 		for (auto &s : slots)
 			for (uint32_t i = 0; i < o.sensors; ++i)
 				chk(rbc_zero(c, s.spill_pa[i], o.rpu_sz_spill), "zero spill");
+		spill_zero_ns = now_ns() - t;
+		// IFMs are static sensor data: written once per slot here, never per batch
+		t = now_ns();
+		for (auto &s : slots)
+			for (uint32_t i = 0; i < o.sensors; ++i)
+				chk(rbc_write(c, s.ifm_pa[i], ifm[i].data(), sz_ifm), "sync ifm");
+		ifm_sync_ns = now_ns() - t;
 
 		rbc_karg fixed{o.rpu_arg_wts, wts_pa, wts.size()};
 		chk(rbc_create(c, elf_pa, elf.size(), &fixed, 1, &ctx_id, &create), "CREATE");
 		created = true;
 	}
 
-	// One frame: IFMs in, RUN (all sensors, every karg set on the RPU), OFMs out.
+	// One frame: (--rpu-spill-every-batch: spills re-zeroed), RUN (all sensors,
+	// every karg - IFM, spill, OFM - set on the RPU), OFMs out. The IFMs, ELF
+	// and weights were written once at setup.
 	void frame(uint32_t slot_idx, FrameStat &fs)
 	{
 		Slot &s = slots[slot_idx];
 		uint64_t t = now_ns();
-		for (uint32_t i = 0; i < o.sensors; ++i)
-			chk(rbc_write(c, s.ifm_pa[i], ifm[i].data(), sz_ifm), "sync ifm");
-		fs.rpu_h2d = now_ns() - t;
+		if (o.rpu_spill_every_batch)
+			for (uint32_t i = 0; i < o.sensors; ++i)
+				chk(rbc_zero(c, s.spill_pa[i], o.rpu_sz_spill), "zero spill");
+		fs.rpu_spill_h2d = now_ns() - t;
 
 		const uint32_t kidx[3] = {o.rpu_arg_ifm, o.rpu_arg_spill, o.rpu_arg_ofm};
 		std::vector<rbc_karg> e(o.sensors * 3u);
@@ -801,7 +843,9 @@ struct StrixSide {
 	std::vector<Slot> slots;
 	std::vector<std::vector<uint8_t>> golden;   // [sensor], empty = no check
 
-	uint64_t hwctx_ns = 0, elf_ns = 0, wts_ns = 0;
+	uint64_t sz_elf = 0, sz_elf_file = 0;
+	uint64_t hwctx_ns = 0, elf_parse_ns = 0, module_ns = 0, kernel_ns = 0, runs_ns = 0;
+	uint64_t wts_copy_ns = 0, wts_sync_ns = 0, ifm_copy_ns = 0, ifm_sync_ns = 0, spill_sync_ns = 0;
 
 	explicit StrixSide(const Opts &opts) : o(opts) {}
 
@@ -813,24 +857,35 @@ struct StrixSide {
 		hwctx = xrt::hw_context{dev, dev.register_xclbin(xclbin)};
 		hwctx_ns = now_ns() - t;
 
-		t = now_ns();
 		auto bytes = load_elf(o.strix_elf);
+		sz_elf = bytes.size();
+		sz_elf_file = file_size(o.strix_elf);
+		t = now_ns();
 		elf = xrt::elf{reinterpret_cast<const char *>(bytes.data()), bytes.size()};
+		elf_parse_ns = now_ns() - t;
+		t = now_ns();
 		mod = xrt::module{elf};
+		module_ns = now_ns() - t;
+		t = now_ns();
 		kern = xrt::ext::kernel{hwctx, mod, "DPU"};
+		kernel_ns = now_ns() - t;
+		// each run gets its own copy of the control code, synced to the device
+		t = now_ns();
 		for (uint32_t i = 0; i < o.sensors; ++i)
 			runs.emplace_back(kern);
-		elf_ns = now_ns() - t;
+		runs_ns = now_ns() - t;
 
-		t = now_ns();
 		wts = xrt::ext::bo{dev, o.strix_sz_wts};
+		t = now_ns();
 		{
 			auto d = read_file(o.strix_wts);
 			std::memset(wts.map<char *>(), 0, o.strix_sz_wts);
 			std::memcpy(wts.map<char *>(), d.data(), std::min<size_t>(d.size(), o.strix_sz_wts));
 		}
+		wts_copy_ns = now_ns() - t;
+		t = now_ns();
 		wts.sync(XCL_BO_SYNC_BO_TO_DEVICE);
-		wts_ns = now_ns() - t;
+		wts_sync_ns = now_ns() - t;
 
 		for (auto &p : o.strix_ifm) {
 			ifm.push_back(read_file(p));
@@ -839,7 +894,7 @@ struct StrixSide {
 		for (auto &p : o.strix_golden)
 			golden.push_back(read_file(p));
 
-		slots.resize(o.slots);
+		slots.resize(o.strix_slots);
 		for (auto &s : slots)
 			for (uint32_t i = 0; i < o.sensors; ++i) {
 				s.ifm.push_back(xrt::ext::bo{dev, o.strix_sz_ifm});
@@ -849,18 +904,38 @@ struct StrixSide {
 				if (o.strix_arg_spill >= 0 && o.strix_sz_spill)
 					s.spill.push_back(xrt::ext::bo{dev, o.strix_sz_spill});
 			}
+		// IFMs are static sensor data: copied and synced once per slot here,
+		// never per frame
+		t = now_ns();
+		for (auto &s : slots)
+			for (uint32_t i = 0; i < o.sensors; ++i)
+				std::memcpy(s.ifm[i].map<char *>(), ifm[i].data(), o.strix_sz_ifm);
+		ifm_copy_ns = now_ns() - t;
+		t = now_ns();
+		for (auto &s : slots)
+			for (auto &b : s.ifm)
+				b.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+		ifm_sync_ns = now_ns() - t;
+		// spills: zeroed here, synced to the device before every run (frame())
+		t = now_ns();
+		for (auto &s : slots)
+			for (auto &b : s.spill) {
+				std::memset(b.map<char *>(), 0, o.strix_sz_spill);
+				b.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+			}
+		spill_sync_ns = now_ns() - t;
 	}
 
-	// One frame: IFMs in, all runs queued (args set per run), wait all, OFMs out.
+	// One frame: spills to the device (IFMs, ELF and weights are already there,
+	// synced once at setup), all runs queued (args set per run), wait all,
+	// OFMs out.
 	void frame(uint32_t slot_idx, FrameStat &fs)
 	{
 		Slot &s = slots[slot_idx];
 		uint64_t t = now_ns();
-		for (uint32_t i = 0; i < o.sensors; ++i) {
-			std::memcpy(s.ifm[i].map<char *>(), ifm[i].data(), o.strix_sz_ifm);
-			s.ifm[i].sync(XCL_BO_SYNC_BO_TO_DEVICE);
-		}
-		fs.strix_h2d = now_ns() - t;
+		for (auto &b : s.spill)
+			b.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+		fs.strix_spill_h2d = now_ns() - t;
 
 		t = now_ns();
 		for (uint32_t i = 0; i < o.sensors; ++i) {
@@ -1024,10 +1099,11 @@ struct FusionSide {
 // Final runs on the local NPU: one single-input model, N runs per frame
 // ---------------------------------------------------------------------------
 // Simulated workload for the final step: the IFMs are static (filled and
-// synced once), every run has its own IFM/spill/OFM BO and its args are bound
-// once. Per frame: one xrt::runlist execute + wait (the N runs execute
-// atomically, in order) or N x start then N x wait; then the N OFMs are synced
-// back and checked.
+// synced once), every run has its own IFM/spill/OFM BO. Per frame: spills to
+// the device, every run's args set again (each request names its IFM, spill
+// and OFM), one xrt::runlist execute + wait (the N runs execute atomically, in
+// order) or N x start then N x wait; then the N OFMs are synced back and
+// checked.
 struct FinalSide {
 	const Opts &o;
 	xrt::device dev;
@@ -1042,7 +1118,8 @@ struct FinalSide {
 	std::vector<std::vector<uint8_t>> golden;   // [run], empty = no check
 	bool shared_hwctx = false;
 
-	uint64_t hwctx_ns = 0, elf_ns = 0, bo_ns = 0;
+	uint64_t sz_elf = 0, sz_elf_file = 0;
+	uint64_t hwctx_ns = 0, elf_ns = 0, bo_ns = 0, wts_sync_ns = 0, ifm_sync_ns = 0;
 
 	explicit FinalSide(const Opts &opts) : o(opts) {}
 
@@ -1062,6 +1139,8 @@ struct FinalSide {
 
 		t = now_ns();
 		auto bytes = load_elf(o.final_elf);
+		sz_elf = bytes.size();
+		sz_elf_file = file_size(o.final_elf);
 		elf = xrt::elf{reinterpret_cast<const char *>(bytes.data()), bytes.size()};
 		mod = xrt::module{elf};
 		kern = xrt::ext::kernel{hwctx, mod, "DPU"};
@@ -1074,31 +1153,27 @@ struct FinalSide {
 			std::memset(wts.map<char *>(), 0, o.final_sz_wts);
 			std::memcpy(wts.map<char *>(), d.data(), std::min<size_t>(d.size(), o.final_sz_wts));
 		}
+		uint64_t ts = now_ns();
 		wts.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+		wts_sync_ns = now_ns() - ts;
 		for (uint32_t r = 0; r < o.final_runs; ++r) {
 			auto d = read_file(o.final_ifm[r]);
 			ifm.push_back(xrt::ext::bo{dev, o.final_sz_ifm});
 			std::memset(ifm.back().map<char *>(), 0, o.final_sz_ifm);
 			std::memcpy(ifm.back().map<char *>(), d.data(), std::min<size_t>(d.size(), o.final_sz_ifm));
+			ts = now_ns();
 			ifm.back().sync(XCL_BO_SYNC_BO_TO_DEVICE);
+			ifm_sync_ns += now_ns() - ts;
 			ofm.push_back(xrt::ext::bo{dev, o.final_sz_ofm});
 			std::memset(ofm.back().map<char *>(), 0, o.final_sz_ofm);
 			ofm.back().sync(XCL_BO_SYNC_BO_TO_DEVICE);
-			if (o.final_arg_spill >= 0 && o.final_sz_spill)
+			if (o.final_arg_spill >= 0 && o.final_sz_spill) {
 				spill.push_back(xrt::ext::bo{dev, o.final_sz_spill});
+				std::memset(spill.back().map<char *>(), 0, o.final_sz_spill);
+			}
 
-			xrt::run run{kern};
-			run.set_arg(0, 3);
-			run.set_arg(1, 0);
-			run.set_arg(2, 0);
-			run.set_arg(o.final_arg_ifm, ifm[r]);
-			run.set_arg(o.final_arg_wts, wts);
-			run.set_arg(o.final_arg_ofm, ofm[r]);
-			if (!spill.empty())
-				run.set_arg(o.final_arg_spill, spill[r]);
-			if (o.final_arg_ctrl >= 0)
-				run.set_arg(o.final_arg_ctrl, 0);
-			runs.push_back(run);
+			runs.emplace_back(kern);
+			bind(r);
 		}
 		if (o.final_runlist) {
 			rlist = xrt::runlist{hwctx};
@@ -1110,9 +1185,35 @@ struct FinalSide {
 		bo_ns = now_ns() - t;
 	}
 
+	// Every request names its IFM, weights, spill and OFM BOs.
+	void bind(size_t r)
+	{
+		auto &run = runs[r];
+		run.set_arg(0, 3);
+		run.set_arg(1, 0);
+		run.set_arg(2, 0);
+		run.set_arg(o.final_arg_ifm, ifm[r]);
+		run.set_arg(o.final_arg_wts, wts);
+		run.set_arg(o.final_arg_ofm, ofm[r]);
+		if (!spill.empty())
+			run.set_arg(o.final_arg_spill, spill[r]);
+		if (o.final_arg_ctrl >= 0)
+			run.set_arg(o.final_arg_ctrl, 0);
+	}
+
 	void frame(FrameStat &fs)
 	{
 		uint64_t t = now_ns();
+		for (auto &b : spill)
+			b.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+		fs.fin_spill_h2d = now_ns() - t;
+
+		t = now_ns();
+		for (size_t r = 0; r < runs.size(); ++r)
+			bind(r);
+		fs.fin_setarg = now_ns() - t;
+
+		t = now_ns();
 		if (o.final_runlist) {
 			rlist.execute();
 			if (rlist.wait(std::chrono::seconds(o.timeout_s)) == std::cv_status::timeout)
@@ -1167,12 +1268,53 @@ void one(const char *name, uint64_t ns, const char *note = "")
 	std::printf("  %-34s %10.3f  %s\n", name, ns / 1e6, note);
 }
 
+// "<bytes> B, <MB/s> MB/s" note for a transfer
+std::string bw(uint64_t bytes, uint64_t ns, const char *what)
+{
+	char b[96];
+	std::snprintf(b, sizeof(b), "%s, %llu B, %.0f MB/s", what, static_cast<unsigned long long>(bytes),
+		      ns ? bytes * 1e3 / ns : 0.0);
+	return b;
+}
+
+void sizes(const char *side, uint64_t elf, uint64_t elf_file, uint64_t wts, uint64_t ifm, uint64_t spill,
+	   uint64_t ofm, uint32_t n, const char *per)
+{
+	std::printf("  %s:\n", side);
+	std::printf("    %-32s %12llu  on disk %llu\n", "ELF", static_cast<unsigned long long>(elf),
+		    static_cast<unsigned long long>(elf_file));
+	std::printf("    %-32s %12llu\n", "weights", static_cast<unsigned long long>(wts));
+	std::printf("    %-32s %12llu  x %u %s = %llu\n", "IFM", static_cast<unsigned long long>(ifm), n, per,
+		    static_cast<unsigned long long>(ifm * n));
+	std::printf("    %-32s %12llu  x %u %s = %llu\n", "spill", static_cast<unsigned long long>(spill), n, per,
+		    static_cast<unsigned long long>(spill * n));
+	std::printf("    %-32s %12llu  x %u %s = %llu\n", "OFM", static_cast<unsigned long long>(ofm), n, per,
+		    static_cast<unsigned long long>(ofm * n));
+}
+
 void report(const Opts &o, const RpuSide *rpu, const StrixSide *strix, const FusionSide *fusion,
 	    const FinalSide *fin, const std::vector<FrameStat> &fs, uint32_t n, uint64_t t0)
 {
+	std::printf("\n== Buffers, bytes\n");
+	if (rpu)
+		sizes("T20 RPU", rpu->sz_elf, rpu->sz_elf_file, rpu->sz_wts, rpu->sz_ifm, o.rpu_sz_spill,
+		      o.rpu_sz_ofm, o.sensors, "sensors");
+	if (strix)
+		sizes("local Strix NPU", strix->sz_elf, strix->sz_elf_file, o.strix_sz_wts, o.strix_sz_ifm,
+		      strix->slots.empty() || strix->slots[0].spill.empty() ? 0 : o.strix_sz_spill,
+		      o.strix_sz_ofm, o.sensors, "sensors");
+	if (fin)
+		sizes("final runs", fin->sz_elf, fin->sz_elf_file, o.final_sz_wts, o.final_sz_ifm,
+		      fin->spill.empty() ? 0 : o.final_sz_spill, o.final_sz_ofm, o.final_runs, "runs");
+
 	std::printf("\n== Setup (once), ms\n");
 	if (rpu) {
-		one("RPU sync ELF + weights", rpu->setup_sync_ns, "host -> T20 DDR over MDB5");
+		one("RPU ELF to device", rpu->elf_sync_ns, bw(rpu->sz_elf, rpu->elf_sync_ns, "MDB5 DMA").c_str());
+		one("RPU weights to device", rpu->wts_sync_ns, bw(rpu->sz_wts, rpu->wts_sync_ns, "MDB5 DMA").c_str());
+		one("RPU spills zeroed on device", rpu->spill_zero_ns,
+		    bw(o.rpu_sz_spill * o.sensors * o.rpu_slots, rpu->spill_zero_ns, "MDB5 DMA, all slots").c_str());
+		one("RPU IFMs to device", rpu->ifm_sync_ns,
+		    bw(rpu->sz_ifm * o.sensors * o.rpu_slots, rpu->ifm_sync_ns, "MDB5 DMA, all slots, once").c_str());
 		one("RPU CREATE (host send -> done)", rpu->create.exec_ns);
 		if (rpu->create.res.prof_magic == APU_XRT_BATCH_PROF_MAGIC) {
 			one("  RPU ELF parse", rpu->create.res.elf_parse_ns);
@@ -1183,8 +1325,18 @@ void report(const Opts &o, const RpuSide *rpu, const StrixSide *strix, const Fus
 	}
 	if (strix) {
 		one("Strix xclbin + hw_context", strix->hwctx_ns);
-		one("Strix ELF parse + module + kernel", strix->elf_ns, "incl. one xrt::run per sensor, reused every batch");
-		one("Strix weights BO + sync", strix->wts_ns);
+		one("Strix ELF parse (xrt::elf)", strix->elf_parse_ns);
+		one("Strix xrt::module", strix->module_ns);
+		one("Strix xrt::ext::kernel", strix->kernel_ns);
+		one("Strix xrt::run x sensors", strix->runs_ns, "per-run control code BO, reused every batch");
+		one("Strix weights memcpy to BO", strix->wts_copy_ns);
+		one("Strix weights to device", strix->wts_sync_ns, bw(o.strix_sz_wts, strix->wts_sync_ns, "BO sync").c_str());
+		one("Strix IFMs memcpy to BOs", strix->ifm_copy_ns, "all slots, once");
+		one("Strix IFMs to device", strix->ifm_sync_ns,
+		    bw(o.strix_sz_ifm * o.sensors * o.strix_slots, strix->ifm_sync_ns, "all slots, BO sync, once").c_str());
+		one("Strix spills zeroed + to device", strix->spill_sync_ns,
+		    bw(strix->slots.empty() || strix->slots[0].spill.empty() ? 0 : o.strix_sz_spill * o.sensors * o.strix_slots,
+		       strix->spill_sync_ns, "all slots, BO sync").c_str());
 	}
 	if (fusion) {
 		one("Fusion xclbin + hw_context", fusion->hwctx_ns, fusion->shared_hwctx ? "shares the Strix hw_context" : "");
@@ -1194,22 +1346,25 @@ void report(const Opts &o, const RpuSide *rpu, const StrixSide *strix, const Fus
 	if (fin) {
 		one("Final xclbin + hw_context", fin->hwctx_ns, fin->shared_hwctx ? "shares the Strix hw_context" : "");
 		one("Final ELF parse + module + kernel", fin->elf_ns);
-		one("Final BOs + IFMs + runs (+ runlist)", fin->bo_ns, "args bound once, static simulated IFMs");
+		one("Final BOs + IFMs + runs (+ runlist)", fin->bo_ns, "static simulated IFMs");
+		one("  final weights to device", fin->wts_sync_ns, bw(o.final_sz_wts, fin->wts_sync_ns, "BO sync").c_str());
+		one("  final IFMs to device", fin->ifm_sync_ns,
+		    bw(o.final_sz_ifm * o.final_runs, fin->ifm_sync_ns, "BO sync, all runs, once").c_str());
 	}
 	if (!n)
 		return;
 
-	Agg r_wait, r_h2d, r_exec, r_rexec, r_inf, r_inf_max, r_bind, r_d2h, r_total;
-	Agg s_wait, s_h2d, s_set, s_exec, s_inf, s_d2h, s_total;
+	Agg r_wait, r_spill, r_exec, r_rexec, r_inf, r_inf_max, r_bind, r_d2h, r_total;
+	Agg s_wait, s_spill, s_set, s_exec, s_inf, s_d2h, s_total;
 	Agg r_sync, s_sync, window, start_skew;
 	Agg lat, skew, post, held;
 	Agg f_pack, f_exec, f_d2h, f_total;
-	Agg n_exec, n_inf, n_d2h, n_total;
+	Agg n_spill, n_set, n_exec, n_inf, n_d2h, n_total;
 	uint32_t rpu_late = 0, mism_r = 0, mism_s = 0, mism_f = 0, mism_n = 0;
 	for (uint32_t f = 0; f < n; ++f) {
 		const auto &x = fs[f];
 		if (rpu) {
-			r_sync.add(x.rpu_sync_wait); r_wait.add(x.rpu_slot_wait); r_h2d.add(x.rpu_h2d); r_exec.add(x.rpu_exec);
+			r_sync.add(x.rpu_sync_wait); r_wait.add(x.rpu_slot_wait); r_spill.add(x.rpu_spill_h2d); r_exec.add(x.rpu_exec);
 			r_d2h.add(x.rpu_d2h); r_total.add(x.rpu_end - x.rpu_start);
 			if (x.rres.prof_magic == APU_XRT_BATCH_PROF_MAGIC) {
 				r_rexec.add(x.rres.exec_ns);
@@ -1220,7 +1375,7 @@ void report(const Opts &o, const RpuSide *rpu, const StrixSide *strix, const Fus
 			mism_r += x.rpu_mismatch;
 		}
 		if (strix) {
-			s_sync.add(x.strix_sync_wait); s_wait.add(x.strix_slot_wait); s_h2d.add(x.strix_h2d); s_set.add(x.strix_setarg);
+			s_sync.add(x.strix_sync_wait); s_wait.add(x.strix_slot_wait); s_spill.add(x.strix_spill_h2d); s_set.add(x.strix_setarg);
 			s_exec.add(x.strix_exec); s_inf.add(static_cast<double>(x.strix_exec) / o.sensors);
 			s_d2h.add(x.strix_d2h); s_total.add(x.strix_end - x.strix_start);
 			mism_s += x.strix_mismatch;
@@ -1238,8 +1393,9 @@ void report(const Opts &o, const RpuSide *rpu, const StrixSide *strix, const Fus
 			mism_f += x.fusion_mismatch;
 		}
 		if (fin) {
+			n_spill.add(x.fin_spill_h2d); n_set.add(x.fin_setarg);
 			n_exec.add(x.fin_exec); n_inf.add(static_cast<double>(x.fin_exec) / o.final_runs);
-			n_d2h.add(x.fin_d2h); n_total.add(x.fin_exec + x.fin_d2h);
+			n_d2h.add(x.fin_d2h); n_total.add(x.fin_spill_h2d + x.fin_setarg + x.fin_exec + x.fin_d2h);
 			mism_n += x.final_mismatch;
 		}
 		lat.add(x.ready - x.arrival);
@@ -1247,8 +1403,8 @@ void report(const Opts &o, const RpuSide *rpu, const StrixSide *strix, const Fus
 		held.add(x.post_end - x.arrival);
 	}
 
-	std::printf("\n== Per frame (%u frames, %u sensors per side, %u slot%s, %s), host-measured, ms\n",
-		    n, o.sensors, o.slots, o.slots > 1 ? "s" : "",
+	std::printf("\n== Per frame (%u frames, %u sensors per side, slots T20 %u / Strix %u, %s), host-measured, ms\n",
+		    n, o.sensors, o.rpu_slots, o.strix_slots,
 		    o.lockstep ? "lockstep: start + finish sync" : "finish sync only");
 	std::printf("  %-34s %10s %10s %10s %10s %10s\n", "", "avg", "min", "p50", "p99", "max");
 	if (rpu) {
@@ -1256,11 +1412,16 @@ void report(const Opts &o, const RpuSide *rpu, const StrixSide *strix, const Fus
 		if (o.lockstep && strix)
 			r_sync.print("waiting for Strix batch f-1", "lockstep start sync");
 		r_wait.print("waiting for a free slot", "final step behind");
-		r_h2d.print("IFMs to device", "MDB5 DMA");
+		std::printf("    %-32s %10s  written once at setup, like the ELF and weights\n", "IFMs to device", "-");
+		if (o.rpu_spill_every_batch)
+			r_spill.print("spills zeroed on device", "MDB5 DMA, all sensors, every batch");
+		else
+			std::printf("    %-32s %10s  only in T20 DDR, zeroed once at setup (--rpu-spill-every-batch)\n",
+				    "spills", "-");
 		r_exec.print("RUN (host send -> done)");
 		r_rexec.print("  RPU AIE execution, all sensors", "start -> wait, summed");
 		r_bind.print("  RPU set_arg, all sensors", "every karg, every sensor");
-		r_d2h.print("OFMs from device", "MDB5 DMA");
+		r_d2h.print("OFMs from device", "MDB5 DMA, all sensors");
 		r_total.print("batch total", "host: batch start -> OFMs on host");
 		r_inf.print("model run time / inference", "RPU-measured, per sensor");
 		r_inf_max.print("model run time, slowest sensor");
@@ -1270,10 +1431,11 @@ void report(const Opts &o, const RpuSide *rpu, const StrixSide *strix, const Fus
 		if (o.lockstep && rpu)
 			s_sync.print("waiting for T20 batch f-1", "lockstep start sync");
 		s_wait.print("waiting for a free slot", "final step behind");
-		s_h2d.print("IFMs to device", "memcpy + BO sync");
+		std::printf("    %-32s %10s  synced once at setup, like the ELF and weights\n", "IFMs to device", "-");
+		s_spill.print("spills to device", "BO sync, all sensors, every run");
 		s_set.print("set_arg, all runs");
 		s_exec.print("execution, all runs", "first start -> last wait");
-		s_d2h.print("OFMs from device", "BO sync");
+		s_d2h.print("OFMs from device", "BO sync, all sensors");
 		s_total.print("batch total", "host: batch start -> OFMs on host");
 		s_inf.print("model run time / inference", "execution / sensors (runs queued)");
 	}
@@ -1297,6 +1459,8 @@ void report(const Opts &o, const RpuSide *rpu, const StrixSide *strix, const Fus
 	if (fin) {
 		std::printf("  final runs (%u x, %s, local NPU):\n", o.final_runs,
 			    o.final_runlist ? "one xrt::runlist" : "N start/wait");
+		n_spill.print("spills to device", "BO sync, all runs, every frame");
+		n_set.print("set_arg, all runs", "IFM/wts/spill/OFM per request");
 		n_exec.print("execution, all runs", o.final_runlist ? "runlist execute -> wait" : "first start -> last wait");
 		n_inf.print("model run time / inference", "execution / runs");
 		n_d2h.print("OFMs from device", "BO sync");
@@ -1323,18 +1487,18 @@ void write_csv(const std::string &path, const std::vector<FrameStat> &fs, uint32
 {
 	std::ofstream f(path);
 	auto r = [&](uint64_t t) { return t ? static_cast<int64_t>(t - t0) : -1; };
-	f << "frame,arrival,rpu_start,rpu_sync_wait,rpu_slot_wait,rpu_h2d,rpu_exec,rpu_aie_exec,rpu_d2h,rpu_end,"
-	     "strix_start,strix_sync_wait,strix_slot_wait,strix_h2d,strix_setarg,strix_exec,strix_d2h,strix_end,"
-	     "ready,post_start,post_end,fus_pack,fus_exec,fus_d2h,fin_exec,fin_d2h\n";
+	f << "frame,arrival,rpu_start,rpu_sync_wait,rpu_slot_wait,rpu_spill_h2d,rpu_exec,rpu_aie_exec,rpu_d2h,rpu_end,"
+	     "strix_start,strix_sync_wait,strix_slot_wait,strix_spill_h2d,strix_setarg,strix_exec,strix_d2h,strix_end,"
+	     "ready,post_start,post_end,fus_pack,fus_exec,fus_d2h,fin_spill_h2d,fin_setarg,fin_exec,fin_d2h\n";
 	for (uint32_t i = 0; i < n; ++i) {
 		const auto &x = fs[i];
 		f << i << ',' << r(x.arrival) << ',' << r(x.rpu_start) << ',' << x.rpu_sync_wait << ',' << x.rpu_slot_wait << ','
-		  << x.rpu_h2d << ',' << x.rpu_exec << ',' << x.rres.exec_ns << ',' << x.rpu_d2h << ','
+		  << x.rpu_spill_h2d << ',' << x.rpu_exec << ',' << x.rres.exec_ns << ',' << x.rpu_d2h << ','
 		  << r(x.rpu_end) << ',' << r(x.strix_start) << ',' << x.strix_sync_wait << ',' << x.strix_slot_wait << ','
-		  << x.strix_h2d << ',' << x.strix_setarg << ',' << x.strix_exec << ',' << x.strix_d2h
+		  << x.strix_spill_h2d << ',' << x.strix_setarg << ',' << x.strix_exec << ',' << x.strix_d2h
 		  << ',' << r(x.strix_end) << ',' << r(x.ready) << ',' << r(x.post_start) << ','
 		  << r(x.post_end) << ',' << x.fus_pack << ',' << x.fus_exec << ',' << x.fus_d2h << ','
-		  << x.fin_exec << ',' << x.fin_d2h << '\n';
+		  << x.fin_spill_h2d << ',' << x.fin_setarg << ',' << x.fin_exec << ',' << x.fin_d2h << '\n';
 	}
 }
 
@@ -1360,9 +1524,9 @@ int main(int argc, char **argv)
 	std::atomic<bool> failed{false};
 
 	std::signal(SIGINT, on_sigint);
-	std::printf("sensor_pipeline: %u frames, %u sensors on %s%s%s, %u slot%s, %s, fps %s, final step %u us\n",
+	std::printf("sensor_pipeline: %u frames, %u sensors on %s%s%s, slots T20 %u / Strix %u, %s, fps %s, final step %u us\n",
 		    o.frames, o.sensors, o.use_rpu ? "T20 RPU" : "", o.use_rpu && o.use_strix ? " + " : "",
-		    o.use_strix ? "local Strix NPU" : "", o.slots, o.slots > 1 ? "s" : "",
+		    o.use_strix ? "local Strix NPU" : "", o.rpu_slots, o.strix_slots,
 		    o.lockstep ? "lockstep" : "finish sync only",
 		    o.fps > 0 ? std::to_string(o.fps).c_str() : "free-running", o.post_us);
 
@@ -1406,9 +1570,9 @@ int main(int argc, char **argv)
 			for (uint32_t f = 0; f < o.frames; ++f) {
 				auto &x = fs[f];
 				uint64_t sync, wait, start;
-				if (!pl.acquire(f, &sync, &wait, &start))
+				if (!pl.acquire(is_rpu, f, &sync, &wait, &start))
 					return;
-				const uint32_t slot = f % o.slots;
+				const uint32_t slot = f % (is_rpu ? o.rpu_slots : o.strix_slots);
 				if (is_rpu) {
 					x.rpu_sync_wait = sync; x.rpu_slot_wait = wait; x.rpu_start = start;
 					rpu->frame(slot, x);
@@ -1436,14 +1600,12 @@ int main(int argc, char **argv)
 				auto &x = fs[f];
 				x.ready = now_ns();
 				x.post_start = x.ready;
-				const uint32_t slot = f % o.slots;
-
 				std::vector<const uint8_t *> ofm_r, ofm_s;
 				if (rpu)
-					for (auto &b : rpu->slots[slot].ofm)
+					for (auto &b : rpu->slots[f % o.rpu_slots].ofm)
 						ofm_r.push_back(b.data());
 				if (strix)
-					for (auto &b : strix->slots[slot].ofm)
+					for (auto &b : strix->slots[f % o.strix_slots].ofm)
 						ofm_s.push_back(b.map<const uint8_t *>());
 
 				auto differs = [](const uint8_t *p, size_t n, const std::vector<uint8_t> &g) {

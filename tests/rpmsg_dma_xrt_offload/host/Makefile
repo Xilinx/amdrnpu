@@ -49,9 +49,10 @@ TRANSPORT := $(RPMSG)/rpmsg_lite_dma.c \
 LDLIBS := -lz
 
 # Generic descriptor-driven host, ResNet50-specialised host (IFM packing,
-# fixed karg layout, OFM readback) and the APU_XRT_SETS_TEST (one kernel,
-# N arg sets) host. All reuse the same transport.
-BINS := xrt_offload_host resnet_offload_host sets_host sets_host_trace
+# fixed karg layout, OFM readback), multi-model latency host and the
+# APU_XRT_SETS_TEST (one kernel, N arg sets) host and the xrt_batches
+# (CREATE once / RUN batches / DESTROY) host. All reuse the same transport.
+BINS := xrt_offload_host resnet_offload_host multi_model_host sets_host sets_host_trace batch_host
 ifneq ($(wildcard $(XRT)/include/xrt/xrt_device.h),)
 BINS += sensor_pipeline
 endif
@@ -74,10 +75,16 @@ xrt_offload_host: xrt_offload_host.c $(TRANSPORT)
 resnet_offload_host: resnet_offload_host.c $(TRANSPORT)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $^ $(LDLIBS) -o $@
 
+multi_model_host: multi_model_host.c $(TRANSPORT)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $^ $(LDLIBS) -o $@
+
 sets_host: sets_host.c $(TRANSPORT)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $^ $(LDLIBS) -o $@
 
 sets_host_trace: sets_host_trace.c $(TRANSPORT)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $^ $(LDLIBS) -o $@
+
+batch_host: batch_host.c $(TRANSPORT)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $^ $(LDLIBS) -o $@
 
 # T20 RPU (xrt_batches, via rpu_batch_client) + local NPU (XRT) frame pipeline.
